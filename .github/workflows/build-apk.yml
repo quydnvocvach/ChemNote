@@ -68,9 +68,11 @@ jobs:
             cat << 'EOF' >> android/build.gradle.kts
 
           subprojects {
-              afterEvaluate {
-                  extensions.findByType(com.android.build.gradle.BaseExtension::class.java)?.apply {
-                      compileSdkVersion(36)
+              if (name != "app") {
+                  afterEvaluate {
+                      extensions.findByType(com.android.build.gradle.BaseExtension::class.java)?.apply {
+                          compileSdkVersion(36)
+                      }
                   }
               }
           }
@@ -79,10 +81,12 @@ jobs:
             cat << 'EOF' >> android/build.gradle
 
           subprojects {
-              afterEvaluate { project ->
-                  if (project.hasProperty("android")) {
-                      project.android {
-                          compileSdkVersion 36
+              if (name != "app") {
+                  afterEvaluate { project ->
+                      if (project.hasProperty("android")) {
+                          project.android {
+                              compileSdkVersion 36
+                          }
                       }
                   }
               }
@@ -109,7 +113,7 @@ jobs:
           flutter build apk --release 2>&1 | tee build_output.txt
           BUILD_EXIT=${PIPESTATUS[0]}
           if [ "$BUILD_EXIT" -ne 0 ]; then
-            tail -n 30 build_output.txt | while IFS= read -r line; do
+            tr '\r' '\n' < build_output.txt | grep -v -E "Unzipping|Downloading|^\[" | grep -E "FAILURE:|What went wrong|Execution failed|Error:|Exception:|Cannot |e: |Caused by:" -A 2 | tail -n 25 | while IFS= read -r line; do
               echo "::error title=ApkBuild::$line"
             done
           fi
