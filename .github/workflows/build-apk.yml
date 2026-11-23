@@ -32,30 +32,55 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Generate modern Android Gradle setup while preserving custom MatePad native files
+      - name: Generate modern Android Gradle setup while preserving custom MatePad native files & fixed signing key
         run: |
           mkdir -p /tmp/chemnote_backup
           cp -r android/app/src/main/kotlin /tmp/chemnote_backup/kotlin
           cp android/app/src/main/AndroidManifest.xml /tmp/chemnote_backup/AndroidManifest.xml
           cp -r android/app/src/main/res /tmp/chemnote_backup/res
+          cp android/app/chemnote-release.p12 /tmp/chemnote_backup/chemnote-release.p12
 
           # Remove legacy Groovy files so flutter create generates clean Flutter Stable Gradle KTS files
           rm -rf android
           flutter create --platforms=android --org com.chemnote --project-name chemnote .
           rm -f test/widget_test.dart
 
-          # Restore custom 144Hz + M-Pencil 3 + MediaRecorder/MediaPlayer native files & vector icons
+          # Restore custom 144Hz + M-Pencil 3 + MediaRecorder/MediaPlayer + MediaStore native files & vector icons
           rm -rf android/app/src/main/kotlin
           cp -r /tmp/chemnote_backup/kotlin android/app/src/main/kotlin
           cp /tmp/chemnote_backup/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
           cp -r /tmp/chemnote_backup/res/* android/app/src/main/res/
+          cp /tmp/chemnote_backup/chemnote-release.p12 android/app/chemnote-release.p12
 
-          # Patch generated build.gradle.kts (or build.gradle) for com.chemnote.app, minSdk 23, compileSdk 36
+          # Convert fixed PKCS12 keystore to JKS with deterministic alias "chemnote" so every future APK shares the exact same signature
+          SRC_ALIAS=$(keytool -list -keystore android/app/chemnote-release.p12 -storetype PKCS12 -storepass chemnote2026 | grep "PrivateKeyEntry" | head -n 1 | cut -d',' -f1)
+          keytool -importkeystore \
+            -srckeystore android/app/chemnote-release.p12 -srcstoretype PKCS12 -srcstorepass chemnote2026 -srcalias "$SRC_ALIAS" \
+            -destkeystore android/app/chemnote-release.jks -deststoretype JKS -deststorepass chemnote2026 -destalias chemnote -destkeypass chemnote2026 -noprompt
+
+          # Patch generated build.gradle.kts (or build.gradle) for com.chemnote.app, minSdk 23, compileSdk 36 & permanent release signing
           if [ -f android/app/build.gradle.kts ]; then
             sed -i 's/applicationId = .*/applicationId = "com.chemnote.app"/' android/app/build.gradle.kts
             sed -i 's/namespace = .*/namespace = "com.chemnote.app"/' android/app/build.gradle.kts
             sed -i 's/minSdk = .*/minSdk = 23/' android/app/build.gradle.kts
             sed -i 's/compileSdk = .*/compileSdk = 36/' android/app/build.gradle.kts
+            python3 - << 'PYEOF'
+          p = "android/app/build.gradle.kts"
+          txt = open(p, "r", encoding="utf-8").read()
+          signing_block = '''    signingConfigs {
+              create("release") {
+                  storeFile = file("chemnote-release.jks")
+                  storePassword = "chemnote2026"
+                  keyAlias = "chemnote"
+                  keyPassword = "chemnote2026"
+              }
+          }
+
+              buildTypes {'''
+          txt = txt.replace("    buildTypes {", signing_block, 1)
+          txt = txt.replace('signingConfig = signingConfigs.getByName("debug")', 'signingConfig = signingConfigs.getByName("release")')
+          open(p, "w", encoding="utf-8").write(txt)
+          PYEOF
           elif [ -f android/app/build.gradle ]; then
             sed -i 's/applicationId .*/applicationId = "com.chemnote.app"/' android/app/build.gradle
             sed -i 's/namespace .*/namespace = "com.chemnote.app"/' android/app/build.gradle
@@ -124,7 +149,6 @@ jobs:
             done
           fi
           exit $BUILD_EXIT
-          cp build/app/outputs/flutter-apk/app-release.apk ChemNote-MatePad-11.5s-release.apk
 
       - name: Rename Release APK
         run: cp build/app/outputs/flutter-apk/app-release.apk ChemNote-MatePad-11.5s-release.apk
@@ -136,18 +160,16 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.2.0 with APK
+      - name: Publish Release v3.2.1 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.2.0
-          name: ChemNote Pro v3.2.0 (Huawei MatePad 11.5"S & Android)
+          tag_name: v3.2.1
+          name: ChemNote Pro v3.2.1 (Huawei MatePad 11.5"S & Android)
           body: |
-            ### ChemNote Pro v3.2.0 — Tinh chỉnh phần cứng Huawei MatePad 11.5"S + M-Pencil 3
-            - **0ms độ trễ bút & Zoom Window 144Hz:** Loại bỏ hoàn toàn `setState` trong `onPointerMove`, tách `ValueNotifier` cho nét bút sống & Laser, tắt vòng tròn lơ lửng theo đầu bút.
-            - **Cuộn 1 ngón, phóng to/thu nhỏ 2 ngón & viết tay mượt mà:** Thống nhất `InteractiveViewer` không xung đột cuộn; khóa trôi trang khi dùng Laser, Thước kẻ, kéo ảnh/Sticky Note/Text/Stencil.
-            - **Cỡ nét bút chuẩn xác (`0.5 -> 5.0`)**, thanh bút ưa thích sát mép trái màn hình, chèn Ảnh/Sticker/Stencil/Text/Sticky Note ngay **giữa khung hình đang xem**.
-            - **Gạch xóa nhanh (Scribble-to-Erase)** nhạy chuẩn xác 4 nét gạch, sửa nút Con mắt bật/tắt mượt mà.
-            - **Thư mục xuất PDF mặc định:** Tự động lưu vào `Documents/ChemNote` hoặc tùy chọn thư mục trong Cài đặt.
+            ### ChemNote Pro v3.2.1 — Chữ ký APK cố định vĩnh viễn & Cài đặt ngay trên Thư viện
+            - **Chữ ký APK cố định (Permanent Release Keystore):** Từ bản `v3.2.1` trở đi, mọi bản cập nhật sau đều cài đè trực tiếp không cần gỡ bản cũ, giữ nguyên 100% ghi chú!
+            - **Mục Cài đặt & Cập nhật ngay trên thanh bên Thư viện:** Kiểm tra cập nhật APK, chọn Thư mục xuất PDF mặc định (`Documents/ChemNote`), và đổi Giao diện Sáng/Tối ngay từ màn hình chính.
+            - Bao gồm toàn bộ 11 tinh chỉnh phần cứng Huawei MatePad 11.5"S + M-Pencil 3 từ `v3.2.0`.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

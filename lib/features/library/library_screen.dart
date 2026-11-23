@@ -11,6 +11,7 @@ import '../../core/models/folder.dart';
 import '../../core/models/note_page.dart';
 import '../../core/models/notebook.dart';
 import '../../core/providers/app_state.dart';
+import '../../core/services/app_updater_service.dart';
 import '../../core/theme/app_theme.dart';
 import '../canvas/note_editor_screen.dart';
 import '../pdf/pdf_import_service.dart';
@@ -278,7 +279,123 @@ class _LibraryScreenState extends State<LibraryScreen> {
             );
           },
         ),
+        _SidebarTile(
+          icon: Icons.settings_outlined,
+          label: 'Cài đặt & Cập nhật',
+          selected: false,
+          onTap: () {
+            if (closeDrawer && Navigator.of(context).canPop()) {
+              Navigator.of(context).pop();
+            }
+            _showLibrarySettingsSheet(context);
+          },
+        ),
       ],
+    );
+  }
+
+  void _showLibrarySettingsSheet(BuildContext context) {
+    bool checkingUpdate = false;
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          final state = ctx.watch<AppState>();
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10, left: 4),
+                    child: Text(
+                      'Cài đặt ChemNote',
+                      style: Theme.of(ctx).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                    ),
+                  ),
+                  SwitchListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                    secondary: Icon(
+                      state.isDarkMode
+                          ? Icons.dark_mode_outlined
+                          : Icons.light_mode_outlined,
+                    ),
+                    title: const Text('Giao diện Tối (Obsidian Dark)'),
+                    subtitle: Text(
+                      state.isDarkMode ? 'Đang bật chế độ tối' : 'Đang bật chế độ sáng',
+                    ),
+                    value: state.isDarkMode,
+                    onChanged: (val) => state.setDarkMode(val),
+                  ),
+                  const Divider(height: 1),
+                  ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                    leading: const Icon(Icons.folder_open_outlined),
+                    title: const Text('Thư mục xuất PDF mặc định'),
+                    subtitle: Text(
+                      state.pdfExportDirectory ?? 'Documents/ChemNote',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: const Icon(Icons.chevron_right_rounded),
+                    onTap: () async {
+                      final dir = await FilePicker.platform.getDirectoryPath();
+                      if (dir != null && dir.trim().isNotEmpty) {
+                        state.setPdfExportDirectory(dir);
+                      }
+                    },
+                  ),
+                  const Divider(height: 1),
+                  ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                    leading: checkingUpdate
+                        ? const SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.system_update_outlined),
+                    title: const Text('Kiểm tra cập nhật APK'),
+                    subtitle: const Text('Phiên bản hiện tại: v$kAppVersion'),
+                    trailing: const Icon(Icons.chevron_right_rounded),
+                    onTap: checkingUpdate
+                        ? null
+                        : () async {
+                            setSheetState(() => checkingUpdate = true);
+                            final info = await AppUpdaterService.checkForUpdate();
+                            if (!ctx.mounted) return;
+                            setSheetState(() => checkingUpdate = false);
+                            if (info.errorMessage != null) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text(info.errorMessage!)),
+                              );
+                            } else if (info.hasUpdate) {
+                              Navigator.of(ctx).pop();
+                              await AppUpdaterService.openDownloadUrl(
+                                info.downloadUrl,
+                              );
+                            } else {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'Bạn đang dùng phiên bản mới nhất (v$kAppVersion).',
+                                  ),
+                                ),
+                              );
+                            }
+                          },
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 
