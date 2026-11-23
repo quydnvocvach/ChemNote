@@ -1,0 +1,19 @@
+{
+  "name": "ChemNote Pro — Sổ tay Hóa học",
+  "short_name": "ChemNote",
+  "description": "Sổ tay Hóa học Pro cho Huawei MatePad 11.5\"S & M-Pencil 3: 118 nguyên tố, 34 công thức, 21 khuôn, cân bằng PT ion, ghi âm bài giảng đồng bộ nét viết, PDF.js & Google Drive Sync.",
+  "start_url": "./chemnote_preview.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0B0C10",
+  "theme_color": "#16181D",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

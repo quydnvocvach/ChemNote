@@ -1,0 +1,895 @@
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
+
+import 'package:path_provider/path_provider.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
+import 'package:share_plus/share_plus.dart';
+
+import '../../core/models/drawing_elements.dart';
+import '../../core/models/note_page.dart';
+import '../../core/models/notebook.dart';
+
+/// Dịch vụ xuất sổ tay `Notebook` sang tệp PDF nhiều trang (gồm giấy nền/PDF gốc,
+/// nét viết tay, văn bản, hình ảnh và các khuôn vẽ Hóa học), đồng thời hỗ trợ in & chia sẻ.
+class PdfExportService {
+  PdfExportService({Directory? overrideExportDir})
+      : _overrideExportDir = overrideExportDir;
+
+  final Directory? _overrideExportDir;
+
+  /// Kích thước logic tham chiếu của khung vẽ canvas (tỷ lệ chuẩn A4).
+  static const double defaultCanvasWidth = 794.0;
+  static const double defaultCanvasHeight = 1123.0;
+
+  /// Tạo dữ liệu nhị phân PDF nhiều trang từ một `Notebook`.
+  Future<Uint8List> buildNotebookPdfBytes(
+    Notebook notebook, {
+    double canvasWidth = defaultCanvasWidth,
+    double canvasHeight = defaultCanvasHeight,
+  }) async {
+    final doc = pw.Document(
+      title: notebook.title,
+      author: 'ChemNote',
+      creator: 'ChemNote Flutter',
+    );
+
+    final pages = notebook.pages.isEmpty
+        ? <NotePage>[
+            NotePage(
+              id: 'empty',
+              index: 0,
+              templateType: notebook.defaultTemplate,
+              paperColor: notebook.defaultPaperColor,
+              isLandscape: notebook.defaultOrientationLandscape,
+              updatedAt: notebook.updatedAt,
+            ),
+          ]
+        : notebook.pages;
+
+    for (final page in pages) {
+      final pageFormat =
+          page.isLandscape ? PdfPageFormat.a4.landscape : PdfPageFormat.a4;
+      final logicalWidth = page.isLandscape ? canvasHeight : canvasWidth;
+      final logicalHeight = page.isLandscape ? canvasWidth : canvasHeight;
+      final scaleX = pageFormat.width / logicalWidth;
+      final scaleY = pageFormat.height / logicalHeight;
+
+      // Tải trước ảnh nền PDF (nếu có)
+      pw.MemoryImage? pdfBgImage;
+      if (page.pdfBackgroundPath != null &&
+          page.pdfBackgroundPath!.isNotEmpty) {
+        final bgFile = File(page.pdfBackgroundPath!);
+        if (await bgFile.exists()) {
+          try {
+            pdfBgImage = pw.MemoryImage(await bgFile.readAsBytes());
+          } catch (_) {}
+        }
+      }
+
+      // Tải trước các ảnh đính kèm trên trang
+      final loadedImages = <String, pw.MemoryImage>{};
+      for (final img in page.imageElements) {
+        if (img.filePath.isEmpty) continue;
+        final file = File(img.filePath);
+        if (await file.exists()) {
+          try {
+            loadedImages[img.id] = pw.MemoryImage(await file.readAsBytes());
+          } catch (_) {}
+        }
+      }
+
+      doc.addPage(
+        pw.Page(
+          pageFormat: pageFormat,
+          margin: pw.EdgeInsets.zero,
+          build: (pw.Context ctx) {
+            final bgColor = _paperPdfColor(page.paperColor);
+            final lineColor = _templateLineColor(page.paperColor);
+
+            return pw.Container(
+              width: pageFormat.width,
+              height: pageFormat.height,
+              color: bgColor,
+              child: pw.Stack(
+                children: [
+                  // 1. Ảnh nền PDF gốc hoặc mẫu giấy Hóa học
+                  if (pdfBgImage != null)
+                    pw.Positioned.fill(
+                      child: pw.Image(pdfBgImage, fit: pw.BoxFit.contain),
+                    )
+                  else
+                    pw.Positioned.fill(
+                      child: pw.CustomPaint(
+                        size: PdfPoint(pageFormat.width, pageFormat.height),
+                        painter: (PdfGraphics canvas, PdfPoint size) {
+                          _paintPaperTemplate(
+                            canvas,
+                            size,
+                            page.templateType,
+                            lineColor,
+                            page.paperColor == PaperColorType.dark,
+                          );
+                        },
+                      ),
+                    ),
+
+                  // 2. Các hình ảnh được chèn vào trang (hỗ trợ cắt không phá hủy cropLeft/Top/Right/Bottom)
+                  for (final img in page.imageElements)
+                    if (loadedImages.containsKey(img.id))
+                      _buildCroppedPdfImage(
+                        img,
+                        loadedImages[img.id]!,
+                        scaleX,
+                        scaleY,
+                      ),
+
+                  // 2b. Các thẻ tệp tin đính kèm (PDF, DOC, PPT, tệp khác)
+                  for (final att in page.attachmentElements)
+                    _buildAttachmentChip(att, scaleX, scaleY),
+
+                  // 3. Các khuôn vẽ Hóa học (stencils) + nhãn vector
+                  if (page.stencilElements.isNotEmpty)
+                    pw.Positioned.fill(
+                      child: pw.CustomPaint(
+                        size: PdfPoint(pageFormat.width, pageFormat.height),
+                        painter: (PdfGraphics canvas, PdfPoint size) {
+                          for (final stencil in page.stencilElements) {
+                            _paintStencilVector(
+                              canvas,
+                              size,
+                              stencil,
+                              scaleX,
+                              scaleY,
+                            );
+                          }
+                        },
+                      ),
+                    ),
+                  for (final stencil in page.stencilElements)
+                    pw.Positioned(
+                      left: stencil.x * scaleX,
+                      top: (stencil.y + stencil.height) * scaleY + 2,
+                      child: pw.Container(
+                        width: stencil.width * scaleX,
+                        alignment: pw.Alignment.center,
+                        child: pw.Text(
+                          _stencilDisplayLabel(stencil.stencilId),
+                          style: pw.TextStyle(
+                            fontSize: 8,
+                            color: _pdfColorFromArgb(stencil.colorValue),
+                            fontWeight: pw.FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+
+                  // 4. Các nét vẽ tay & hình học
+                  if (page.strokes.isNotEmpty)
+                    pw.Positioned.fill(
+                      child: pw.CustomPaint(
+                        size: PdfPoint(pageFormat.width, pageFormat.height),
+                        painter: (PdfGraphics canvas, PdfPoint size) {
+                          for (final stroke in page.strokes) {
+                            _paintStroke(canvas, size, stroke, scaleX, scaleY);
+                          }
+                        },
+                      ),
+                    ),
+
+                  // 5. Các khối văn bản
+                  for (final textEl in page.textElements)
+                    pw.Positioned(
+                      left: textEl.x * scaleX,
+                      top: textEl.y * scaleY,
+                      child: pw.SizedBox(
+                        width: textEl.width * scaleX,
+                        child: pw.Text(
+                          textEl.text,
+                          style: pw.TextStyle(
+                            fontSize: math.max(8, textEl.fontSize * scaleX),
+                            color: _pdfColorFromArgb(textEl.colorValue),
+                            fontWeight: textEl.isBold
+                                ? pw.FontWeight.bold
+                                : pw.FontWeight.normal,
+                            fontStyle: textEl.isItalic
+                                ? pw.FontStyle.italic
+                                : pw.FontStyle.normal,
+                          ),
+                        ),
+                      ),
+                    ),
+
+                  // 6. Băng che học tập (Study Tape — chỉ vẽ các băng chưa mở lật)
+                  if (page.tapeElements.any((t) => !t.isRevealed))
+                    pw.Positioned.fill(
+                      child: pw.CustomPaint(
+                        size: PdfPoint(pageFormat.width, pageFormat.height),
+                        painter: (PdfGraphics canvas, PdfPoint size) {
+                          for (final tape in page.tapeElements) {
+                            if (tape.isRevealed) continue;
+                            _paintStudyTape(canvas, size, tape, scaleX, scaleY);
+                          }
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
+        ),
+      );
+    }
+
+    return doc.save();
+  }
+
+  /// Xuất sổ tay thành tệp PDF và lưu vào thư mục xuất của ứng dụng.
+  Future<File> exportNotebookToFile(
+    Notebook notebook, {
+    String? customFileName,
+  }) async {
+    final bytes = await buildNotebookPdfBytes(notebook);
+    final dir = await _resolveExportDirectory();
+    final rawName = (customFileName ?? notebook.title).trim();
+    final safeName = rawName
+        .replaceAll(RegExp(r'[^a-zA-Z0-9_\-\s]'), '')
+        .replaceAll(RegExp(r'\s+'), '_');
+    final fileName =
+        '${safeName.isEmpty ? 'ChemNote' : safeName}_${DateTime.now().millisecondsSinceEpoch}.pdf';
+    final file = File('${dir.path}${Platform.pathSeparator}$fileName');
+    await file.writeAsBytes(bytes, flush: true);
+    return file;
+  }
+
+  /// Xuất PDF và mở hộp thoại chia sẻ của hệ thống (Android & HarmonyOS).
+  Future<File> shareNotebookPdf(Notebook notebook) async {
+    final file = await exportNotebookToFile(notebook);
+    await Share.shareXFiles(
+      <XFile>[XFile(file.path)],
+      subject: '${notebook.title}.pdf',
+      text: 'Sổ tay ChemNote: ${notebook.title}',
+    );
+    return file;
+  }
+
+  /// Mở trình xem trước & in PDF của hệ thống bằng `printing`.
+  Future<void> printNotebookPdf(Notebook notebook) async {
+    await Printing.layoutPdf(
+      name: '${notebook.title}.pdf',
+      onLayout: (PdfPageFormat _) => buildNotebookPdfBytes(notebook),
+    );
+  }
+
+  Future<Directory> _resolveExportDirectory() async {
+    if (_overrideExportDir != null) {
+      if (!await _overrideExportDir!.exists()) {
+        await _overrideExportDir!.create(recursive: true);
+      }
+      return _overrideExportDir!;
+    }
+    final docs = await getApplicationDocumentsDirectory();
+    final dir = Directory(
+      '${docs.path}${Platform.pathSeparator}chemnote'
+      '${Platform.pathSeparator}exports',
+    );
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    return dir;
+  }
+
+  PdfColor _paperPdfColor(PaperColorType color) {
+    return switch (color) {
+      PaperColorType.white => PdfColors.white,
+      PaperColorType.cream => PdfColor.fromInt(0xFFFAF6EC),
+      PaperColorType.dark => PdfColor.fromInt(0xFF1E1E24),
+    };
+  }
+
+  PdfColor _templateLineColor(PaperColorType color) {
+    return switch (color) {
+      PaperColorType.white => PdfColor.fromInt(0xFFD6DDE6),
+      PaperColorType.cream => PdfColor.fromInt(0xFFD9CFB8),
+      PaperColorType.dark => PdfColor.fromInt(0xFF3A3A46),
+    };
+  }
+
+  PdfColor _pdfColorFromArgb(int argb) {
+    final r = ((argb >> 16) & 0xFF) / 255.0;
+    final g = ((argb >> 8) & 0xFF) / 255.0;
+    final b = (argb & 0xFF) / 255.0;
+    return PdfColor(r, g, b);
+  }
+
+  double _alphaFromArgb(int argb) => ((argb >> 24) & 0xFF) / 255.0;
+
+  void _paintPaperTemplate(
+    PdfGraphics canvas,
+    PdfPoint size,
+    PaperTemplateType template,
+    PdfColor lineColor,
+    bool isDark,
+  ) {
+    if (template == PaperTemplateType.blank) return;
+
+    canvas.saveContext();
+    canvas.setStrokeColor(lineColor);
+    canvas.setLineWidth(0.6);
+
+    switch (template) {
+      case PaperTemplateType.blank:
+        break;
+      case PaperTemplateType.ruled:
+        const spacing = 22.0;
+        for (double y = size.y - 54; y >= 32; y -= spacing) {
+          canvas.moveTo(28, y);
+          canvas.lineTo(size.x - 28, y);
+        }
+        canvas.strokePath();
+        // Lề đỏ bên trái
+        canvas.setStrokeColor(
+          isDark ? PdfColor.fromInt(0xFF7F3B3B) : PdfColor.fromInt(0xFFE5A1A1),
+        );
+        canvas.moveTo(64, 20);
+        canvas.lineTo(64, size.y - 20);
+        canvas.strokePath();
+        break;
+
+      case PaperTemplateType.grid:
+        const step = 20.0;
+        for (double x = 20; x < size.x - 10; x += step) {
+          canvas.moveTo(x, 20);
+          canvas.lineTo(x, size.y - 20);
+        }
+        for (double y = 20; y < size.y - 10; y += step) {
+          canvas.moveTo(20, y);
+          canvas.lineTo(size.x - 20, y);
+        }
+        canvas.strokePath();
+        break;
+
+      case PaperTemplateType.dotted:
+        canvas.setFillColor(lineColor);
+        const step = 20.0;
+        for (double x = 24; x < size.x - 16; x += step) {
+          for (double y = 24; y < size.y - 16; y += step) {
+            canvas.drawEllipse(x, y, 0.9, 0.9);
+          }
+        }
+        canvas.fillPath();
+        break;
+
+      case PaperTemplateType.cornell:
+        const topHeaderY = 82.0;
+        const bottomSummaryY = 110.0;
+        final cueX = size.x * 0.28;
+        // Các dòng ghi chú chính
+        for (double y = size.y - topHeaderY - 22; y >= bottomSummaryY + 12; y -= 22) {
+          canvas.moveTo(cueX + 8, y);
+          canvas.lineTo(size.x - 24, y);
+        }
+        canvas.strokePath();
+        // Khung chia vùng Cornell
+        canvas.setLineWidth(1.1);
+        canvas.moveTo(24, size.y - topHeaderY);
+        canvas.lineTo(size.x - 24, size.y - topHeaderY);
+        canvas.moveTo(24, bottomSummaryY);
+        canvas.lineTo(size.x - 24, bottomSummaryY);
+        canvas.moveTo(cueX, bottomSummaryY);
+        canvas.lineTo(cueX, size.y - topHeaderY);
+        canvas.strokePath();
+        break;
+
+      case PaperTemplateType.hexagonal:
+        const r = 14.0;
+        final dx = r * math.sqrt(3);
+        final dy = r * 1.5;
+        var row = 0;
+        for (double cy = 28; cy < size.y - 20; cy += dy) {
+          final xOffset = (row.isOdd ? dx / 2 : 0.0) + 28;
+          for (double cx = xOffset; cx < size.x - 20; cx += dx) {
+            for (var i = 0; i < 6; i++) {
+              final angle = (math.pi / 3) * i - math.pi / 6;
+              final vx = cx + r * math.cos(angle);
+              final vy = cy + r * math.sin(angle);
+              if (i == 0) {
+                canvas.moveTo(vx, vy);
+              } else {
+                canvas.lineTo(vx, vy);
+              }
+            }
+            canvas.closePath();
+          }
+          row++;
+        }
+        canvas.strokePath();
+        break;
+
+      case PaperTemplateType.sageRibbon:
+        const headerH = 38.0;
+        const footerH = 24.0;
+        final sageBand = isDark
+            ? PdfColor.fromInt(0xFF3E4B3B)
+            : PdfColor.fromInt(0xFFAEBDA7);
+        final sageBorder = isDark
+            ? PdfColor.fromInt(0xFF6E7F68)
+            : PdfColor.fromInt(0xFF6E7F68);
+        final peachRibbon = isDark
+            ? PdfColor.fromInt(0xFFD49A7A)
+            : PdfColor.fromInt(0xFFFBD7C1);
+        final ruledColor = isDark
+            ? PdfColor.fromInt(0xFF343B34)
+            : PdfColor.fromInt(0xFFDFE4DF);
+
+        // Dải tiêu đề xanh xô thơm phía trên
+        canvas.setFillColor(sageBand);
+        canvas.drawRect(0, size.y - headerH, size.x, headerH);
+        canvas.fillPath();
+        // Dải chân trang xanh xô thơm phía dưới
+        canvas.drawRect(0, 0, size.x, footerH);
+        canvas.fillPath();
+
+        // Đường kẻ mảnh phân cách header & footer
+        canvas.setStrokeColor(sageBorder);
+        canvas.setLineWidth(0.9);
+        canvas.moveTo(0, size.y - headerH);
+        canvas.lineTo(size.x, size.y - headerH);
+        canvas.moveTo(0, footerH);
+        canvas.lineTo(size.x, footerH);
+        canvas.strokePath();
+
+        // Dải ruy-băng đào có đuôi én (V-notch) ở góc trên bên trái
+        const ribLeft = 24.0;
+        const ribW = 20.0;
+        const ribH = 34.0;
+        final ribTop = size.y;
+        final ribBottom = size.y - ribH;
+        canvas.setFillColor(peachRibbon);
+        canvas.moveTo(ribLeft, ribTop);
+        canvas.lineTo(ribLeft + ribW, ribTop);
+        canvas.lineTo(ribLeft + ribW, ribBottom);
+        canvas.lineTo(ribLeft + ribW / 2, ribBottom + 7.5);
+        canvas.lineTo(ribLeft, ribBottom);
+        canvas.closePath();
+        canvas.fillPath();
+
+        // Các dòng kẻ ngang tinh tế
+        canvas.setStrokeColor(ruledColor);
+        canvas.setLineWidth(0.6);
+        const spacing = 22.0;
+        for (double y = size.y - headerH - spacing;
+            y >= footerH + 10;
+            y -= spacing) {
+          canvas.moveTo(22, y);
+          canvas.lineTo(size.x - 22, y);
+        }
+        canvas.strokePath();
+        break;
+
+      case PaperTemplateType.pastelGrid:
+        const headerH = 44.0;
+        final bannerColor = isDark
+            ? PdfColor.fromInt(0xFF282E3F)
+            : PdfColor.fromInt(0xFFE6ECF8);
+        final bannerBorder = isDark
+            ? PdfColor.fromInt(0xFF47526B)
+            : PdfColor.fromInt(0xFFC5D0E6);
+
+        // Dải tiêu đề pastel xanh-oải hương
+        canvas.setFillColor(bannerColor);
+        canvas.drawRect(0, size.y - headerH, size.x, headerH);
+        canvas.fillPath();
+
+        canvas.setStrokeColor(bannerBorder);
+        canvas.setLineWidth(0.9);
+        canvas.moveTo(0, size.y - headerH);
+        canvas.lineTo(size.x, size.y - headerH);
+        // Hai gạch chân gọn cho Ngày / Chủ đề
+        canvas.moveTo(24, size.y - 30);
+        canvas.lineTo(size.x * 0.56, size.y - 30);
+        canvas.moveTo(size.x * 0.64, size.y - 30);
+        canvas.lineTo(size.x - 24, size.y - 30);
+        canvas.strokePath();
+
+        // Lưới ô ly 5mm mảnh
+        canvas.setStrokeColor(lineColor);
+        canvas.setLineWidth(0.45);
+        const step = 14.2;
+        for (double x = 18; x < size.x - 14; x += step) {
+          canvas.moveTo(x, 18);
+          canvas.lineTo(x, size.y - headerH);
+        }
+        for (double y = size.y - headerH - step; y >= 18; y -= step) {
+          canvas.moveTo(18, y);
+          canvas.lineTo(size.x - 18, y);
+        }
+        canvas.strokePath();
+        break;
+
+      case PaperTemplateType.vintageCream:
+        final frameColor = isDark
+            ? PdfColor.fromInt(0xFF5D5346)
+            : PdfColor.fromInt(0xFFC9B79C);
+        final sepiaLine = isDark
+            ? PdfColor.fromInt(0xFF3E3830)
+            : PdfColor.fromInt(0xFFDCCBB1);
+
+        // Khung viền kép cổ điển
+        canvas.setStrokeColor(frameColor);
+        canvas.setLineWidth(1.0);
+        canvas.drawRect(18, 18, size.x - 36, size.y - 36);
+        canvas.strokePath();
+        canvas.setLineWidth(0.5);
+        canvas.drawRect(22, 22, size.x - 44, size.y - 44);
+        canvas.strokePath();
+
+        // Đường phân cách vùng tiêu đề (Title / Date / No.)
+        final headerY = size.y - 66;
+        canvas.setLineWidth(0.8);
+        canvas.moveTo(22, headerY);
+        canvas.lineTo(size.x - 22, headerY);
+        canvas.strokePath();
+
+        // Dòng kẻ ngang màu nâu ấm
+        canvas.setStrokeColor(sepiaLine);
+        canvas.setLineWidth(0.55);
+        for (double y = headerY - 22; y >= 34; y -= 22) {
+          canvas.moveTo(30, y);
+          canvas.lineTo(size.x - 30, y);
+        }
+        canvas.strokePath();
+        break;
+
+      case PaperTemplateType.twoColumnStudy:
+        final headerY = size.y - 48;
+        final midX = size.x / 2;
+
+        // Đường kẻ tiêu đề phía trên
+        canvas.setStrokeColor(lineColor);
+        canvas.setLineWidth(1.0);
+        canvas.moveTo(24, headerY);
+        canvas.lineTo(size.x - 24, headerY);
+        canvas.strokePath();
+
+        // Dòng kẻ ngang cho cả 2 cột
+        canvas.setLineWidth(0.55);
+        for (double y = headerY - 22; y >= 28; y -= 22) {
+          canvas.moveTo(24, y);
+          canvas.lineTo(size.x - 24, y);
+        }
+        canvas.strokePath();
+
+        // Đường nét đứt chia đôi giữa trang (Tóm tắt / Lời giải)
+        canvas.setLineWidth(0.9);
+        for (double y = 28; y < headerY - 4; y += 9) {
+          final topSeg = math.min(y + 4.5, headerY - 4);
+          canvas.moveTo(midX, y);
+          canvas.lineTo(midX, topSeg);
+        }
+        canvas.strokePath();
+        break;
+    }
+
+    canvas.restoreContext();
+  }
+
+  void _paintStroke(
+    PdfGraphics canvas,
+    PdfPoint size,
+    Stroke stroke,
+    double scaleX,
+    double scaleY,
+  ) {
+    if (stroke.points.isEmpty) return;
+    if (stroke.toolType == ToolType.laserPointer) return;
+
+    canvas.saveContext();
+    final baseAlpha = _alphaFromArgb(stroke.colorValue);
+    final (opacity, widthMultiplier) = switch (stroke.toolType) {
+      ToolType.highlighter => (0.35, 1.8),
+      ToolType.pencil => ((baseAlpha * 0.72).clamp(0.15, 0.85), 0.9),
+      ToolType.studyTape => (0.94, 2.2),
+      ToolType.brushPen => (baseAlpha, 1.15),
+      ToolType.fountainPen || ToolType.ballpointPen => (baseAlpha, 1.0),
+      ToolType.laserPointer => (0.0, 1.0),
+    };
+    canvas.setGraphicState(
+      PdfGraphicState(strokeOpacity: opacity, fillOpacity: opacity),
+    );
+    canvas.setStrokeColor(_pdfColorFromArgb(stroke.colorValue));
+    canvas.setFillColor(_pdfColorFromArgb(stroke.colorValue));
+    canvas.setLineCap(PdfLineCap.round);
+    canvas.setLineJoin(PdfLineJoin.round);
+
+    final scaledWidth = math.max(
+      0.8,
+      stroke.width * scaleX * widthMultiplier,
+    );
+    canvas.setLineWidth(scaledWidth);
+
+    double mapX(double x) => x * scaleX;
+    double mapY(double y) => size.y - (y * scaleY);
+
+    if (stroke.points.length == 1) {
+      final p = stroke.points.first;
+      final r = scaledWidth / 2;
+      canvas.drawEllipse(mapX(p.x), mapY(p.y), r, r);
+      canvas.fillPath();
+      canvas.restoreContext();
+      return;
+    }
+
+    final first = stroke.points.first;
+    canvas.moveTo(mapX(first.x), mapY(first.y));
+    for (var i = 1; i < stroke.points.length; i++) {
+      final pt = stroke.points[i];
+      canvas.lineTo(mapX(pt.x), mapY(pt.y));
+    }
+    canvas.strokePath();
+    canvas.restoreContext();
+  }
+
+  void _paintStudyTape(
+    PdfGraphics canvas,
+    PdfPoint size,
+    TapeElement tape,
+    double scaleX,
+    double scaleY,
+  ) {
+    final left = tape.x * scaleX;
+    final w = math.max(8.0, tape.width * scaleX);
+    final h = math.max(8.0, tape.height * scaleY);
+    final bottom = size.y - ((tape.y + tape.height) * scaleY);
+
+    canvas.saveContext();
+    canvas.setGraphicState(
+      const PdfGraphicState(fillOpacity: 0.95, strokeOpacity: 0.95),
+    );
+    canvas.setFillColor(_pdfColorFromArgb(tape.colorValue));
+    canvas.drawRRect(left, bottom, w, h, 4, 4);
+    canvas.fillPath();
+
+    // Đường viền mảnh để phân biệt rõ băng che học tập khi in
+    canvas.setGraphicState(const PdfGraphicState(strokeOpacity: 0.35));
+    canvas.setStrokeColor(PdfColors.white);
+    canvas.setLineWidth(0.7);
+    canvas.drawRRect(left + 1.5, bottom + 1.5, w - 3, h - 3, 3, 3);
+    canvas.strokePath();
+    canvas.restoreContext();
+  }
+
+  void _paintStencilVector(
+    PdfGraphics canvas,
+    PdfPoint size,
+    StencilElement stencil,
+    double scaleX,
+    double scaleY,
+  ) {
+    canvas.saveContext();
+    canvas.setStrokeColor(_pdfColorFromArgb(stencil.colorValue));
+    canvas.setLineWidth(math.max(1.0, stencil.strokeWidth * scaleX));
+    canvas.setLineCap(PdfLineCap.round);
+    canvas.setLineJoin(PdfLineJoin.round);
+
+    final left = stencil.x * scaleX;
+    final w = stencil.width * scaleX;
+    final h = stencil.height * scaleY;
+    final bottom = size.y - ((stencil.y + stencil.height) * scaleY);
+    final cx = left + w / 2;
+    final cy = bottom + h / 2;
+    final id = stencil.stencilId.toLowerCase();
+
+    if (id.contains('benzene') || id.contains('cyclohexane') || id.contains('hex')) {
+      final r = math.min(w, h) * 0.42;
+      for (var i = 0; i < 6; i++) {
+        final angle = (math.pi / 3) * i - math.pi / 2;
+        final vx = cx + r * math.cos(angle);
+        final vy = cy + r * math.sin(angle);
+        if (i == 0) {
+          canvas.moveTo(vx, vy);
+        } else {
+          canvas.lineTo(vx, vy);
+        }
+      }
+      canvas.closePath();
+      canvas.strokePath();
+      if (id.contains('benzene')) {
+        canvas.drawEllipse(cx, cy, r * 0.58, r * 0.58);
+        canvas.strokePath();
+      }
+    } else if (id.contains('cyclopentane') || id.contains('pent')) {
+      final r = math.min(w, h) * 0.42;
+      for (var i = 0; i < 5; i++) {
+        final angle = (2 * math.pi / 5) * i + math.pi / 2;
+        final vx = cx + r * math.cos(angle);
+        final vy = cy + r * math.sin(angle);
+        if (i == 0) {
+          canvas.moveTo(vx, vy);
+        } else {
+          canvas.lineTo(vx, vy);
+        }
+      }
+      canvas.closePath();
+      canvas.strokePath();
+    } else if (id.contains('arrow') || id.contains('equilibrium')) {
+      canvas.moveTo(left + w * 0.1, cy);
+      canvas.lineTo(left + w * 0.9, cy);
+      canvas.moveTo(left + w * 0.75, cy + h * 0.15);
+      canvas.lineTo(left + w * 0.9, cy);
+      canvas.lineTo(left + w * 0.75, cy - h * 0.15);
+      canvas.strokePath();
+    } else {
+      // Khung dấu chuẩn vector cho dụng cụ phòng thí nghiệm / khuôn hóa học khác
+      canvas.drawRRect(left + 4, bottom + 4, w - 8, h - 8, 6, 6);
+      canvas.strokePath();
+    }
+
+    canvas.restoreContext();
+  }
+
+  pw.Widget _buildCroppedPdfImage(
+    ImageElement img,
+    pw.MemoryImage memImage,
+    double scaleX,
+    double scaleY,
+  ) {
+    final displayW = math.max(4.0, img.width * scaleX);
+    final displayH = math.max(4.0, img.height * scaleY);
+    final cLeft = img.cropLeft.clamp(0.0, 0.995);
+    final cTop = img.cropTop.clamp(0.0, 0.995);
+    final cRight = img.cropRight.clamp(cLeft + 0.005, 1.0);
+    final cBottom = img.cropBottom.clamp(cTop + 0.005, 1.0);
+    final isCropped =
+        cLeft > 0.001 || cTop > 0.001 || cRight < 0.999 || cBottom < 0.999;
+
+    final pw.Widget imageChild;
+    if (!isCropped) {
+      imageChild = pw.Image(
+        memImage,
+        width: displayW,
+        height: displayH,
+        fit: pw.BoxFit.contain,
+      );
+    } else {
+      final cropW = cRight - cLeft;
+      final cropH = cBottom - cTop;
+      final fullW = displayW / cropW;
+      final fullH = displayH / cropH;
+      imageChild = pw.ClipRect(
+        child: pw.SizedBox(
+          width: displayW,
+          height: displayH,
+          child: pw.Stack(
+            children: [
+              pw.Positioned(
+                left: -cLeft * fullW,
+                top: -cTop * fullH,
+                child: pw.Image(
+                  memImage,
+                  width: fullW,
+                  height: fullH,
+                  fit: pw.BoxFit.fill,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return pw.Positioned(
+      left: img.x * scaleX,
+      top: img.y * scaleY,
+      child: pw.Transform.rotate(
+        angle: -img.rotation,
+        child: imageChild,
+      ),
+    );
+  }
+
+  pw.Widget _buildAttachmentChip(
+    AttachmentElement att,
+    double scaleX,
+    double scaleY,
+  ) {
+    final w = math.max(90.0, att.width * scaleX);
+    final h = math.max(30.0, att.height * scaleY);
+    final ext = att.fileExtension.replaceFirst('.', '').toUpperCase();
+    final badgeLabel = ext.isEmpty ? 'FILE' : ext;
+    final badgeColor = _attachmentBadgeColor(badgeLabel);
+
+    return pw.Positioned(
+      left: att.x * scaleX,
+      top: att.y * scaleY,
+      child: pw.Container(
+        width: w,
+        height: h,
+        padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: pw.BoxDecoration(
+          color: PdfColor.fromInt(0xFFF3F4F6),
+          borderRadius: const pw.BorderRadius.all(pw.Radius.circular(6)),
+          border: pw.Border.all(
+            color: PdfColor.fromInt(0xFFD1D5DB),
+            width: 0.8,
+          ),
+        ),
+        child: pw.Row(
+          crossAxisAlignment: pw.CrossAxisAlignment.center,
+          children: [
+            pw.Container(
+              padding:
+                  const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+              decoration: pw.BoxDecoration(
+                color: badgeColor,
+                borderRadius:
+                    const pw.BorderRadius.all(pw.Radius.circular(4)),
+              ),
+              child: pw.Text(
+                badgeLabel.length > 4 ? badgeLabel.substring(0, 4) : badgeLabel,
+                style: pw.TextStyle(
+                  color: PdfColors.white,
+                  fontSize: 7,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              ),
+            ),
+            pw.SizedBox(width: 6),
+            pw.Expanded(
+              child: pw.Column(
+                mainAxisAlignment: pw.MainAxisAlignment.center,
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Text(
+                    att.fileName,
+                    maxLines: 1,
+                    style: pw.TextStyle(
+                      fontSize: 8,
+                      fontWeight: pw.FontWeight.bold,
+                      color: PdfColor.fromInt(0xFF111827),
+                    ),
+                  ),
+                  pw.SizedBox(height: 1),
+                  pw.Text(
+                    _formatFileSize(att.fileSizeBytes),
+                    style: pw.TextStyle(
+                      fontSize: 6.5,
+                      color: PdfColor.fromInt(0xFF6B7280),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  PdfColor _attachmentBadgeColor(String ext) {
+    return switch (ext) {
+      'PDF' => PdfColor.fromInt(0xFFDC2626),
+      'DOC' || 'DOCX' => PdfColor.fromInt(0xFF2563EB),
+      'PPT' || 'PPTX' => PdfColor.fromInt(0xFFEA580C),
+      'XLS' || 'XLSX' => PdfColor.fromInt(0xFF16A34A),
+      _ => PdfColor.fromInt(0xFF4B5563),
+    };
+  }
+
+  String _formatFileSize(int bytes) {
+    if (bytes <= 0) return 'Tệp đính kèm';
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+
+  String _stencilDisplayLabel(String stencilId) {
+    final cleaned = stencilId.replaceAll('_', ' ').trim();
+    if (cleaned.isEmpty) return 'Stencil';
+    return cleaned[0].toUpperCase() + cleaned.substring(1);
+  }
+}

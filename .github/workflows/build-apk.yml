@@ -1,0 +1,70 @@
+name: Build ChemNote APK (Huawei MatePad 11.5"S & Android)
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    name: Build Release APK (144Hz + M-Pencil 3 + GMS-Free)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter 3.24
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          flutter-version: '3.24.x'
+          cache: true
+
+      - name: Generate Android Gradle wrapper while preserving custom MatePad native files
+        run: |
+          mkdir -p /tmp/chemnote_backup
+          cp -r android/app/src/main/kotlin /tmp/chemnote_backup/kotlin
+          cp android/app/src/main/AndroidManifest.xml /tmp/chemnote_backup/AndroidManifest.xml
+          cp android/app/build.gradle /tmp/chemnote_backup/app_build.gradle
+          cp -r android/app/src/main/res /tmp/chemnote_backup/res
+
+          flutter create --platforms=android --org com.chemnote --project-name chemnote .
+
+          cp -r /tmp/chemnote_backup/kotlin/* android/app/src/main/kotlin/
+          cp /tmp/chemnote_backup/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          cp /tmp/chemnote_backup/app_build.gradle android/app/build.gradle
+          cp -r /tmp/chemnote_backup/res/* android/app/src/main/res/
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Run unit tests
+        run: flutter test
+
+      - name: Build Release APK for Huawei MatePad 11.5"S & Android
+        run: |
+          flutter build apk --release
+          cp build/app/outputs/flutter-apk/app-release.apk ChemNote-MatePad-11.5s-release.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChemNote-MatePad-11.5s-APK
+          path: ChemNote-MatePad-11.5s-release.apk
+          if-no-files-found: error
+
+      - name: Attach APK to GitHub Release (when tagged)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ChemNote-MatePad-11.5s-release.apk

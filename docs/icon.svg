@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1E3A8A"/>
+      <stop offset="55%" stop-color="#2563EB"/>
+      <stop offset="100%" stop-color="#0F766E"/>
+    </linearGradient>
+    <linearGradient id="penGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#CBD5E1"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)"/>
+  <rect x="26" y="26" width="460" height="460" rx="92" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="6"/>
+  <!-- Benzene hexagon -->
+  <polygon points="218,108 326,170 326,294 218,356 110,294 110,170" fill="none" stroke="#FFFFFF" stroke-width="22" stroke-linejoin="round"/>
+  <circle cx="218" cy="232" r="56" fill="none" stroke="#93C5FD" stroke-width="16"/>
+  <!-- Flask bottom liquid accent -->
+  <path d="M148 398 H364" stroke="rgba(255,255,255,0.28)" stroke-width="10" stroke-linecap="round"/>
+  <!-- M-Pencil stylus nib -->
+  <g transform="translate(268, 224) rotate(-38)">
+    <rect x="0" y="0" width="42" height="164" rx="14" fill="url(#penGrad)"/>
+    <polygon points="0,164 42,164 21,216" fill="#38BDF8"/>
+    <circle cx="21" cy="212" r="5" fill="#0F172A"/>
+    <rect x="0" y="138" width="42" height="14" fill="#3B82F6"/>
+  </g>
+</svg>
