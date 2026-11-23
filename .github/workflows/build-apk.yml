@@ -63,7 +63,7 @@ jobs:
             sed -i 's/compileSdk .*/compileSdk = 36/' android/app/build.gradle
           fi
 
-          # Ensure ALL plugin subprojects (e.g. :file_picker) compile with SDK 36 so checkReleaseAarMetadata passes
+          # Ensure ALL plugin subprojects (e.g. :file_picker) compile with SDK 36 & skip AGP lintVital bug
           if [ -f android/build.gradle.kts ]; then
             cat << 'EOF' >> android/build.gradle.kts
 
@@ -74,6 +74,9 @@ jobs:
                           compileSdkVersion(36)
                       }
                   }
+              }
+              tasks.matching { it.name.contains("lintVital", ignoreCase = true) }.configureEach {
+                  enabled = false
               }
           }
           EOF
@@ -89,6 +92,9 @@ jobs:
                           }
                       }
                   }
+              }
+              tasks.matching { it.name.toLowerCase().contains("lintvital") }.configureEach {
+                  enabled = false
               }
           }
           EOF
