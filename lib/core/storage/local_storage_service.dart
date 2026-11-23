@@ -57,6 +57,11 @@ class LocalStorageService {
     return File('${root.path}${Platform.pathSeparator}custom_covers.json');
   }
 
+  Future<File> _getPdfExportDirFile() async {
+    final root = await getRootDirectory();
+    return File('${root.path}${Platform.pathSeparator}pdf_export_dir.txt');
+  }
+
   Future<File> _getNotebookFile(String notebookId) async {
     final dir = await _getSubdirectory('notebooks');
     return File('${dir.path}${Platform.pathSeparator}$notebookId.json');
@@ -147,6 +152,30 @@ class LocalStorageService {
     try {
       final file = await _getCustomCoversFile();
       await file.writeAsString(jsonEncode(coverPaths), flush: true);
+    } catch (_) {
+      // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
+    }
+  }
+
+  Future<String?> loadPdfExportDirectory() async {
+    try {
+      final file = await _getPdfExportDirFile();
+      if (!await file.exists()) return null;
+      final raw = (await file.readAsString()).trim();
+      return raw.isEmpty ? null : raw;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> savePdfExportDirectory(String? directory) async {
+    try {
+      final file = await _getPdfExportDirFile();
+      if (directory == null || directory.trim().isEmpty) {
+        if (await file.exists()) await file.delete();
+      } else {
+        await file.writeAsString(directory.trim(), flush: true);
+      }
     } catch (_) {
       // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
     }

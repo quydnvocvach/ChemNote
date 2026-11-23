@@ -136,20 +136,18 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.1.0 with APK
+      - name: Publish Release v3.2.0 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.1.0
-          name: ChemNote Pro v3.1.0 (Huawei MatePad 11.5"S & Android)
+          tag_name: v3.2.0
+          name: ChemNote Pro v3.2.0 (Huawei MatePad 11.5"S & Android)
           body: |
-            ### ChemNote Pro v3.1.0 — Native APK cho Huawei MatePad 11.5"S & Android
-            - **MỚI: Bảng vô cực (Infinite Whiteboard 6000×6000)** để vẽ sơ đồ tổng hợp Hữu cơ & bản đồ tư duy không giới hạn diện tích!
-            - **MỚI: Giấy nhớ dán (Sticky Notes)** kiểu GoodNotes 6 với 5 màu pastel, kéo thả, thay đổi kích thước và thu gọn thành thẻ nhỏ!
-            - Tối ưu phần cứng **144Hz PaperMatte** + **M-Pencil 3 (NearLink)** (gõ đúp thân bút đổi Bút ↔ Tẩy).
-            - **Ghi âm bài giảng đồng bộ nét viết tay (Audio Note Replay)** dùng `MediaRecorder` / `MediaPlayer` gốc Android.
-            - **Cân bằng phương trình phân tử & phương trình ion** (`MnO4- + Fe2+ + H+ -> Mn2+ + Fe3+ + H2O`).
-            - **10 mẫu giấy thẩm mỹ**, cắt ảnh độ phân giải gốc không vỡ nét, nhập/xuất PDF, đồng bộ Google Drive **không cần GMS**.
-            - Tích hợp **Kiểm tra cập nhật APK** trực tiếp trong Cài đặt.
+            ### ChemNote Pro v3.2.0 — Tinh chỉnh phần cứng Huawei MatePad 11.5"S + M-Pencil 3
+            - **0ms độ trễ bút & Zoom Window 144Hz:** Loại bỏ hoàn toàn `setState` trong `onPointerMove`, tách `ValueNotifier` cho nét bút sống & Laser, tắt vòng tròn lơ lửng theo đầu bút.
+            - **Cuộn 1 ngón, phóng to/thu nhỏ 2 ngón & viết tay mượt mà:** Thống nhất `InteractiveViewer` không xung đột cuộn; khóa trôi trang khi dùng Laser, Thước kẻ, kéo ảnh/Sticky Note/Text/Stencil.
+            - **Cỡ nét bút chuẩn xác (`0.5 -> 5.0`)**, thanh bút ưa thích sát mép trái màn hình, chèn Ảnh/Sticker/Stencil/Text/Sticky Note ngay **giữa khung hình đang xem**.
+            - **Gạch xóa nhanh (Scribble-to-Erase)** nhạy chuẩn xác 4 nét gạch, sửa nút Con mắt bật/tắt mượt mà.
+            - **Thư mục xuất PDF mặc định:** Tự động lưu vào `Documents/ChemNote` hoặc tùy chọn thư mục trong Cài đặt.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

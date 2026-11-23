@@ -599,29 +599,29 @@ class StrokeEngine {
 
   /// Detects a rapid back-and-forth scribble/scratch-out gesture used to erase
   /// strokes underneath it without switching to the eraser tool.
-  /// Strict threshold (>= 7 sharp reversals > 145 deg, segment length >= 28px,
-  /// high path-to-diagonal overlap ratio) ensures fast handwriting is never erased.
+  /// Tuned for real MatePad 11.5"S handwriting: requires >= 4 reversals > 130 deg
+  /// with segment length >= 16px and overlap ratio >= 2.2x bounding-box diagonal
+  /// (reliably erases intentional scribbles while rejecting 1-2 turn letters).
   static bool isScribbleGesture(List<StrokePoint> rawPoints) {
-    if (rawPoints.length < 16) return false;
+    if (rawPoints.length < 10) return false;
 
     final bounds = _boundingBox(rawPoints);
     final diag = math.sqrt(
       bounds.width * bounds.width + bounds.height * bounds.height,
     );
-    if (diag < 28.0) return false;
+    if (diag < 18.0) return false;
 
     final totalLen = _polylineLength(rawPoints);
-    // Require high back-and-forth overlap ratio over the bounding box diagonal
-    if (totalLen < diag * 3.8) return false;
+    if (totalLen < diag * 2.2) return false;
 
     final simplified = _douglasPeucker(
       rawPoints,
-      epsilon: math.max(4.0, diag * 0.05),
+      epsilon: math.max(3.5, diag * 0.045),
     );
-    if (simplified.length < 9) return false;
+    if (simplified.length < 6) return false;
 
-    // cos(145 deg) = -0.819152
-    const double minReversalCos = -0.819;
+    // cos(130 deg) ≈ -0.6428 -> use -0.65
+    const double minReversalCos = -0.65;
     int sharpReversals = 0;
     for (int i = 1; i < simplified.length - 1; i++) {
       final a = simplified[i - 1];
@@ -633,18 +633,18 @@ class StrokeEngine {
       final v2y = c.y - b.y;
       final l1 = math.sqrt(v1x * v1x + v1y * v1y);
       final l2 = math.sqrt(v2x * v2x + v2y * v2y);
-      if (l1 < 28.0 || l2 < 28.0) continue;
+      if (l1 < 16.0 || l2 < 16.0) continue;
       final cosAngle = ((v1x * v2x + v1y * v2y) / (l1 * l2)).clamp(-1.0, 1.0);
       if (cosAngle < minReversalCos) {
         sharpReversals++;
       }
     }
 
-    return sharpReversals >= 7;
+    return sharpReversals >= 4;
   }
 
   /// Alias for [isScribbleGesture] returning the intersected stroke IDs when
-  /// [scribblePoints] satisfies the strict scribble-to-erase threshold.
+  /// [scribblePoints] satisfies the scribble-to-erase threshold.
   static Set<String> detectScribbleToErase(
     List<Stroke> strokes,
     List<StrokePoint> scribblePoints,
@@ -659,7 +659,7 @@ class StrokeEngine {
     List<StrokePoint> scribblePoints,
   ) {
     if (scribblePoints.isEmpty || strokes.isEmpty) return const {};
-    final scribbleBounds = _boundingBox(scribblePoints).inflate(10.0);
+    final scribbleBounds = _boundingBox(scribblePoints).inflate(12.0);
     final hitIds = <String>{};
 
     for (final stroke in strokes) {

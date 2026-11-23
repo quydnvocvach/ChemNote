@@ -892,16 +892,17 @@ class _QuickPenFavoritesDockState extends State<QuickPenFavoritesDock> {
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 180),
-      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 5),
+      width: 44,
+      padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 3),
       decoration: BoxDecoration(
         color: dockBg,
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: BorderRadius.circular(22),
         border: Border.all(color: border),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withAlpha(isDark ? 90 : 35),
-            blurRadius: 14,
-            offset: const Offset(0, 4),
+            blurRadius: 12,
+            offset: const Offset(0, 3),
           ),
         ],
       ),
@@ -1440,8 +1441,14 @@ Future<void> showPenSettingsSheet({
                       ])
                         GestureDetector(
                           onTap: () {
-                            setModalState(() => tool = p);
+                            final maxForP =
+                                p == EditorTool.brushPen ? 12.0 : 5.0;
+                            setModalState(() {
+                              tool = p;
+                              width = width.clamp(0.5, maxForP);
+                            });
                             onSelectPen(p);
+                            onUpdate(width: width);
                           },
                           child: AnimatedContainer(
                             duration: const Duration(milliseconds: 160),
@@ -1498,32 +1505,44 @@ Future<void> showPenSettingsSheet({
                   ),
                 const SizedBox(height: 12),
 
-                // Tapered Size Slider
-                Row(
-                  children: [
-                    SizedBox(
-                      width: 44,
-                      child: Text(
-                        width.toStringAsFixed(1),
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 13,
+                // Tapered Size Slider (0.5 -> 5.0 for writing pens, 0.5 -> 12.0 for brush, 4.0 -> 32.0 for highlighter)
+                Builder(
+                  builder: (_) {
+                    final double minW = isHighlighter ? 4.0 : 0.5;
+                    final double maxW = isHighlighter
+                        ? 32.0
+                        : (tool == EditorTool.brushPen ? 12.0 : 5.0);
+                    final double clampedW = width.clamp(minW, maxW);
+                    return Row(
+                      children: [
+                        SizedBox(
+                          width: 44,
+                          child: Text(
+                            clampedW.toStringAsFixed(1),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 13,
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
-                    const Text('Cỡ nét', style: TextStyle(fontSize: 12.5)),
-                    Expanded(
-                      child: Slider(
-                        value: width.clamp(0.5, isHighlighter ? 32.0 : 18.0),
-                        min: 0.5,
-                        max: isHighlighter ? 32.0 : 18.0,
-                        onChanged: (v) {
-                          setModalState(() => width = v);
-                          onUpdate(width: v);
-                        },
-                      ),
-                    ),
-                  ],
+                        const Text('Cỡ nét', style: TextStyle(fontSize: 12.5)),
+                        Expanded(
+                          child: Slider(
+                            value: clampedW,
+                            min: minW,
+                            max: maxW,
+                            divisions: isHighlighter
+                                ? 28
+                                : (tool == EditorTool.brushPen ? 23 : 45),
+                            onChanged: (v) {
+                              setModalState(() => width = v);
+                              onUpdate(width: v);
+                            },
+                          ),
+                        ),
+                      ],
+                    );
+                  },
                 ),
 
                 // Opacity Slider
@@ -1998,6 +2017,7 @@ class EditorSettingsDrawer extends StatelessWidget {
   final VoidCallback onDeletePage;
   final VoidCallback onImportPdf;
   final VoidCallback onExportPdf;
+  final VoidCallback onPickPdfExportDir;
   final VoidCallback onToggleLockNotebook;
   final VoidCallback onCheckForUpdate;
 
@@ -2015,6 +2035,7 @@ class EditorSettingsDrawer extends StatelessWidget {
     required this.onDeletePage,
     required this.onImportPdf,
     required this.onExportPdf,
+    required this.onPickPdfExportDir,
     required this.onToggleLockNotebook,
     required this.onCheckForUpdate,
   });
@@ -2118,6 +2139,25 @@ class EditorSettingsDrawer extends StatelessWidget {
               onTap: () {
                 Navigator.pop(context);
                 onExportPdf();
+              },
+            ),
+            ListTile(
+              dense: true,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+              leading: const Icon(Icons.folder_outlined, size: 20),
+              title: const Text(
+                'Thư mục xuất PDF mặc định',
+                style: TextStyle(fontSize: 13.5),
+              ),
+              subtitle: Text(
+                appState.pdfExportDirectory ?? 'Documents/ChemNote',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 11.5),
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                onPickPdfExportDir();
               },
             ),
             const Divider(height: 24),

@@ -63,12 +63,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   final PdfImportService _pdfImportService = PdfImportService();
   final PdfExportService _pdfExportService = PdfExportService();
 
-  // 144Hz zero-rebuild ValueNotifiers for ActiveStrokePainter
+  // 144Hz zero-rebuild ValueNotifiers for ActiveStrokePainter (hover ring removed)
   final ValueNotifier<Stroke?> _activeStrokeNotifier = ValueNotifier(null);
-  final ValueNotifier<Offset?> _hoverPosNotifier = ValueNotifier(null);
   final ValueNotifier<Offset?> _eraserCursorNotifier = ValueNotifier(null);
   final ValueNotifier<List<Offset>> _lassoPathNotifier = ValueNotifier(const []);
   final ValueNotifier<Rect?> _tapeDraftNotifier = ValueNotifier(null);
+  Size _editorViewportSize = const Size(900, 650);
+  bool _verticalCenteredOnce = false;
 
   // Active notebook & page state
   late String _activeNotebookId;
@@ -96,6 +97,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   double _pressureSensitivity = 0.75;
   bool _eyedropperActive = false;
   bool _isDrawingPointerDown = false;
+  bool _isStylusDown = false;
+  bool _isOverlayDragging = false;
+  final Set<int> _activeTouchPointers = {};
 
   // Smoothing & M-Pencil 3 curve
   bool _autoNeatenEnabled = true;
@@ -215,7 +219,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _verticalScrollController.dispose();
     _horizontalPageController.dispose();
     _activeStrokeNotifier.dispose();
-    _hoverPosNotifier.dispose();
     _eraserCursorNotifier.dispose();
     _lassoPathNotifier.dispose();
     _tapeDraftNotifier.dispose();
@@ -426,7 +429,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         event.kind == PointerDeviceKind.invertedStylus) {
       _palmFilter.notifyStylusHover();
       _activeDrawingPageId = page.id;
-      _hoverPosNotifier.value = event.localPosition;
     }
   }
 
@@ -439,6 +441,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       setState(() => _currentPageIndex = pageIndex);
     }
     _activeDrawingPageId = page.id;
+
+    final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus;
+    if (isStylusEvent) {
+      if (!_isStylusDown) setState(() => _isStylusDown = true);
+    } else if (event.kind == PointerDeviceKind.touch) {
+      _activeTouchPointers.add(event.pointer);
+      if (_activeTouchPointers.length >= 2) {
+        // 2nd finger down -> immediately cancel any partial 1-finger stroke & unlock pinch-zoom
+        _cancelActiveGesture();
+        setState(() {});
+        return;
+      }
+    }
 
     // Track multi-finger gestures (2-finger Undo / 3-finger Redo)
     _pointerDownPositions[event.pointer] = event.position;
@@ -522,14 +538,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         _commitPage(page.copyWith(tapeElements: updatedTapes));
         return;
       }
+      if (!_isDrawingPointerDown) setState(() => _isDrawingPointerDown = true);
       _tapeDragStart = rawPos;
       _tapeDraftNotifier.value = Rect.fromPoints(rawPos, rawPos);
       return;
     }
 
-    // Even in non-tape tools, tapping a Study Tape in read-only/pan mode reveals it
+    // Laser Pointer: lock viewport pan while laser pointer is held down
     if (_activeTool == EditorTool.laserPointer) {
       if (!_palmFilter.shouldAccept(event)) return;
+      if (!_isDrawingPointerDown) setState(() => _isDrawingPointerDown = true);
       _laserController.addPoint(rawPos);
       return;
     }
@@ -689,7 +707,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   void _handlePointerUp(PointerEvent event, NotePage page) {
     _pointerDownPositions.remove(event.pointer);
+    _activeTouchPointers.remove(event.pointer);
+    final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus;
     _shapeHoldTimer?.cancel();
+    if (isStylusEvent && _isStylusDown) {
+      setState(() => _isStylusDown = false);
+    }
     if (_pointerDownPositions.isEmpty && _isDrawingPointerDown) {
       setState(() => _isDrawingPointerDown = false);
     }
@@ -988,12 +1012,60 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _insertTextFromChemistryHub(page, symbol);
   }
 
+  /// Computes the local `(x, y)` coordinates on [page] (at [pageIdx])
+  /// corresponding to the center of the currently visible editor viewport!
+  Offset _visibleCenterOnPage(NotePage page, int pageIdx) {
+    final pageSize = PaperMetrics.pageSize(
+      isLandscape: page.isLandscape,
+      isInfiniteWhiteboard: page.isInfiniteWhiteboard,
+    );
+    final viewportCenter = Offset(
+      _editorViewportSize.width * 0.5,
+      _editorViewportSize.height * 0.5,
+    );
+
+    if (page.isInfiniteWhiteboard) {
+      final inv = Matrix4.tryInvert(_whiteboardTransformController.value);
+      if (inv != null) {
+        final pt = MatrixUtils.transformPoint(inv, viewportCenter);
+        return Offset(
+          pt.dx.clamp(120.0, pageSize.width - 120.0),
+          pt.dy.clamp(120.0, pageSize.height - 120.0),
+        );
+      }
+      return PaperMetrics.whiteboardCenter;
+    }
+
+    final inv = Matrix4.tryInvert(_transformController.value);
+    if (inv != null) {
+      final scenePt = MatrixUtils.transformPoint(inv, viewportCenter);
+      final notebook = _getNotebook(context, listen: false);
+      // In continuous vertical layout, accumulate Y offset of preceding pages + 14px gaps + 18px top padding
+      double pageTopY = 18.0;
+      if (notebook != null &&
+          context.read<AppState>().verticalContinuousScroll) {
+        for (int i = 0; i < pageIdx && i < notebook.pages.length; i++) {
+          final p = notebook.pages[i];
+          pageTopY += PaperMetrics.pageSize(isLandscape: p.isLandscape).height +
+              14.0;
+        }
+      }
+      // Horizontal padding is 24.0 in the vertical Column
+      final localX = (scenePt.dx - 24.0).clamp(90.0, pageSize.width - 90.0);
+      final localY =
+          (scenePt.dy - pageTopY).clamp(90.0, pageSize.height - 90.0);
+      return Offset(localX, localY);
+    }
+
+    return Offset(pageSize.width * 0.5, pageSize.height * 0.4);
+  }
+
   Future<void> _insertTextFromChemistryHub(NotePage page, String text) async {
-    final pageSize = PaperMetrics.pageSize(isLandscape: page.isLandscape);
+    final center = _visibleCenterOnPage(page, _currentPageIndex);
     final element = TextElement(
       id: _uuid.v4(),
-      x: (pageSize.width - 280) * 0.5,
-      y: (pageSize.height - 80) * 0.42,
+      x: (center.dx - 140).clamp(16.0, 5600.0),
+      y: (center.dy - 42).clamp(16.0, 5600.0),
       width: 280.0,
       height: 84.0,
       text: text,
@@ -1012,12 +1084,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   }
 
   Future<void> _insertStencilElement(NotePage page, String stencilId) async {
-    final pageSize = PaperMetrics.pageSize(isLandscape: page.isLandscape);
+    final center = _visibleCenterOnPage(page, _currentPageIndex);
     final stencil = StencilElement(
       id: _uuid.v4(),
       stencilId: stencilId,
-      x: (pageSize.width - 140) * 0.5,
-      y: (pageSize.height - 140) * 0.4,
+      x: (center.dx - 70).clamp(16.0, 5700.0),
+      y: (center.dy - 70).clamp(16.0, 5700.0),
       width: 140.0,
       height: 140.0,
       rotation: 0.0,
@@ -1040,20 +1112,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   Future<void> _insertSavedImagePath(NotePage page, String savedPath) async {
     _ensureElementImageLoaded(savedPath);
     context.read<AppState>().addRecentImagePath(savedPath);
-    final pageSize = PaperMetrics.pageSize(
-      isLandscape: page.isLandscape,
-      isInfiniteWhiteboard: page.isInfiniteWhiteboard,
-    );
-    final double targetX = page.isInfiniteWhiteboard
-        ? PaperMetrics.whiteboardCenter.dx - 140
-        : (pageSize.width - 280) * 0.5;
-    final double targetY = page.isInfiniteWhiteboard
-        ? PaperMetrics.whiteboardCenter.dy - 110
-        : (pageSize.height - 220) * 0.32;
+    final center = _visibleCenterOnPage(page, _currentPageIndex);
     final imgEl = ImageElement(
       id: _uuid.v4(),
-      x: targetX,
-      y: targetY,
+      x: (center.dx - 140).clamp(16.0, 5600.0),
+      y: (center.dy - 110).clamp(16.0, 5600.0),
       width: 280.0,
       height: 220.0,
       rotation: 0.0,
@@ -1541,13 +1604,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     if (action == null || !mounted) return;
 
     setState(() => _isBusyPdf = true);
+    final customDir = context.read<AppState>().pdfExportDirectory;
     try {
       if (action == 'share') {
-        await _pdfExportService.shareNotebookPdf(notebook);
+        await _pdfExportService.shareNotebookPdf(
+          notebook,
+          customDirectory: customDir,
+        );
       } else if (action == 'print') {
         await _pdfExportService.printNotebookPdf(notebook);
       } else if (action == 'save') {
-        final file = await _pdfExportService.exportNotebookToFile(notebook);
+        final file = await _pdfExportService.exportNotebookToFile(
+          notebook,
+          customDirectory: customDir,
+        );
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Đã lưu PDF tại: ${file.path}')),
@@ -1743,34 +1813,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   }
 
   Future<void> _addStickyNote(NotePage page) async {
-    double targetX;
-    double targetY;
-    if (page.isInfiniteWhiteboard) {
-      // Place near current viewport center on infinite whiteboard
-      final inv = Matrix4.tryInvert(_whiteboardTransformController.value);
-      final screenSize = MediaQuery.sizeOf(context);
-      if (inv != null) {
-        final centerInCanvas = MatrixUtils.transformPoint(
-          inv,
-          Offset(screenSize.width * 0.5, (screenSize.height - 100) * 0.5),
-        );
-        targetX = (centerInCanvas.dx - 105).clamp(60.0, 5700.0);
-        targetY = (centerInCanvas.dy - 95).clamp(60.0, 5700.0);
-      } else {
-        targetX = PaperMetrics.whiteboardCenter.dx - 105;
-        targetY = PaperMetrics.whiteboardCenter.dy - 95;
-      }
-    } else {
-      final pageSize = PaperMetrics.pageSize(isLandscape: page.isLandscape);
-      final stagger = (page.stickyNotes.length % 5) * 18.0;
-      targetX = (pageSize.width - 210) * 0.5 + stagger;
-      targetY = (pageSize.height - 190) * 0.35 + stagger;
-    }
-
+    final center = _visibleCenterOnPage(page, _currentPageIndex);
+    final stagger = (page.stickyNotes.length % 5) * 16.0;
     final note = StickyNoteElement(
       id: _uuid.v4(),
-      x: targetX,
-      y: targetY,
+      x: (center.dx - 105 + stagger).clamp(16.0, 5700.0),
+      y: (center.dy - 95 + stagger).clamp(16.0, 5700.0),
       width: 210.0,
       height: 190.0,
       text: '',
@@ -1782,6 +1830,25 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       page.copyWith(stickyNotes: [...page.stickyNotes, note]),
       undoSnapshot: page,
     );
+  }
+
+  Future<void> _handlePickPdfExportDir() async {
+    try {
+      final dir = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: 'Chọn thư mục xuất PDF mặc định',
+      );
+      if (dir == null || dir.isEmpty || !mounted) return;
+      context.read<AppState>().setPdfExportDirectory(dir);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Đã đặt thư mục xuất PDF: $dir')),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Không thể chọn thư mục: $e')),
+        );
+      }
+    }
   }
 
   Future<void> _handleCheckForUpdate() async {
@@ -2070,9 +2137,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         ? appState.openNotebooks
         : [notebook];
     final currentIdx = _currentPageIndex.clamp(0, notebook.pages.length - 1);
-    final bool allowZoomPan = _pointerDownPositions.length >= 2 ||
-        appState.readOnlyMode ||
-        (!_isDrawingPointerDown && _activeTool == EditorTool.panZoom);
+    // Unified viewport pan/zoom gating (Items 4 & 6):
+    // - Locked while dragging an overlay, while M-Pencil 3 stylus is touching, or during 1-finger drawing when palm lock is OFF
+    // - Always unlocked for 2-finger pinch-zoom & 2-finger pan, and for 1-finger scroll when palm lock is ON
+    final bool allowZoomPan = !_isOverlayDragging &&
+        !_isStylusDown &&
+        (_activeTouchPointers.length >= 2 ||
+            appState.readOnlyMode ||
+            (appState.palmRejectionEnabled && !_isDrawingPointerDown) ||
+            (!_isDrawingPointerDown && _activeTool == EditorTool.panZoom));
 
     return Scaffold(
       key: _scaffoldKey,
@@ -2117,6 +2190,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         },
         onImportPdf: () => _handleImportPdf(notebook),
         onExportPdf: () => _handleExportPdf(notebook),
+        onPickPdfExportDir: _handlePickPdfExportDir,
         onToggleLockNotebook: () async {
           await appState.setNotebookLock(
             notebook.id,
@@ -2179,10 +2253,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             onSelectTool: (tool) {
               _commitActiveTextEdit();
               setState(() {
-                _activeTool = tool;
-                if (tool.isPenFamily) _lastPenTool = tool;
-                if (tool != EditorTool.lasso) _lassoController.clear();
-                if (tool != EditorTool.image) _selectedImageId = null;
+                // Item 3: Tapping an active toggleable mode (Study Tape / Laser / Shape / Lasso / Text) a 2nd time cleanly turns it OFF!
+                final isToggleOff = _activeTool == tool &&
+                    (tool == EditorTool.studyTape ||
+                        tool == EditorTool.laserPointer ||
+                        tool == EditorTool.shape ||
+                        tool == EditorTool.lasso ||
+                        tool == EditorTool.textBox);
+                _activeTool = isToggleOff ? _lastPenTool : tool;
+                if (_activeTool.isPenFamily) _lastPenTool = _activeTool;
+                if (_activeTool != EditorTool.lasso) _lassoController.clear();
+                if (_activeTool != EditorTool.image) _selectedImageId = null;
               });
             },
             onOpenPenPopover: () => showPenSettingsSheet(
@@ -2343,76 +2424,168 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               ),
             ),
 
-          // Main Canvas Area (Infinite Whiteboard, Continuous Vertical Scroll, or Horizontal Flip)
+          // Main Canvas Area (Infinite Whiteboard, Unified Vertical InteractiveViewer, or Horizontal Flip)
           Expanded(
-            child: Stack(
-              children: [
-                if (currentPage.isInfiniteWhiteboard || notebook.isWhiteboard)
-                  _buildInfiniteWhiteboardView(
-                    notebook,
-                    currentPage,
-                    currentIdx,
-                    appState,
-                  )
-                else
-                  InteractiveViewer(
-                    transformationController: _transformController,
-                    minScale: 0.45,
-                    maxScale: 4.5,
-                    boundaryMargin: EdgeInsets.all(
-                      appState.freePaperMovement ? 260 : 24,
-                    ),
-                    panEnabled: allowZoomPan,
-                    scaleEnabled: allowZoomPan,
-                    child: appState.verticalContinuousScroll
-                        ? _buildVerticalContinuousPages(notebook)
-                        : _buildHorizontalFlipPages(notebook),
-                  ),
+            child: LayoutBuilder(
+              builder: (ctx, viewportConstraints) {
+                final vpSize = Size(
+                  viewportConstraints.maxWidth,
+                  viewportConstraints.maxHeight,
+                );
+                _editorViewportSize = vpSize;
+                if (!_verticalCenteredOnce &&
+                    !currentPage.isInfiniteWhiteboard &&
+                    !notebook.isWhiteboard &&
+                    appState.verticalContinuousScroll &&
+                    vpSize.width > 0) {
+                  _verticalCenteredOnce = true;
+                  final pageW =
+                      PaperMetrics.pageSize(isLandscape: currentPage.isLandscape)
+                          .width +
+                      48.0;
+                  final initScale = (vpSize.width / pageW).clamp(0.55, 1.0);
+                  final tx = (vpSize.width - pageW * initScale) * 0.5;
+                  _transformController.value = Matrix4.identity()
+                    ..translate(tx, 0.0)
+                    ..scale(initScale, initScale);
+                }
 
-                // Star-Only Floating Left Quick-Pen Favorites Dock
-                if (appState.showFavoritesBar &&
-                    appState.favoritePens.isNotEmpty)
-                  Positioned(
-                    left: 10,
-                    top: 0,
-                    bottom: 0,
-                    child: Center(
-                      child: QuickPenFavoritesDock(
-                        favoritePens: appState.favoritePens,
-                        activeTool: _activeTool,
-                        activeColor: _effectiveColor,
-                        activeWidth: _effectiveWidth,
-                        onSelectPreset: (preset) {
-                          setState(() {
-                            final tool =
-                                EditorToolX.fromStrokeToolType(preset.toolType);
-                            _activeTool = tool;
-                            if (tool.isPenFamily) _lastPenTool = tool;
-                            if (tool == EditorTool.highlighter) {
-                              _highlighterColor = Color(preset.colorValue);
-                              _highlighterWidth = preset.width;
-                              _highlighterOpacity = preset.opacity;
-                            } else {
-                              _penColor = Color(preset.colorValue);
-                              _penWidth = preset.width;
-                              _penOpacity = preset.opacity;
-                              _pressureSensitivity = preset.pressureSensitivity;
-                            }
-                            _selectedImageId = null;
-                          });
-                        },
-                        onRemovePreset: (preset) {
-                          appState.toggleStarPen(preset);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              duration: Duration(milliseconds: 1000),
-                              content: Text('Đã bỏ ghim bút khỏi thanh ưa thích'),
-                            ),
-                          );
-                        },
+                return Stack(
+                  children: [
+                    if (currentPage.isInfiniteWhiteboard ||
+                        notebook.isWhiteboard)
+                      _buildInfiniteWhiteboardView(
+                        notebook,
+                        currentPage,
+                        currentIdx,
+                        appState,
+                      )
+                    else if (appState.verticalContinuousScroll)
+                      InteractiveViewer(
+                        transformationController: _transformController,
+                        constrained: false,
+                        minScale: 0.5,
+                        maxScale: 4.0,
+                        boundaryMargin: const EdgeInsets.all(200),
+                        panEnabled: allowZoomPan,
+                        scaleEnabled: allowZoomPan,
+                        child: _buildVerticalContinuousPages(notebook),
+                      )
+                    else
+                      InteractiveViewer(
+                        transformationController: _transformController,
+                        minScale: 0.5,
+                        maxScale: 4.0,
+                        boundaryMargin: EdgeInsets.all(
+                          appState.freePaperMovement ? 200 : 24,
+                        ),
+                        panEnabled: allowZoomPan,
+                        scaleEnabled: allowZoomPan,
+                        child: _buildHorizontalFlipPages(notebook),
                       ),
-                    ),
-                  ),
+
+                    // Item 3: Clear `×` close pill whenever Study Tape or Laser Pointer mode is active
+                    if (_activeTool == EditorTool.studyTape ||
+                        _activeTool == EditorTool.laserPointer)
+                      Positioned(
+                        top: 10,
+                        left: 0,
+                        right: 0,
+                        child: Center(
+                          child: Material(
+                            elevation: 6,
+                            borderRadius: BorderRadius.circular(20),
+                            color: EditorColors.obsidianSurface.withAlpha(235),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 5),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    _activeTool == EditorTool.studyTape
+                                        ? Icons.visibility_off_outlined
+                                        : Icons.flare_rounded,
+                                    size: 15,
+                                    color: EditorColors.activeBlue,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    _activeTool == EditorTool.studyTape
+                                        ? 'Băng che học thuộc (Chạm băng để ẩn/hiện)'
+                                        : 'Con trỏ Laser đang bật',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  GestureDetector(
+                                    onTap: () => setState(
+                                      () => _activeTool = _lastPenTool,
+                                    ),
+                                    child: const Icon(
+                                      Icons.close_rounded,
+                                      size: 17,
+                                      color: Colors.white70,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+
+                    // Item 7: Star-Only Floating Left Quick-Pen Favorites Dock flush to far left edge (left: 4)
+                    if (appState.showFavoritesBar &&
+                        appState.favoritePens.isNotEmpty)
+                      Positioned(
+                        left: 4,
+                        top: 0,
+                        bottom: 0,
+                        child: Center(
+                          child: QuickPenFavoritesDock(
+                            favoritePens: appState.favoritePens,
+                            activeTool: _activeTool,
+                            activeColor: _effectiveColor,
+                            activeWidth: _effectiveWidth,
+                            onSelectPreset: (preset) {
+                              setState(() {
+                                final tool = EditorToolX.fromStrokeToolType(
+                                  preset.toolType,
+                                );
+                                _activeTool = tool;
+                                if (tool.isPenFamily) _lastPenTool = tool;
+                                if (tool == EditorTool.highlighter) {
+                                  _highlighterColor = Color(preset.colorValue);
+                                  _highlighterWidth = preset.width;
+                                  _highlighterOpacity = preset.opacity;
+                                } else {
+                                  _penColor = Color(preset.colorValue);
+                                  _penWidth = preset.width;
+                                  _penOpacity = preset.opacity;
+                                  _pressureSensitivity =
+                                      preset.pressureSensitivity;
+                                }
+                                _selectedImageId = null;
+                              });
+                            },
+                            onRemovePreset: (preset) {
+                              appState.toggleStarPen(preset);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  duration: Duration(milliseconds: 1000),
+                                  content: Text(
+                                    'Đã bỏ ghim bút khỏi thanh ưa thích',
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
 
                 // Subtle Floating Page Counter Badge (top-right)
                 Positioned(
@@ -2513,29 +2686,31 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     ),
                   ),
 
-                // Busy PDF overlay
-                if (_isBusyPdf)
-                  Positioned.fill(
-                    child: ColoredBox(
-                      color: Colors.black45,
-                      child: Center(
-                        child: Card(
-                          child: Padding(
-                            padding: const EdgeInsets.all(20),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: const [
-                                CircularProgressIndicator(),
-                                SizedBox(width: 16),
-                                Text('Đang xử lý tệp PDF...'),
-                              ],
+                    // Busy PDF overlay
+                    if (_isBusyPdf)
+                      Positioned.fill(
+                        child: ColoredBox(
+                          color: Colors.black45,
+                          child: Center(
+                            child: Card(
+                              child: Padding(
+                                padding: const EdgeInsets.all(20),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: const [
+                                    CircularProgressIndicator(),
+                                    SizedBox(width: 16),
+                                    Text('Đang xử lý tệp PDF...'),
+                                  ],
+                                ),
+                              ),
                             ),
                           ),
                         ),
                       ),
-                    ),
-                  ),
-              ],
+                  ],
+                );
+              },
             ),
           ),
 
@@ -2706,85 +2881,50 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   }
 
   Widget _buildVerticalContinuousPages(Notebook notebook) {
-    return NotificationListener<ScrollNotification>(
-      onNotification: (notification) {
-        if (notification is OverscrollNotification &&
-            notification.overscroll > 0) {
-          setState(() {
-            _pullOverscroll =
-                (_pullOverscroll + notification.overscroll).clamp(0.0, 140.0);
-          });
-          if (_pullOverscroll >= 85.0 && !_isAddingPullPage) {
-            _handlePullAddPage(notebook, notebook.pages.last);
-          }
-        } else if (notification is ScrollEndNotification &&
-            _pullOverscroll > 0) {
-          setState(() => _pullOverscroll = 0.0);
-        }
-        return false;
-      },
-      child: SingleChildScrollView(
-        controller: _verticalScrollController,
-        physics: !_isDrawingPointerDown &&
-                (context.read<AppState>().palmRejectionEnabled ||
-                    context.read<AppState>().readOnlyMode ||
-                    _activeTool == EditorTool.panZoom)
-            ? const AlwaysScrollableScrollPhysics()
-            : const NeverScrollableScrollPhysics(),
-        padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 24),
-        child: Column(
-          children: [
-            for (int i = 0; i < notebook.pages.length; i++) ...[
-              _buildSinglePageCanvas(notebook, notebook.pages[i], i),
-              if (i < notebook.pages.length - 1) const SizedBox(height: 14),
-            ],
-            const SizedBox(height: 18),
-            // Pull-to-add-page indicator / direct tap fallback
-            GestureDetector(
-              onTap: () => _handlePullAddPage(notebook, notebook.pages.last),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 160),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                decoration: BoxDecoration(
-                  color: _pullOverscroll > 30
-                      ? EditorColors.activeBlue.withAlpha(48)
-                      : EditorColors.obsidianSurface.withAlpha(180),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: _pullOverscroll > 30
-                        ? EditorColors.activeBlue
-                        : Colors.white12,
+    // No nested SingleChildScrollView fighting InteractiveViewer!
+    // One unified InteractiveViewer handles 144fps 1-finger scroll & 2-finger pinch-zoom cleanly.
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (int i = 0; i < notebook.pages.length; i++) ...[
+            _buildSinglePageCanvas(notebook, notebook.pages[i], i),
+            if (i < notebook.pages.length - 1) const SizedBox(height: 14),
+          ],
+          const SizedBox(height: 18),
+          GestureDetector(
+            onTap: () => _handlePullAddPage(notebook, notebook.pages.last),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+              decoration: BoxDecoration(
+                color: EditorColors.obsidianSurface.withAlpha(200),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.white12),
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.add_circle_outline_rounded,
+                    size: 16,
+                    color: EditorColors.activeBlue,
                   ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      _pullOverscroll > 60
-                          ? Icons.add_circle_outline_rounded
-                          : Icons.arrow_downward_rounded,
-                      size: 16,
-                      color: EditorColors.activeBlue,
+                  SizedBox(width: 8),
+                  Text(
+                    'Chạm để thêm trang mới',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white70,
                     ),
-                    const SizedBox(width: 8),
-                    Text(
-                      _pullOverscroll > 60
-                          ? 'Thả để thêm trang mới'
-                          : 'Kéo mạnh xuống (hoặc chạm) để thêm trang mới',
-                      style: const TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white70,
-                      ),
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 36),
-          ],
-        ),
+          ),
+          const SizedBox(height: 36),
+        ],
       ),
     );
   }
@@ -2869,7 +3009,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               ),
             ),
 
-            // Layer 2 (144Hz Live Ink & Hover Overlay — Zero Widget Rebuilds)
+            // Layer 2 (144Hz Live Ink Overlay in its own RepaintBoundary — Zero Widget Rebuilds)
             Positioned.fill(
               child: Listener(
                 behavior: HitTestBehavior.translucent,
@@ -2879,29 +3019,30 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 onPointerUp: (e) => _handlePointerUp(e, page),
                 onPointerCancel: (e) => _handlePointerUp(e, page),
                 child: (_activeDrawingPageId == page.id || isActivePage)
-                    ? CustomPaint(
-                        size: pageSize,
-                        painter: ActiveStrokePainter(
-                          activeStroke: _activeStrokeNotifier,
-                          hoverPosition: _hoverPosNotifier,
-                          eraserCursor: _eraserCursorNotifier,
-                          lassoPath: _lassoPathNotifier,
-                          tapeDraftRect: _tapeDraftNotifier,
-                          isDarkPaper: page.paperColor == PaperColorType.dark,
-                          hoverRadius: _effectiveWidth * 0.65,
-                          hoverColor: _effectiveColor,
+                    ? RepaintBoundary(
+                        child: CustomPaint(
+                          size: pageSize,
+                          painter: ActiveStrokePainter(
+                            activeStroke: _activeStrokeNotifier,
+                            eraserCursor: _eraserCursorNotifier,
+                            lassoPath: _lassoPathNotifier,
+                            tapeDraftRect: _tapeDraftNotifier,
+                            isDarkPaper: page.paperColor == PaperColorType.dark,
+                          ),
                         ),
                       )
                     : const SizedBox.expand(),
               ),
             ),
 
-            // Laser Pointer Fading Trail Overlay
+            // Laser Pointer Fading Trail Overlay in its own RepaintBoundary
             if (isActivePage)
               Positioned.fill(
                 child: IgnorePointer(
-                  child: CustomPaint(
-                    painter: LaserPointerPainter(controller: _laserController),
+                  child: RepaintBoundary(
+                    child: CustomPaint(
+                      painter: LaserPointerPainter(controller: _laserController),
+                    ),
                   ),
                 ),
               ),
@@ -2928,17 +3069,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 context.read<AppState>().readOnlyMode,
               ),
 
-            // Movable Zoom Window Focus Indicator on Active Page
+            // Movable Zoom Window Focus Indicator on Active Page (locks page pan while dragging!)
             if (_zoomWindowEnabled && isActivePage)
               Positioned(
                 left: _zoomFocusRect.left,
                 top: _zoomFocusRect.top,
                 child: GestureDetector(
+                  onPanStart: (_) => setState(() => _isOverlayDragging = true),
                   onPanUpdate: (d) {
                     setState(() {
                       _zoomFocusRect = _zoomFocusRect.shift(d.delta);
                     });
                   },
+                  onPanEnd: (_) => setState(() => _isOverlayDragging = false),
+                  onPanCancel: () => setState(() => _isOverlayDragging = false),
                   child: Container(
                     width: _zoomFocusRect.width,
                     height: _zoomFocusRect.height,
@@ -2954,12 +3098,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 ),
               ),
 
-            // Interactive Translucent Ruler Overlay
+            // Interactive Translucent Ruler Overlay (locks page pan while dragging!)
             if (_rulerVisible && isActivePage)
               InteractiveRulerOverlay(
                 ruler: _rulerState,
                 onChanged: () => setState(() {}),
                 onClose: () => setState(() => _rulerVisible = false),
+                onDragStart: () => setState(() => _isOverlayDragging = true),
+                onDragEnd: () => setState(() => _isOverlayDragging = false),
               ),
 
             // Subtle Top-Left Bookmark Ribbon on Bookmarked Pages
@@ -2999,14 +3145,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               child: Stack(
                 children: [
                   Positioned.fill(
-                    child: CustomPaint(
-                      size: pageSize,
-                      painter: CanvasPainter(
-                        page: page,
-                        pdfBackgroundImage: page.pdfBackgroundPath != null
-                            ? _pdfImageCache[page.pdfBackgroundPath!]
-                            : null,
-                        repaintVersion: _repaintVersion,
+                    child: RepaintBoundary(
+                      child: CustomPaint(
+                        size: pageSize,
+                        painter: CanvasPainter(
+                          page: page,
+                          pdfBackgroundImage: page.pdfBackgroundPath != null
+                              ? _pdfImageCache[page.pdfBackgroundPath!]
+                              : null,
+                          elementImageCache: _elementImageCache,
+                          repaintVersion: _repaintVersion,
+                        ),
                       ),
                     ),
                   ),
@@ -3018,15 +3167,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       onPointerMove: (e) => _handlePointerMove(e, page),
                       onPointerUp: (e) => _handlePointerUp(e, page),
                       onPointerCancel: (e) => _handlePointerUp(e, page),
-                      child: CustomPaint(
-                        size: pageSize,
-                        painter: ActiveStrokePainter(
-                          activeStroke: _activeStrokeNotifier,
-                          hoverPosition: _hoverPosNotifier,
-                          eraserCursor: _eraserCursorNotifier,
-                          lassoPath: _lassoPathNotifier,
-                          tapeDraftRect: _tapeDraftNotifier,
-                          isDarkPaper: page.paperColor == PaperColorType.dark,
+                      child: RepaintBoundary(
+                        child: CustomPaint(
+                          size: pageSize,
+                          painter: ActiveStrokePainter(
+                            activeStroke: _activeStrokeNotifier,
+                            eraserCursor: _eraserCursorNotifier,
+                            lassoPath: _lassoPathNotifier,
+                            tapeDraftRect: _tapeDraftNotifier,
+                            isDarkPaper: page.paperColor == PaperColorType.dark,
+                          ),
                         ),
                       ),
                     ),
@@ -3070,6 +3220,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             }
           },
           onDoubleTap: () => _startEditingText(element),
+          onPanStart: isEditing
+              ? null
+              : (_) => setState(() => _isOverlayDragging = true),
           onPanUpdate: isEditing
               ? null
               : (details) {
@@ -3086,6 +3239,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         page.copyWith(textElements: updatedList),
                       );
                 },
+          onPanEnd: isEditing
+              ? null
+              : (_) => setState(() => _isOverlayDragging = false),
+          onPanCancel: () {
+            if (_isOverlayDragging) setState(() => _isOverlayDragging = false);
+          },
           child: Stack(
             clipBehavior: Clip.none,
             children: [
@@ -3289,8 +3448,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               _selectedTextId = null;
               _selectedStencilId = null;
             }),
+            onPanStart: (_) => setState(() => _isOverlayDragging = true),
             onPanUpdate: (d) =>
                 updateImg((e) => e.copyWith(x: e.x + d.delta.dx, y: e.y + d.delta.dy)),
+            onPanEnd: (_) => setState(() => _isOverlayDragging = false),
+            onPanCancel: () => setState(() => _isOverlayDragging = false),
             child: Stack(
               clipBehavior: Clip.none,
               children: [
@@ -3659,6 +3821,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             _selectedTextId = null;
             _selectedImageId = null;
           }),
+          onPanStart: (_) => setState(() => _isOverlayDragging = true),
           onPanUpdate: (d) {
             final updated = page.stencilElements
                 .map((s) => s.id == stencil.id
@@ -3670,6 +3833,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                   page.copyWith(stencilElements: updated),
                 );
           },
+          onPanEnd: (_) => setState(() => _isOverlayDragging = false),
+          onPanCancel: () => setState(() => _isOverlayDragging = false),
           child: Stack(
             clipBehavior: Clip.none,
             children: [
@@ -3814,6 +3979,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               children: [
                 // Top Drag Header Bar
                 GestureDetector(
+                  onPanStart: readOnly
+                      ? null
+                      : (_) => setState(() => _isOverlayDragging = true),
                   onPanUpdate: readOnly
                       ? null
                       : (d) => updateSticky(
@@ -3822,6 +3990,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                               y: s.y + d.delta.dy,
                             ),
                           ),
+                  onPanEnd: readOnly
+                      ? null
+                      : (_) => setState(() => _isOverlayDragging = false),
+                  onPanCancel: () {
+                    if (_isOverlayDragging) {
+                      setState(() => _isOverlayDragging = false);
+                    }
+                  },
                   child: Container(
                     height: 36,
                     padding: const EdgeInsets.symmetric(horizontal: 6),

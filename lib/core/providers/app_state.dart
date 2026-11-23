@@ -61,6 +61,9 @@ class AppState extends ChangeNotifier {
   // Danh sách đường dẫn ảnh chèn gần đây ("Ảnh gần đây" trong Image Popover)
   List<String> _recentImagePaths = [];
 
+  // Thư mục xuất PDF mặc định (null => /storage/emulated/0/Documents/ChemNote)
+  String? _pdfExportDirectory;
+
   // Chế độ Khoá lòng bàn tay (Chống tỳ tay: Bút viết, 1 ngón tay cuộn trang)
   bool _palmRejectionEnabled = true;
 
@@ -119,6 +122,7 @@ class AppState extends ChangeNotifier {
   List<String> get customStickers => List.unmodifiable(_customStickers);
   List<String> get customCoverPaths => List.unmodifiable(_customCoverPaths);
   List<String> get recentImagePaths => List.unmodifiable(_recentImagePaths);
+  String? get pdfExportDirectory => _pdfExportDirectory;
   bool get palmRejectionEnabled => _palmRejectionEnabled;
   bool get readOnlyMode => _readOnlyMode;
 
@@ -156,6 +160,14 @@ class AppState extends ChangeNotifier {
     if (_showFavoritesBar == value) return;
     _showFavoritesBar = value;
     notifyListeners();
+  }
+
+  void setPdfExportDirectory(String? dir) {
+    final normalized = (dir == null || dir.trim().isEmpty) ? null : dir.trim();
+    if (_pdfExportDirectory == normalized) return;
+    _pdfExportDirectory = normalized;
+    notifyListeners();
+    unawaited(_storage.savePdfExportDirectory(normalized));
   }
 
   void setPalmRejectionEnabled(bool value) {
@@ -443,6 +455,7 @@ class AppState extends ChangeNotifier {
       _favoritePens = await _storage.loadFavoritePens();
       _customStickers = await _storage.loadCustomStickers();
       _customCoverPaths = await _storage.loadCustomCovers();
+      _pdfExportDirectory = await _storage.loadPdfExportDirectory();
     } finally {
       _isLoading = false;
       notifyListeners();

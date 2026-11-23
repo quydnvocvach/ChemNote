@@ -524,35 +524,29 @@ class CanvasPainter extends CustomPainter {
 
 /// Layer 2 (144Hz Ultra-Low-Latency Overlay): Repaints directly from
 /// [ValueListenable]s without rebuilding the Flutter widget tree!
-/// Draws the live in-progress stroke, M-Pencil 3 hover nib ring, eraser cursor,
-/// active lasso marquee, and active study-tape drag preview.
+/// Draws the live in-progress stroke using a zero-lag raw path during
+/// pointermove (smoothing runs once on pointerup), eraser cursor, active lasso
+/// marquee, and active study-tape drag preview. Floating hover circle removed.
 class ActiveStrokePainter extends CustomPainter {
   final ValueListenable<Stroke?> activeStroke;
-  final ValueListenable<Offset?> hoverPosition;
   final ValueListenable<Offset?> eraserCursor;
   final ValueListenable<List<Offset>> lassoPath;
   final ValueListenable<Rect?> tapeDraftRect;
   final bool isDarkPaper;
-  final double hoverRadius;
-  final Color hoverColor;
   final double eraserRadius;
   final Color tapeColor;
 
   ActiveStrokePainter({
     required this.activeStroke,
-    required this.hoverPosition,
     required this.eraserCursor,
     required this.lassoPath,
     required this.tapeDraftRect,
     required this.isDarkPaper,
-    this.hoverRadius = 3.0,
-    this.hoverColor = const Color(0xFF3B82F6),
     this.eraserRadius = 18.0,
     this.tapeColor = const Color(0xFF6366F1),
   }) : super(
           repaint: Listenable.merge([
             activeStroke,
-            hoverPosition,
             eraserCursor,
             lassoPath,
             tapeDraftRect,
@@ -561,9 +555,9 @@ class ActiveStrokePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // 1. Live in-progress stroke
+    // 1. Live in-progress stroke (ultra-fast raw path for 0ms 144Hz stylus ink)
     final stroke = activeStroke.value;
-    if (stroke != null) {
+    if (stroke != null && stroke.points.isNotEmpty) {
       if (stroke.toolType == ToolType.highlighter) {
         CanvasPainter.paintHighlighterStroke(
           canvas,
@@ -571,8 +565,34 @@ class ActiveStrokePainter extends CustomPainter {
           isDarkPaper: isDarkPaper,
           isSelected: false,
         );
-      } else {
+      } else if (stroke.shapeType != ShapeType.none) {
         CanvasPainter.paintInkStroke(canvas, stroke, isSelected: false);
+      } else {
+        final pts = stroke.points;
+        final baseColor = Color(stroke.colorValue);
+        final bool isPencil = stroke.toolType == ToolType.pencil;
+        final paint = Paint()
+          ..color = isPencil ? baseColor.withAlpha(195) : baseColor
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = stroke.width
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round
+          ..isAntiAlias = true;
+        if (pts.length == 1) {
+          canvas.drawCircle(
+            Offset(pts.first.x, pts.first.y),
+            stroke.width * 0.5,
+            Paint()
+              ..color = paint.color
+              ..style = PaintingStyle.fill,
+          );
+        } else {
+          final path = Path()..moveTo(pts.first.x, pts.first.y);
+          for (int i = 1; i < pts.length; i++) {
+            path.lineTo(pts[i].x, pts[i].y);
+          }
+          canvas.drawPath(path, paint);
+        }
       }
     }
 
@@ -622,7 +642,7 @@ class ActiveStrokePainter extends CustomPainter {
       );
     }
 
-    // 4. Eraser cursor circle
+    // 4. Eraser cursor circle (only shown while actively erasing)
     final ePos = eraserCursor.value;
     if (ePos != null) {
       canvas.drawCircle(
@@ -641,32 +661,11 @@ class ActiveStrokePainter extends CustomPainter {
           ..strokeWidth = 1.6,
       );
     }
-
-    // 5. M-Pencil 3 hover cursor ring
-    final hPos = hoverPosition.value;
-    if (hPos != null && ePos == null) {
-      final r = math.max(3.5, hoverRadius);
-      canvas.drawCircle(
-        hPos,
-        r,
-        Paint()
-          ..color = hoverColor.withAlpha(175)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.4,
-      );
-      canvas.drawCircle(
-        hPos,
-        1.5,
-        Paint()..color = hoverColor.withAlpha(220),
-      );
-    }
   }
 
   @override
   bool shouldRepaint(covariant ActiveStrokePainter oldDelegate) {
     return oldDelegate.isDarkPaper != isDarkPaper ||
-        oldDelegate.hoverRadius != hoverRadius ||
-        oldDelegate.hoverColor != hoverColor ||
         oldDelegate.eraserRadius != eraserRadius;
   }
 }

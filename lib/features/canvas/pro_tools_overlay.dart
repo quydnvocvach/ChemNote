@@ -192,12 +192,16 @@ class InteractiveRulerOverlay extends StatelessWidget {
   final RulerState ruler;
   final VoidCallback onChanged;
   final VoidCallback onClose;
+  final VoidCallback? onDragStart;
+  final VoidCallback? onDragEnd;
 
   const InteractiveRulerOverlay({
     super.key,
     required this.ruler,
     required this.onChanged,
     required this.onClose,
+    this.onDragStart,
+    this.onDragEnd,
   });
 
   void _rotateBy(double deltaRad) {
@@ -226,6 +230,7 @@ class InteractiveRulerOverlay extends StatelessWidget {
       child: Transform.rotate(
         angle: ruler.angleRad,
         child: GestureDetector(
+          onPanStart: (_) => onDragStart?.call(),
           onPanUpdate: (details) {
             // Rotate delta back to page coordinates
             final cosA = math.cos(ruler.angleRad);
@@ -235,6 +240,8 @@ class InteractiveRulerOverlay extends StatelessWidget {
             ruler.center += Offset(pageDx, pageDy);
             onChanged();
           },
+          onPanEnd: (_) => onDragEnd?.call(),
+          onPanCancel: () => onDragEnd?.call(),
           child: SizedBox(
             width: ruler.length,
             height: ruler.thickness,

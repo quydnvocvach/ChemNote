@@ -268,27 +268,56 @@ class PdfExportService {
     return doc.save();
   }
 
-  /// Xuất sổ tay thành tệp PDF và lưu vào thư mục xuất của ứng dụng.
+  /// Đường dẫn xuất PDF mặc định trên Android / HarmonyOS.
+  static const String defaultAndroidExportPath =
+      '/storage/emulated/0/Documents/ChemNote';
+
+  /// Xuất sổ tay thành tệp PDF và lưu vào thư mục người dùng chọn (hoặc Documents/ChemNote).
   Future<File> exportNotebookToFile(
     Notebook notebook, {
     String? customFileName,
+    String? customDirectory,
   }) async {
     final bytes = await buildNotebookPdfBytes(notebook);
-    final dir = await _resolveExportDirectory();
     final rawName = (customFileName ?? notebook.title).trim();
     final safeName = rawName
         .replaceAll(RegExp(r'[^a-zA-Z0-9_\-\s]'), '')
         .replaceAll(RegExp(r'\s+'), '_');
     final fileName =
         '${safeName.isEmpty ? 'ChemNote' : safeName}_${DateTime.now().millisecondsSinceEpoch}.pdf';
-    final file = File('${dir.path}${Platform.pathSeparator}$fileName');
-    await file.writeAsBytes(bytes, flush: true);
-    return file;
+
+    final candidates = await _candidateExportDirectories(
+      customDirectory: customDirectory,
+    );
+
+    Object? lastError;
+    for (final dir in candidates) {
+      try {
+        if (!await dir.exists()) {
+          await dir.create(recursive: true);
+        }
+        final file = File('${dir.path}${Platform.pathSeparator}$fileName');
+        await file.writeAsBytes(bytes, flush: true);
+        return file;
+      } catch (e) {
+        lastError = e;
+      }
+    }
+
+    throw FileSystemException(
+      'Không thể lưu tệp PDF vào bất kỳ thư mục nào: $lastError',
+    );
   }
 
   /// Xuất PDF và mở hộp thoại chia sẻ của hệ thống (Android & HarmonyOS).
-  Future<File> shareNotebookPdf(Notebook notebook) async {
-    final file = await exportNotebookToFile(notebook);
+  Future<File> shareNotebookPdf(
+    Notebook notebook, {
+    String? customDirectory,
+  }) async {
+    final file = await exportNotebookToFile(
+      notebook,
+      customDirectory: customDirectory,
+    );
     await Share.shareXFiles(
       <XFile>[XFile(file.path)],
       subject: '${notebook.title}.pdf',
@@ -305,22 +334,43 @@ class PdfExportService {
     );
   }
 
-  Future<Directory> _resolveExportDirectory() async {
+  Future<List<Directory>> _candidateExportDirectories({
+    String? customDirectory,
+  }) async {
+    final dirs = <Directory>[];
+
     if (_overrideExportDir != null) {
-      if (!await _overrideExportDir!.exists()) {
-        await _overrideExportDir!.create(recursive: true);
-      }
-      return _overrideExportDir!;
+      dirs.add(_overrideExportDir!);
+      return dirs;
     }
-    final docs = await getApplicationDocumentsDirectory();
-    final dir = Directory(
-      '${docs.path}${Platform.pathSeparator}chemnote'
-      '${Platform.pathSeparator}exports',
-    );
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
+
+    if (customDirectory != null && customDirectory.trim().isNotEmpty) {
+      dirs.add(Directory(customDirectory.trim()));
     }
-    return dir;
+
+    if (Platform.isAndroid) {
+      dirs.add(Directory(defaultAndroidExportPath));
+      try {
+        final ext = await getExternalStorageDirectory();
+        if (ext != null) {
+          dirs.add(
+            Directory(
+              '${ext.path}${Platform.pathSeparator}Documents'
+              '${Platform.pathSeparator}ChemNote',
+            ),
+          );
+        }
+      } catch (_) {}
+    }
+
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      dirs.add(
+        Directory('${docs.path}${Platform.pathSeparator}ChemNote'),
+      );
+    } catch (_) {}
+
+    return dirs;
   }
 
   PdfColor _paperPdfColor(PaperColorType color) {

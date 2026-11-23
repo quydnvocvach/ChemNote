@@ -189,16 +189,16 @@ void main() {
       expect(rTilted, greaterThan(rUpright));
     });
 
-    test('detects strict scribble-to-erase zig-zag (>=7 reversals) and ignores fast handwriting', () {
-      // Create a 10-pass back-and-forth scribble (9 sharp reversals ~175 deg, ~120px segments)
+    test('detects tuned scribble-to-erase zig-zag (>=4 reversals) and ignores short handwriting waves', () {
+      // Create a 5-pass back-and-forth scribble (4 sharp reversals > 130 deg, ~120px segments)
       final scribble = <StrokePoint>[];
       int ts = 1000;
-      const passes = 10;
+      const passes = 5;
       for (int pass = 0; pass < passes; pass++) {
         final xStart = (pass % 2 == 0) ? 100.0 : 220.0;
         final xEnd = (pass % 2 == 0) ? 220.0 : 100.0;
-        final yStart = 80.0 + pass * 5.0;
-        final yEnd = 80.0 + (pass + 1) * 5.0;
+        final yStart = 95.0 + pass * 5.0;
+        final yEnd = 95.0 + (pass + 1) * 5.0;
         final firstStep = pass == 0 ? 0 : 1;
         for (int s = firstStep; s <= 2; s++) {
           final t = s / 2.0;
