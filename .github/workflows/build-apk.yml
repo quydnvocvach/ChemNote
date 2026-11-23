@@ -50,19 +50,17 @@ jobs:
           cp /tmp/chemnote_backup/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
           cp -r /tmp/chemnote_backup/res/* android/app/src/main/res/
 
-          # Patch generated build.gradle.kts (or build.gradle) for com.chemnote.app, minSdk 23, compileSdk 35
+          # Patch generated build.gradle.kts (or build.gradle) for com.chemnote.app, minSdk 23, compileSdk 36
           if [ -f android/app/build.gradle.kts ]; then
             sed -i 's/applicationId = .*/applicationId = "com.chemnote.app"/' android/app/build.gradle.kts
             sed -i 's/namespace = .*/namespace = "com.chemnote.app"/' android/app/build.gradle.kts
             sed -i 's/minSdk = .*/minSdk = 23/' android/app/build.gradle.kts
-            sed -i 's/compileSdk = .*/compileSdk = 35/' android/app/build.gradle.kts
-            sed -i 's/targetSdk = .*/targetSdk = 35/' android/app/build.gradle.kts
+            sed -i 's/compileSdk = .*/compileSdk = 36/' android/app/build.gradle.kts
           elif [ -f android/app/build.gradle ]; then
             sed -i 's/applicationId .*/applicationId = "com.chemnote.app"/' android/app/build.gradle
             sed -i 's/namespace .*/namespace = "com.chemnote.app"/' android/app/build.gradle
             sed -i 's/minSdk .*/minSdk = 23/' android/app/build.gradle
-            sed -i 's/compileSdk .*/compileSdk = 35/' android/app/build.gradle
-            sed -i 's/targetSdk .*/targetSdk = 35/' android/app/build.gradle
+            sed -i 's/compileSdk .*/compileSdk = 36/' android/app/build.gradle
           fi
 
       - name: Install Flutter dependencies
@@ -84,7 +82,7 @@ jobs:
           flutter build apk --release 2>&1 | tee build_output.txt
           BUILD_EXIT=${PIPESTATUS[0]}
           if [ "$BUILD_EXIT" -ne 0 ]; then
-            grep -E "Error:|FAILURE:|Exception:|Execution failed|e: " build_output.txt | head -n 30 | while IFS= read -r line; do
+            grep -E "Error:|FAILURE:|Exception:|Execution failed|requires|compileSdk|e: " build_output.txt | head -n 30 | while IFS= read -r line; do
               echo "::error title=ApkBuild::$line"
             done
           fi
