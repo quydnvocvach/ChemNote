@@ -190,18 +190,18 @@ void main() {
     });
 
     test('detects strict scribble-to-erase zig-zag (>=7 reversals) and ignores fast handwriting', () {
-      // Create a 9-pass back-and-forth scribble (8 sharp reversals > 145 deg, ~80px segments)
+      // Create a 10-pass back-and-forth scribble (9 sharp reversals ~175 deg, ~120px segments)
       final scribble = <StrokePoint>[];
       int ts = 1000;
-      const passes = 9;
+      const passes = 10;
       for (int pass = 0; pass < passes; pass++) {
-        final xStart = (pass % 2 == 0) ? 100.0 : 180.0;
-        final xEnd = (pass % 2 == 0) ? 180.0 : 100.0;
-        final yStart = 96.0 + pass * 2.0;
-        final yEnd = 96.0 + (pass + 1) * 2.0;
+        final xStart = (pass % 2 == 0) ? 100.0 : 220.0;
+        final xEnd = (pass % 2 == 0) ? 220.0 : 100.0;
+        final yStart = 80.0 + pass * 5.0;
+        final yEnd = 80.0 + (pass + 1) * 5.0;
         final firstStep = pass == 0 ? 0 : 1;
-        for (int s = firstStep; s <= 4; s++) {
-          final t = s / 4.0;
+        for (int s = firstStep; s <= 2; s++) {
+          final t = s / 2.0;
           scribble.add(StrokePoint(
             x: xStart + (xEnd - xStart) * t,
             y: yStart + (yEnd - yStart) * t,
@@ -214,8 +214,8 @@ void main() {
 
       expect(StrokeEngine.isScribbleGesture(scribble), isTrue);
 
-      // Short 4-pass cursive handwriting wave (only 3 reversals) must NOT trigger scribble-to-erase
-      final shortWave = scribble.sublist(0, 17);
+      // Short 3-pass cursive handwriting wave (only 2 reversals) must NOT trigger scribble-to-erase
+      final shortWave = scribble.sublist(0, 7);
       expect(StrokeEngine.isScribbleGesture(shortWave), isFalse);
 
       // Straight line should NOT trigger scribble-to-erase

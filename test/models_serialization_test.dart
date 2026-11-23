@@ -409,7 +409,7 @@ void main() {
       expect(decodedPage.audioRecordings.first.createdAt, recordedAt);
 
       final hashed = AppState.hashPin('2026');
-      expect(hashed, startsWith('h2_'));
+      expect(hashed, startsWith('sha256_'));
       expect(AppState.verifyPin('2026', hashed), isTrue);
       expect(AppState.verifyPin('0000', hashed), isFalse);
       // Backwards-compatible plaintext PIN check
