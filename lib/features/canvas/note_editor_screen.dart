@@ -1988,7 +1988,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         onToggleLockNotebook: () async {
           await appState.setNotebookLock(
             notebook.id,
-            locked: !notebook.isLocked,
+            isLocked: !notebook.isLocked,
             pinCode: notebook.isLocked ? null : '1234',
           );
           if (mounted) {
@@ -3076,8 +3076,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                           ),
                         );
                       },
-                      onAddToStickers: () async {
-                        await context
+                      onAddToStickers: () {
+                        context
                             .read<AppState>()
                             .addCustomSticker(img.filePath);
                         if (mounted) {

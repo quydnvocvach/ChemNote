@@ -787,7 +787,10 @@ class StrokeEngine {
 
     // 2c. Regular Hexagon (Benzene ring!)
     if (vertices.length >= 5 && vertices.length <= 7) {
-      final double hexFitError = _regularHexagonError(rawPoints, center, meanR);
+      // Edge-sampled points on a regular hexagon have mean radius ~0.91 * circumradius.
+      final double hexRadius = meanR / 0.91;
+      final double hexFitError =
+          _regularHexagonError(rawPoints, center, hexRadius);
       final double circleFitError = _circleEllipseError(rawPoints, bounds);
 
       if (vertices.length == 6 &&
@@ -795,13 +798,13 @@ class StrokeEngine {
           hexFitError < 0.22) {
         return ShapeRecognitionResult(
           shapeType: ShapeType.hexagon,
-          snappedPoints: _generateRegularHexagon(rawPoints, center, meanR),
+          snappedPoints: _generateRegularHexagon(rawPoints, center, hexRadius),
         );
       }
       if (hexFitError < 0.14 && hexFitError < circleFitError * 0.92) {
         return ShapeRecognitionResult(
           shapeType: ShapeType.hexagon,
-          snappedPoints: _generateRegularHexagon(rawPoints, center, meanR),
+          snappedPoints: _generateRegularHexagon(rawPoints, center, hexRadius),
         );
       }
     }
