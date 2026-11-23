@@ -415,5 +415,67 @@ void main() {
       // Backwards-compatible plaintext PIN check
       expect(AppState.verifyPin('1234', '1234'), isTrue);
     });
+
+    test('v3.1.0 StickyNoteElement, isInfiniteWhiteboard, and Notebook.isWhiteboard round-trip', () {
+      final now = DateTime.utc(2026, 7, 1, 15, 0);
+      final sticky = StickyNoteElement(
+        id: 'sticky-1',
+        x: 2950.0,
+        y: 3020.0,
+        width: 230.0,
+        height: 200.0,
+        text: 'Nhớ hệ số cân bằng: 2MnO4- + 5C2O4^2- + 16H+',
+        colorValue: 0xFFBBF7D0,
+        isCollapsed: true,
+        updatedAt: now,
+      );
+      final whiteboardPage = NotePage(
+        id: 'wb-page-1',
+        index: 0,
+        templateType: PaperTemplateType.dotted,
+        isInfiniteWhiteboard: true,
+        stickyNotes: [sticky],
+        updatedAt: now,
+      );
+      final whiteboardNotebook = Notebook(
+        id: 'wb-nb-1',
+        title: 'Sơ đồ cơ chế Hữu cơ',
+        defaultTemplate: PaperTemplateType.hexagonal,
+        isWhiteboard: true,
+        customCoverImagePath: '/data/user/0/com.chemnote.app/files/covers/my_cover.jpg',
+        useFirstPageAsCover: true,
+        pages: [whiteboardPage],
+        createdAt: now,
+        updatedAt: now,
+      );
+
+      final decoded = Notebook.fromJson(
+        jsonDecode(jsonEncode(whiteboardNotebook.toJson())) as Map<String, dynamic>,
+      );
+      expect(decoded.isWhiteboard, isTrue);
+      expect(decoded.customCoverImagePath, '/data/user/0/com.chemnote.app/files/covers/my_cover.jpg');
+      expect(decoded.useFirstPageAsCover, isTrue);
+      expect(decoded.pages.first.isInfiniteWhiteboard, isTrue);
+      expect(decoded.pages.first.stickyNotes.length, 1);
+      final decodedSticky = decoded.pages.first.stickyNotes.first;
+      expect(decodedSticky.id, 'sticky-1');
+      expect(decodedSticky.x, 2950.0);
+      expect(decodedSticky.y, 3020.0);
+      expect(decodedSticky.width, 230.0);
+      expect(decodedSticky.height, 200.0);
+      expect(decodedSticky.text, contains('2MnO4-'));
+      expect(decodedSticky.colorValue, 0xFFBBF7D0);
+      expect(decodedSticky.isCollapsed, isTrue);
+      expect(decodedSticky.updatedAt, now);
+
+      // Safe defaults when legacy JSON omits v3.1.0 fields
+      final legacy = Notebook.fromJson({'id': 'legacy-1', 'title': 'Legacy'});
+      expect(legacy.isWhiteboard, isFalse);
+      expect(legacy.customCoverImagePath, isNull);
+      expect(legacy.useFirstPageAsCover, isFalse);
+      final legacyPage = NotePage.fromJson({'id': 'legacy-p1'});
+      expect(legacyPage.isInfiniteWhiteboard, isFalse);
+      expect(legacyPage.stickyNotes, isEmpty);
+    });
   });
 }

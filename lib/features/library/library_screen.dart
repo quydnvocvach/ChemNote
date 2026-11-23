@@ -1,12 +1,19 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../core/models/drawing_elements.dart';
 import '../../core/models/folder.dart';
+import '../../core/models/note_page.dart';
 import '../../core/models/notebook.dart';
 import '../../core/providers/app_state.dart';
 import '../../core/theme/app_theme.dart';
 import '../canvas/note_editor_screen.dart';
+import '../pdf/pdf_import_service.dart';
 import '../sync/sync_settings_screen.dart';
 import 'create_notebook_dialog.dart';
 import 'notebook_cover_widget.dart';
@@ -431,7 +438,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }) {
     if (showAddTile && itemIndex == 0) {
       return _NewNotebookTile(
-        onTap: () => _createNotebook(context),
+        onTap: () => _showQuickAddMenu(context),
+        onDoubleTap: () => _createQuickNote(context),
       );
     }
 
@@ -734,9 +742,212 @@ class _LibraryScreenState extends State<LibraryScreen> {
       defaultTemplate: result.template,
       defaultPaperColor: result.paperColor,
       defaultOrientationLandscape: result.isLandscape,
+      isWhiteboard: result.isWhiteboard,
+      customCoverImagePath: result.customCoverImagePath,
+      useFirstPageAsCover: result.useFirstPageAsCover,
     );
     if (!context.mounted) return;
     await _openNotebook(context, notebook);
+  }
+
+  Future<void> _createQuickNote(BuildContext context) async {
+    final appState = context.read<AppState>();
+    final now = DateTime.now();
+    final nb = await appState.createNotebook(
+      title:
+          'Ghi chú ${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}',
+      folderId: _section == _LibrarySection.folder ? _selectedFolderId : null,
+      defaultTemplate: PaperTemplateType.sageRibbon,
+    );
+    if (!context.mounted) return;
+    await _openNotebook(context, nb);
+  }
+
+  Future<void> _createQuickWhiteboard(BuildContext context) async {
+    final appState = context.read<AppState>();
+    final nb = await appState.createNotebook(
+      title: 'Bảng vô cực Hóa học',
+      folderId: _section == _LibrarySection.folder ? _selectedFolderId : null,
+      defaultTemplate: PaperTemplateType.dotted,
+      isWhiteboard: true,
+    );
+    if (!context.mounted) return;
+    await _openNotebook(context, nb);
+  }
+
+  Future<void> _importImageAsNotebook(BuildContext context) async {
+    try {
+      final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+      if (picked == null || !context.mounted) return;
+      final appState = context.read<AppState>();
+      final savedPath = await appState.storage.saveImportedFile(
+        File(picked.path),
+        subfolder: 'images',
+      );
+      appState.addRecentImagePath(savedPath);
+      final now = DateTime.now();
+      final page = NotePage(
+        id: const Uuid().v4(),
+        index: 0,
+        templateType: PaperTemplateType.blank,
+        paperColor: PaperColorType.white,
+        imageElements: [
+          ImageElement(
+            id: const Uuid().v4(),
+            x: 80,
+            y: 120,
+            width: 560,
+            height: 420,
+            filePath: savedPath,
+          ),
+        ],
+        updatedAt: now,
+      );
+      final nb = await appState.createNotebook(
+        title: 'Ghi chú hình ảnh',
+        folderId: _section == _LibrarySection.folder ? _selectedFolderId : null,
+        initialPages: [page],
+      );
+      if (!context.mounted) return;
+      await _openNotebook(context, nb);
+    } catch (_) {}
+  }
+
+  Future<void> _importPdfAsNotebook(BuildContext context) async {
+    try {
+      final result = await PdfImportService().pickAndImportPdf();
+      if (result == null || result.pages.isEmpty || !context.mounted) return;
+      final appState = context.read<AppState>();
+      final nb = await appState.createNotebook(
+        title: result.suggestedTitle,
+        folderId: _section == _LibrarySection.folder ? _selectedFolderId : null,
+        initialPages: result.pages,
+      );
+      if (!context.mounted) return;
+      await _openNotebook(context, nb);
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Không thể nhập PDF: $e')),
+      );
+    }
+  }
+
+  Future<void> _importDocPptAsNotebook(BuildContext context) async {
+    try {
+      final picked = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['doc', 'docx', 'ppt', 'pptx'],
+      );
+      if (picked == null || picked.files.isEmpty || !context.mounted) return;
+      final file = picked.files.first;
+      if (file.path == null) return;
+      final appState = context.read<AppState>();
+      final savedPath = await appState.storage.saveImportedFile(
+        File(file.path!),
+        subfolder: 'attachments',
+      );
+      final ext = (file.extension ?? 'doc').toLowerCase();
+      final now = DateTime.now();
+      final page = NotePage(
+        id: const Uuid().v4(),
+        index: 0,
+        templateType: PaperTemplateType.sageRibbon,
+        attachmentElements: [
+          AttachmentElement(
+            id: const Uuid().v4(),
+            x: 80,
+            y: 120,
+            fileName: file.name,
+            filePath: savedPath,
+            fileExtension: ext,
+            fileSizeBytes: file.size,
+          ),
+        ],
+        updatedAt: now,
+      );
+      final nb = await appState.createNotebook(
+        title: file.name.replaceAll(RegExp(r'\.[^.]+$'), ''),
+        folderId: _section == _LibrarySection.folder ? _selectedFolderId : null,
+        initialPages: [page],
+      );
+      if (!context.mounted) return;
+      await _openNotebook(context, nb);
+    } catch (_) {}
+  }
+
+  void _showQuickAddMenu(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.note_add_outlined),
+              title: const Text('Ghi chú mới'),
+              subtitle: const Text('Chọn bìa cá nhân & mẫu giấy học thuật'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _createNotebook(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.all_inclusive_rounded),
+              title: const Text('Bảng vô cực mới'),
+              subtitle: const Text('Không gian 6000×6000 vẽ sơ đồ không giới hạn'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _createQuickWhiteboard(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.create_new_folder_outlined),
+              title: const Text('Thư mục mới'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _createFolder(context);
+              },
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.image_outlined),
+              title: const Text('Nhập hình ảnh'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _importImageAsNotebook(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.picture_as_pdf_outlined),
+              title: const Text('Nhập tệp tin PDF'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _importPdfAsNotebook(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.description_outlined),
+              title: const Text('Nhập DOC/PPT'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _importDocPptAsNotebook(context);
+              },
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+              child: Text(
+                "Chạm đúp vào '+' để tạo nhanh ghi chú mới.",
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _createFolder(BuildContext context) async {
@@ -1250,8 +1461,12 @@ class _SidebarTile extends StatelessWidget {
 /// Ô đầu tiên trên kệ sách: "+ Ghi chú mới" theo phong cách Huawei Notes.
 class _NewNotebookTile extends StatelessWidget {
   final VoidCallback onTap;
+  final VoidCallback? onDoubleTap;
 
-  const _NewNotebookTile({required this.onTap});
+  const _NewNotebookTile({
+    required this.onTap,
+    this.onDoubleTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1271,6 +1486,7 @@ class _NewNotebookTile extends StatelessWidget {
               borderRadius: BorderRadius.circular(12),
               child: InkWell(
                 onTap: onTap,
+                onDoubleTap: onDoubleTap,
                 borderRadius: BorderRadius.circular(12),
                 child: Container(
                   decoration: BoxDecoration(

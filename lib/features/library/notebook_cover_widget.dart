@@ -1,8 +1,10 @@
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
 import '../../core/models/notebook.dart';
+import '../canvas/paper_templates.dart';
 
 class NotebookCoverWidget extends StatelessWidget {
   final Notebook notebook;
@@ -64,10 +66,27 @@ class NotebookCoverWidget extends StatelessWidget {
                       child: Stack(
                         fit: StackFit.expand,
                         children: [
-                          _CoverBackground(
-                            color: coverColor,
-                            style: notebook.coverStyle,
-                          ),
+                          if (notebook.customCoverImagePath != null &&
+                              notebook.customCoverImagePath!.isNotEmpty &&
+                              File(notebook.customCoverImagePath!).existsSync())
+                            Image.file(
+                              File(notebook.customCoverImagePath!),
+                              fit: BoxFit.cover,
+                            )
+                          else if (notebook.useFirstPageAsCover)
+                            CustomPaint(
+                              painter: PaperTemplatePainter(
+                                templateType: notebook.defaultTemplate,
+                                paperColor: notebook.defaultPaperColor,
+                                isLandscape: notebook.defaultOrientationLandscape,
+                                isInfiniteWhiteboard: notebook.isWhiteboard,
+                              ),
+                            )
+                          else
+                            _CoverBackground(
+                              color: coverColor,
+                              style: notebook.coverStyle,
+                            ),
                           // Nếp gấp gáy sổ
                           Positioned(
                             left: 0,
@@ -93,25 +112,62 @@ class NotebookCoverWidget extends StatelessWidget {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Row(
-                                  mainAxisAlignment: MainAxisAlignment.end,
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                   children: [
-                                    if (notebook.isFavorite) ...[
-                                      const _BadgePill(
-                                        icon: Icons.star_rounded,
-                                        color: Color(0xFFFBBF24),
-                                        tooltip: 'Ưa thích',
-                                      ),
-                                      const SizedBox(width: 4),
-                                    ],
-                                    if (notebook.isLocked) ...[
-                                      const _BadgePill(
-                                        icon: Icons.lock_rounded,
-                                        color: Color(0xFFF87171),
-                                        tooltip: 'Đã khóa mã PIN',
-                                      ),
-                                      const SizedBox(width: 4),
-                                    ],
-                                    _SyncStatusBadge(status: notebook.syncStatus),
+                                    if (notebook.isWhiteboard)
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 6,
+                                          vertical: 3,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: Colors.black.withValues(alpha: 0.42),
+                                          borderRadius: BorderRadius.circular(12),
+                                        ),
+                                        child: const Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(
+                                              Icons.all_inclusive_rounded,
+                                              size: 11,
+                                              color: Colors.white,
+                                            ),
+                                            SizedBox(width: 3),
+                                            Text(
+                                              'Vô cực',
+                                              style: TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 9.5,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      )
+                                    else
+                                      const SizedBox.shrink(),
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (notebook.isFavorite) ...[
+                                          const _BadgePill(
+                                            icon: Icons.star_rounded,
+                                            color: Color(0xFFFBBF24),
+                                            tooltip: 'Ưa thích',
+                                          ),
+                                          const SizedBox(width: 4),
+                                        ],
+                                        if (notebook.isLocked) ...[
+                                          const _BadgePill(
+                                            icon: Icons.lock_rounded,
+                                            color: Color(0xFFF87171),
+                                            tooltip: 'Đã khóa mã PIN',
+                                          ),
+                                          const SizedBox(width: 4),
+                                        ],
+                                        _SyncStatusBadge(status: notebook.syncStatus),
+                                      ],
+                                    ),
                                   ],
                                 ),
                                 const Spacer(),

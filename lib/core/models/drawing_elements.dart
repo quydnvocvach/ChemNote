@@ -245,6 +245,85 @@ class AudioRecording {
   }
 }
 
+/// Giấy nhớ dán (Sticky Note) kiểu GoodNotes 6 có thể kéo thả, đổi màu pastel và thu gọn.
+class StickyNoteElement {
+  final String id;
+  final double x;
+  final double y;
+  final double width;
+  final double height;
+  final String text;
+  final int colorValue;
+  final bool isCollapsed;
+  final DateTime updatedAt;
+
+  StickyNoteElement({
+    required this.id,
+    required this.x,
+    required this.y,
+    this.width = 210.0,
+    this.height = 190.0,
+    this.text = '',
+    this.colorValue = 0xFFFEF08A,
+    this.isCollapsed = false,
+    DateTime? updatedAt,
+  }) : updatedAt = updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+
+  StickyNoteElement copyWith({
+    String? id,
+    double? x,
+    double? y,
+    double? width,
+    double? height,
+    String? text,
+    int? colorValue,
+    bool? isCollapsed,
+    DateTime? updatedAt,
+  }) {
+    return StickyNoteElement(
+      id: id ?? this.id,
+      x: x ?? this.x,
+      y: y ?? this.y,
+      width: width ?? this.width,
+      height: height ?? this.height,
+      text: text ?? this.text,
+      colorValue: colorValue ?? this.colorValue,
+      isCollapsed: isCollapsed ?? this.isCollapsed,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'x': x,
+      'y': y,
+      'width': width,
+      'height': height,
+      'text': text,
+      'colorValue': colorValue,
+      'isCollapsed': isCollapsed,
+      'updatedAt': updatedAt.toIso8601String(),
+    };
+  }
+
+  factory StickyNoteElement.fromJson(Map<String, dynamic> json) {
+    return StickyNoteElement(
+      id: json['id'] as String,
+      x: (json['x'] as num).toDouble(),
+      y: (json['y'] as num).toDouble(),
+      width: (json['width'] as num?)?.toDouble() ?? 210.0,
+      height: (json['height'] as num?)?.toDouble() ?? 190.0,
+      text: json['text'] as String? ?? '',
+      colorValue: (json['colorValue'] as num?)?.toInt() ?? 0xFFFEF08A,
+      isCollapsed: json['isCollapsed'] as bool? ?? false,
+      updatedAt: json['updatedAt'] != null
+          ? DateTime.tryParse(json['updatedAt'] as String) ?? DateTime.now()
+          : DateTime.now(),
+    );
+  }
+}
+
 class TextElement {
   final String id;
   final double x;

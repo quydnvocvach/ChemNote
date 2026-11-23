@@ -1,12 +1,17 @@
 package com.chemnote.app
 
 import android.Manifest
+import android.content.ContentUris
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.media.PlaybackParams
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -17,12 +22,14 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.io.FileOutputStream
 
 class MainActivity : FlutterActivity() {
     companion object {
         private const val HARDWARE_CHANNEL = "com.chemnote.app/hardware"
         private const val STYLUS_BUTTON_DEBOUNCE_MS = 250L
         private const val REQ_RECORD_AUDIO = 4012
+        private const val REQ_READ_IMAGES = 4013
     }
 
     private var hardwareChannel: MethodChannel? = null
@@ -33,6 +40,9 @@ class MainActivity : FlutterActivity() {
     private var recordingStartMs: Long = 0L
     private var pendingRecordPath: String? = null
     private var pendingRecordResult: MethodChannel.Result? = null
+
+    private var pendingImagesLimit: Int = 12
+    private var pendingImagesResult: MethodChannel.Result? = null
 
     private var mediaPlayer: MediaPlayer? = null
     private var currentPlaybackSpeed: Float = 1.0f
@@ -123,9 +133,137 @@ class MainActivity : FlutterActivity() {
                         }
                         result.success(pos)
                     }
+                    "getDeviceRecentImages" -> {
+                        val limit = (call.argument<Int>("limit") ?: 12).coerceIn(1, 30)
+                        handleGetDeviceRecentImages(limit, result)
+                    }
+                    "copyUriToFile" -> {
+                        val uriStr = call.argument<String>("uri")
+                        val destPath = call.argument<String>("destPath")
+                        if (uriStr.isNullOrBlank() || destPath.isNullOrBlank()) {
+                            result.success(null)
+                        } else {
+                            Thread {
+                                val copied = copyContentUriToFile(uriStr, destPath)
+                                runOnUiThread { result.success(copied) }
+                            }.start()
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }
+        }
+    }
+
+    private fun requiredImagesPermission(): String {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+    }
+
+    private fun handleGetDeviceRecentImages(limit: Int, result: MethodChannel.Result) {
+        val perm = requiredImagesPermission()
+        val granted = ContextCompat.checkSelfPermission(this, perm) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            pendingImagesLimit = limit
+            pendingImagesResult = result
+            ActivityCompat.requestPermissions(this, arrayOf(perm), REQ_READ_IMAGES)
+            return
+        }
+        Thread {
+            val items = queryRecentImages(limit)
+            runOnUiThread { result.success(items) }
+        }.start()
+    }
+
+    private fun queryRecentImages(limit: Int): List<Map<String, String>> {
+        val output = mutableListOf<Map<String, String>>()
+        val thumbDir = File(cacheDir, "recent_thumbs").apply { mkdirs() }
+        val projection = arrayOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DATE_ADDED
+        )
+        val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
+
+        try {
+            contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                null,
+                null,
+                sortOrder
+            )?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                while (cursor.moveToNext() && output.size < limit) {
+                    val id = cursor.getLong(idCol)
+                    val contentUri = ContentUris.withAppendedId(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        id
+                    )
+                    val thumbFile = File(thumbDir, "thumb_$id.jpg")
+                    if (!thumbFile.exists() || thumbFile.length() == 0L) {
+                        generateThumbnail(contentUri, thumbFile, 240)
+                    }
+                    if (thumbFile.exists() && thumbFile.length() > 0L) {
+                        output.add(
+                            mapOf(
+                                "uri" to contentUri.toString(),
+                                "thumbPath" to thumbFile.absolutePath,
+                                "filePath" to ""
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            // Trả về danh sách hiện có nếu thiết bị giới hạn quyền truy cập.
+        }
+        return output
+    }
+
+    private fun generateThumbnail(uri: Uri, outFile: File, targetSize: Int) {
+        try {
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            contentResolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, boundsOpts)
+            }
+            val srcW = boundsOpts.outWidth
+            val srcH = boundsOpts.outHeight
+            if (srcW <= 0 || srcH <= 0) return
+
+            var sampleSize = 1
+            while ((srcW / sampleSize) > targetSize * 2 && (srcH / sampleSize) > targetSize * 2) {
+                sampleSize *= 2
+            }
+
+            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            val bitmap = contentResolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, decodeOpts)
+            } ?: return
+
+            FileOutputStream(outFile).use { fos ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 82, fos)
+            }
+            bitmap.recycle()
+        } catch (_: Exception) {}
+    }
+
+    private fun copyContentUriToFile(uriStr: String, destPath: String): String? {
+        return try {
+            val uri = Uri.parse(uriStr)
+            val destFile = File(destPath)
+            destFile.parentFile?.mkdirs()
+            contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(destFile).use { output ->
+                    input.copyTo(output)
+                }
+            } ?: return null
+            destFile.absolutePath
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -165,6 +303,20 @@ class MainActivity : FlutterActivity() {
                 cb?.success(startMediaRecorderInternal(path))
             } else {
                 cb?.success(false)
+            }
+        } else if (requestCode == REQ_READ_IMAGES) {
+            val limit = pendingImagesLimit
+            val cb = pendingImagesResult
+            pendingImagesResult = null
+            val granted = grantResults.isNotEmpty() &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED
+            if (granted && cb != null) {
+                Thread {
+                    val items = queryRecentImages(limit)
+                    runOnUiThread { cb.success(items) }
+                }.start()
+            } else {
+                cb?.success(emptyList<Map<String, String>>())
             }
         }
     }

@@ -50,12 +50,18 @@ class PdfExportService {
         : notebook.pages;
 
     for (final page in pages) {
-      final pageFormat =
-          page.isLandscape ? PdfPageFormat.a4.landscape : PdfPageFormat.a4;
-      final logicalWidth = page.isLandscape ? canvasHeight : canvasWidth;
-      final logicalHeight = page.isLandscape ? canvasWidth : canvasHeight;
-      final scaleX = pageFormat.width / logicalWidth;
-      final scaleY = pageFormat.height / logicalHeight;
+      final isWhiteboard = page.isInfiniteWhiteboard || notebook.isWhiteboard;
+      final viewport = _computePageViewport(
+        page,
+        isWhiteboard: isWhiteboard,
+        canvasWidth: canvasWidth,
+        canvasHeight: canvasHeight,
+      );
+      final pageFormat = viewport.pageFormat;
+      final originX = viewport.originX;
+      final originY = viewport.originY;
+      final scaleX = viewport.scaleX;
+      final scaleY = viewport.scaleY;
 
       // Tải trước ảnh nền PDF (nếu có)
       pw.MemoryImage? pdfBgImage;
@@ -124,11 +130,19 @@ class PdfExportService {
                         loadedImages[img.id]!,
                         scaleX,
                         scaleY,
+                        originX: originX,
+                        originY: originY,
                       ),
 
                   // 2b. Các thẻ tệp tin đính kèm (PDF, DOC, PPT, tệp khác)
                   for (final att in page.attachmentElements)
-                    _buildAttachmentChip(att, scaleX, scaleY),
+                    _buildAttachmentChip(
+                      att,
+                      scaleX,
+                      scaleY,
+                      originX: originX,
+                      originY: originY,
+                    ),
 
                   // 3. Các khuôn vẽ Hóa học (stencils) + nhãn vector
                   if (page.stencilElements.isNotEmpty)
@@ -143,6 +157,8 @@ class PdfExportService {
                               stencil,
                               scaleX,
                               scaleY,
+                              originX: originX,
+                              originY: originY,
                             );
                           }
                         },
@@ -150,8 +166,8 @@ class PdfExportService {
                     ),
                   for (final stencil in page.stencilElements)
                     pw.Positioned(
-                      left: stencil.x * scaleX,
-                      top: (stencil.y + stencil.height) * scaleY + 2,
+                      left: (stencil.x - originX) * scaleX,
+                      top: (stencil.y - originY + stencil.height) * scaleY + 2,
                       child: pw.Container(
                         width: stencil.width * scaleX,
                         alignment: pw.Alignment.center,
@@ -173,7 +189,15 @@ class PdfExportService {
                         size: PdfPoint(pageFormat.width, pageFormat.height),
                         painter: (PdfGraphics canvas, PdfPoint size) {
                           for (final stroke in page.strokes) {
-                            _paintStroke(canvas, size, stroke, scaleX, scaleY);
+                            _paintStroke(
+                              canvas,
+                              size,
+                              stroke,
+                              scaleX,
+                              scaleY,
+                              originX: originX,
+                              originY: originY,
+                            );
                           }
                         },
                       ),
@@ -182,8 +206,8 @@ class PdfExportService {
                   // 5. Các khối văn bản
                   for (final textEl in page.textElements)
                     pw.Positioned(
-                      left: textEl.x * scaleX,
-                      top: textEl.y * scaleY,
+                      left: (textEl.x - originX) * scaleX,
+                      top: (textEl.y - originY) * scaleY,
                       child: pw.SizedBox(
                         width: textEl.width * scaleX,
                         child: pw.Text(
@@ -210,10 +234,28 @@ class PdfExportService {
                         painter: (PdfGraphics canvas, PdfPoint size) {
                           for (final tape in page.tapeElements) {
                             if (tape.isRevealed) continue;
-                            _paintStudyTape(canvas, size, tape, scaleX, scaleY);
+                            _paintStudyTape(
+                              canvas,
+                              size,
+                              tape,
+                              scaleX,
+                              scaleY,
+                              originX: originX,
+                              originY: originY,
+                            );
                           }
                         },
                       ),
+                    ),
+
+                  // 7. Giấy nhớ dán (Sticky Notes — thẻ pastel mở rộng hoặc viên thuốc thu gọn)
+                  for (final note in page.stickyNotes)
+                    _buildStickyNoteCard(
+                      note,
+                      scaleX,
+                      scaleY,
+                      originX: originX,
+                      originY: originY,
                     ),
                 ],
               ),
@@ -581,8 +623,10 @@ class PdfExportService {
     PdfPoint size,
     Stroke stroke,
     double scaleX,
-    double scaleY,
-  ) {
+    double scaleY, {
+    double originX = 0.0,
+    double originY = 0.0,
+  }) {
     if (stroke.points.isEmpty) return;
     if (stroke.toolType == ToolType.laserPointer) return;
 
@@ -610,8 +654,8 @@ class PdfExportService {
     );
     canvas.setLineWidth(scaledWidth);
 
-    double mapX(double x) => x * scaleX;
-    double mapY(double y) => size.y - (y * scaleY);
+    double mapX(double x) => (x - originX) * scaleX;
+    double mapY(double y) => size.y - ((y - originY) * scaleY);
 
     if (stroke.points.length == 1) {
       final p = stroke.points.first;
@@ -637,12 +681,14 @@ class PdfExportService {
     PdfPoint size,
     TapeElement tape,
     double scaleX,
-    double scaleY,
-  ) {
-    final left = tape.x * scaleX;
+    double scaleY, {
+    double originX = 0.0,
+    double originY = 0.0,
+  }) {
+    final left = (tape.x - originX) * scaleX;
     final w = math.max(8.0, tape.width * scaleX);
     final h = math.max(8.0, tape.height * scaleY);
-    final bottom = size.y - ((tape.y + tape.height) * scaleY);
+    final bottom = size.y - ((tape.y - originY + tape.height) * scaleY);
 
     canvas.saveContext();
     canvas.setGraphicState(
@@ -666,18 +712,20 @@ class PdfExportService {
     PdfPoint size,
     StencilElement stencil,
     double scaleX,
-    double scaleY,
-  ) {
+    double scaleY, {
+    double originX = 0.0,
+    double originY = 0.0,
+  }) {
     canvas.saveContext();
     canvas.setStrokeColor(_pdfColorFromArgb(stencil.colorValue));
     canvas.setLineWidth(math.max(1.0, stencil.strokeWidth * scaleX));
     canvas.setLineCap(PdfLineCap.round);
     canvas.setLineJoin(PdfLineJoin.round);
 
-    final left = stencil.x * scaleX;
+    final left = (stencil.x - originX) * scaleX;
     final w = stencil.width * scaleX;
     final h = stencil.height * scaleY;
-    final bottom = size.y - ((stencil.y + stencil.height) * scaleY);
+    final bottom = size.y - ((stencil.y - originY + stencil.height) * scaleY);
     final cx = left + w / 2;
     final cy = bottom + h / 2;
     final id = stencil.stencilId.toLowerCase();
@@ -734,8 +782,10 @@ class PdfExportService {
     ImageElement img,
     pw.MemoryImage memImage,
     double scaleX,
-    double scaleY,
-  ) {
+    double scaleY, {
+    double originX = 0.0,
+    double originY = 0.0,
+  }) {
     final displayW = math.max(4.0, img.width * scaleX);
     final displayH = math.max(4.0, img.height * scaleY);
     final cLeft = img.cropLeft.clamp(0.0, 0.995);
@@ -781,8 +831,8 @@ class PdfExportService {
     }
 
     return pw.Positioned(
-      left: img.x * scaleX,
-      top: img.y * scaleY,
+      left: (img.x - originX) * scaleX,
+      top: (img.y - originY) * scaleY,
       child: pw.Transform.rotate(
         angle: -img.rotation,
         child: imageChild,
@@ -793,8 +843,10 @@ class PdfExportService {
   pw.Widget _buildAttachmentChip(
     AttachmentElement att,
     double scaleX,
-    double scaleY,
-  ) {
+    double scaleY, {
+    double originX = 0.0,
+    double originY = 0.0,
+  }) {
     final w = math.max(90.0, att.width * scaleX);
     final h = math.max(30.0, att.height * scaleY);
     final ext = att.fileExtension.replaceFirst('.', '').toUpperCase();
@@ -802,8 +854,8 @@ class PdfExportService {
     final badgeColor = _attachmentBadgeColor(badgeLabel);
 
     return pw.Positioned(
-      left: att.x * scaleX,
-      top: att.y * scaleY,
+      left: (att.x - originX) * scaleX,
+      top: (att.y - originY) * scaleY,
       child: pw.Container(
         width: w,
         height: h,
@@ -887,9 +939,238 @@ class PdfExportService {
     return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 
+  _PageViewport _computePageViewport(
+    NotePage page, {
+    required bool isWhiteboard,
+    required double canvasWidth,
+    required double canvasHeight,
+  }) {
+    if (!isWhiteboard) {
+      final pageFormat =
+          page.isLandscape ? PdfPageFormat.a4.landscape : PdfPageFormat.a4;
+      final logicalWidth = page.isLandscape ? canvasHeight : canvasWidth;
+      final logicalHeight = page.isLandscape ? canvasWidth : canvasHeight;
+      return _PageViewport(
+        originX: 0.0,
+        originY: 0.0,
+        scaleX: pageFormat.width / logicalWidth,
+        scaleY: pageFormat.height / logicalHeight,
+        pageFormat: pageFormat,
+      );
+    }
+
+    final pageFormat = PdfPageFormat.a4.landscape;
+    var minX = double.infinity;
+    var minY = double.infinity;
+    var maxX = double.negativeInfinity;
+    var maxY = double.negativeInfinity;
+
+    void includeRect(double x, double y, double w, double h) {
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x + w > maxX) maxX = x + w;
+      if (y + h > maxY) maxY = y + h;
+    }
+
+    for (final stroke in page.strokes) {
+      if (stroke.toolType == ToolType.laserPointer || stroke.points.isEmpty) {
+        continue;
+      }
+      final pad = math.max(2.0, stroke.width);
+      for (final p in stroke.points) {
+        includeRect(p.x - pad, p.y - pad, pad * 2, pad * 2);
+      }
+    }
+    for (final s in page.stencilElements) {
+      includeRect(s.x, s.y, s.width, s.height + 16);
+    }
+    for (final t in page.textElements) {
+      includeRect(t.x, t.y, t.width, t.height);
+    }
+    for (final img in page.imageElements) {
+      includeRect(img.x, img.y, img.width, img.height);
+    }
+    for (final att in page.attachmentElements) {
+      includeRect(att.x, att.y, att.width, att.height);
+    }
+    for (final tape in page.tapeElements) {
+      if (!tape.isRevealed) {
+        includeRect(tape.x, tape.y, tape.width, tape.height);
+      }
+    }
+    for (final note in page.stickyNotes) {
+      includeRect(
+        note.x,
+        note.y,
+        note.width,
+        note.isCollapsed ? 38.0 : note.height,
+      );
+    }
+
+    // Nếu bảng vô cực đang trống -> dùng vùng trung tâm 1200x900 quanh (3000, 3000)
+    if (!minX.isFinite || !minY.isFinite) {
+      minX = 2400.0;
+      minY = 2550.0;
+      maxX = 3600.0;
+      maxY = 3450.0;
+    } else {
+      const padding = 48.0;
+      minX -= padding;
+      minY -= padding;
+      maxX += padding;
+      maxY += padding;
+    }
+
+    final contentW = math.max(400.0, maxX - minX);
+    final contentH = math.max(300.0, maxY - minY);
+    const pdfMargin = 24.0;
+    final availW = pageFormat.width - pdfMargin * 2;
+    final availH = pageFormat.height - pdfMargin * 2;
+    final scale = math.min(availW / contentW, availH / contentH);
+
+    final renderedW = contentW * scale;
+    final renderedH = contentH * scale;
+    final offsetX = (pageFormat.width - renderedW) / 2;
+    final offsetY = (pageFormat.height - renderedH) / 2;
+
+    return _PageViewport(
+      originX: minX - (offsetX / scale),
+      originY: minY - (offsetY / scale),
+      scaleX: scale,
+      scaleY: scale,
+      pageFormat: pageFormat,
+    );
+  }
+
+  pw.Widget _buildStickyNoteCard(
+    StickyNoteElement note,
+    double scaleX,
+    double scaleY, {
+    double originX = 0.0,
+    double originY = 0.0,
+  }) {
+    final baseColor = _pdfColorFromArgb(note.colorValue);
+    final headerColor = _darkenPdfColor(baseColor, 0.07);
+    final borderColor = _darkenPdfColor(baseColor, 0.16);
+    final inkColor = PdfColor.fromInt(0xFF1E293B);
+    final left = (note.x - originX) * scaleX;
+    final top = (note.y - originY) * scaleY;
+
+    if (note.isCollapsed) {
+      final firstLine = note.text
+          .trim()
+          .split('\n')
+          .firstWhere((l) => l.trim().isNotEmpty, orElse: () => 'Ghi chú dán');
+      final pillW = math.max(96.0, note.width * scaleX);
+      return pw.Positioned(
+        left: left,
+        top: top,
+        child: pw.Container(
+          width: pillW,
+          padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+          decoration: pw.BoxDecoration(
+            color: baseColor,
+            borderRadius: const pw.BorderRadius.all(pw.Radius.circular(8)),
+            border: pw.Border.all(color: borderColor, width: 0.8),
+          ),
+          child: pw.Text(
+            firstLine,
+            maxLines: 1,
+            style: pw.TextStyle(
+              fontSize: 8,
+              fontWeight: pw.FontWeight.bold,
+              color: inkColor,
+            ),
+          ),
+        ),
+      );
+    }
+
+    final cardW = math.max(90.0, note.width * scaleX);
+    final cardH = math.max(68.0, note.height * scaleY);
+    final headerH = math.min(18.0, math.max(12.0, cardH * 0.16));
+    final bodyFontSize = (9.5 * scaleX).clamp(7.0, 11.0);
+
+    return pw.Positioned(
+      left: left,
+      top: top,
+      child: pw.Container(
+        width: cardW,
+        height: cardH,
+        decoration: pw.BoxDecoration(
+          color: baseColor,
+          borderRadius: const pw.BorderRadius.all(pw.Radius.circular(6)),
+          border: pw.Border.all(color: borderColor, width: 0.8),
+        ),
+        child: pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+          children: [
+            pw.Container(
+              height: headerH,
+              padding: const pw.EdgeInsets.symmetric(horizontal: 6),
+              alignment: pw.Alignment.centerLeft,
+              decoration: pw.BoxDecoration(
+                color: headerColor,
+                borderRadius: const pw.BorderRadius.only(
+                  topLeft: pw.Radius.circular(5.5),
+                  topRight: pw.Radius.circular(5.5),
+                ),
+              ),
+              child: pw.Text(
+                'Ghi chú',
+                style: pw.TextStyle(
+                  fontSize: 6.5,
+                  fontWeight: pw.FontWeight.bold,
+                  color: inkColor,
+                ),
+              ),
+            ),
+            pw.Expanded(
+              child: pw.Padding(
+                padding: const pw.EdgeInsets.all(6),
+                child: pw.Text(
+                  note.text,
+                  style: pw.TextStyle(
+                    fontSize: bodyFontSize,
+                    color: inkColor,
+                    lineSpacing: 1.8,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  PdfColor _darkenPdfColor(PdfColor color, double amount) {
+    return PdfColor(
+      (color.red - amount).clamp(0.0, 1.0),
+      (color.green - amount).clamp(0.0, 1.0),
+      (color.blue - amount).clamp(0.0, 1.0),
+    );
+  }
+
   String _stencilDisplayLabel(String stencilId) {
     final cleaned = stencilId.replaceAll('_', ' ').trim();
     if (cleaned.isEmpty) return 'Stencil';
     return cleaned[0].toUpperCase() + cleaned.substring(1);
   }
+}
+
+class _PageViewport {
+  const _PageViewport({
+    required this.originX,
+    required this.originY,
+    required this.scaleX,
+    required this.scaleY,
+    required this.pageFormat,
+  });
+
+  final double originX;
+  final double originY;
+  final double scaleX;
+  final double scaleY;
+  final PdfPageFormat pageFormat;
 }

@@ -52,6 +52,11 @@ class LocalStorageService {
     return File('${root.path}${Platform.pathSeparator}custom_stickers.json');
   }
 
+  Future<File> _getCustomCoversFile() async {
+    final root = await getRootDirectory();
+    return File('${root.path}${Platform.pathSeparator}custom_covers.json');
+  }
+
   Future<File> _getNotebookFile(String notebookId) async {
     final dir = await _getSubdirectory('notebooks');
     return File('${dir.path}${Platform.pathSeparator}$notebookId.json');
@@ -120,6 +125,28 @@ class LocalStorageService {
     try {
       final file = await _getCustomStickersFile();
       await file.writeAsString(jsonEncode(stickerPaths), flush: true);
+    } catch (_) {
+      // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
+    }
+  }
+
+  Future<List<String>> loadCustomCovers() async {
+    try {
+      final file = await _getCustomCoversFile();
+      if (!await file.exists()) return [];
+      final raw = await file.readAsString();
+      if (raw.trim().isEmpty) return [];
+      final decoded = jsonDecode(raw) as List<dynamic>;
+      return decoded.whereType<String>().toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> saveCustomCovers(List<String> coverPaths) async {
+    try {
+      final file = await _getCustomCoversFile();
+      await file.writeAsString(jsonEncode(coverPaths), flush: true);
     } catch (_) {
       // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
     }

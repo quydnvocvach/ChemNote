@@ -63,6 +63,33 @@ jobs:
             sed -i 's/compileSdk .*/compileSdk = 36/' android/app/build.gradle
           fi
 
+          # Ensure ALL plugin subprojects (e.g. :file_picker) compile with SDK 36 so checkReleaseAarMetadata passes
+          if [ -f android/build.gradle.kts ]; then
+            cat << 'EOF' >> android/build.gradle.kts
+
+          subprojects {
+              afterEvaluate {
+                  extensions.findByType(com.android.build.gradle.BaseExtension::class.java)?.apply {
+                      compileSdkVersion(36)
+                  }
+              }
+          }
+          EOF
+          elif [ -f android/build.gradle ]; then
+            cat << 'EOF' >> android/build.gradle
+
+          subprojects {
+              afterEvaluate { project ->
+                  if (project.hasProperty("android")) {
+                      project.android {
+                          compileSdkVersion 36
+                      }
+                  }
+              }
+          }
+          EOF
+          fi
+
       - name: Install Flutter dependencies
         run: flutter pub get
 
@@ -82,7 +109,7 @@ jobs:
           flutter build apk --release 2>&1 | tee build_output.txt
           BUILD_EXIT=${PIPESTATUS[0]}
           if [ "$BUILD_EXIT" -ne 0 ]; then
-            grep -E "Error:|FAILURE:|Exception:|Execution failed|requires|compileSdk|e: " build_output.txt | head -n 30 | while IFS= read -r line; do
+            tail -n 30 build_output.txt | while IFS= read -r line; do
               echo "::error title=ApkBuild::$line"
             done
           fi
@@ -99,14 +126,16 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.0.0 with APK
+      - name: Publish Release v3.1.0 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.0
-          name: ChemNote Pro v3.0.0 (Huawei MatePad 11.5"S & Android)
+          tag_name: v3.1.0
+          name: ChemNote Pro v3.1.0 (Huawei MatePad 11.5"S & Android)
           body: |
-            ### ChemNote Pro v3.0.0 — Native APK cho Huawei MatePad 11.5"S & Android
+            ### ChemNote Pro v3.1.0 — Native APK cho Huawei MatePad 11.5"S & Android
+            - **MỚI: Bảng vô cực (Infinite Whiteboard 6000×6000)** để vẽ sơ đồ tổng hợp Hữu cơ & bản đồ tư duy không giới hạn diện tích!
+            - **MỚI: Giấy nhớ dán (Sticky Notes)** kiểu GoodNotes 6 với 5 màu pastel, kéo thả, thay đổi kích thước và thu gọn thành thẻ nhỏ!
             - Tối ưu phần cứng **144Hz PaperMatte** + **M-Pencil 3 (NearLink)** (gõ đúp thân bút đổi Bút ↔ Tẩy).
             - **Ghi âm bài giảng đồng bộ nét viết tay (Audio Note Replay)** dùng `MediaRecorder` / `MediaPlayer` gốc Android.
             - **Cân bằng phương trình phân tử & phương trình ion** (`MnO4- + Fe2+ + H+ -> Mn2+ + Fe3+ + H2O`).

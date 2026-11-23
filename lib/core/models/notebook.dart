@@ -39,6 +39,9 @@ class Notebook {
   final String? pinCode;
   final bool isTrashed;
   final DateTime? trashedAt;
+  final bool isWhiteboard;
+  final String? customCoverImagePath;
+  final bool useFirstPageAsCover;
 
   const Notebook({
     required this.id,
@@ -59,6 +62,9 @@ class Notebook {
     this.pinCode,
     this.isTrashed = false,
     this.trashedAt,
+    this.isWhiteboard = false,
+    this.customCoverImagePath,
+    this.useFirstPageAsCover = false,
   });
 
   Notebook copyWith({
@@ -84,6 +90,10 @@ class Notebook {
     bool? isTrashed,
     DateTime? trashedAt,
     bool clearTrashedAt = false,
+    bool? isWhiteboard,
+    String? customCoverImagePath,
+    bool clearCustomCoverImagePath = false,
+    bool? useFirstPageAsCover,
   }) {
     return Notebook(
       id: id ?? this.id,
@@ -105,6 +115,11 @@ class Notebook {
       pinCode: clearPinCode ? null : (pinCode ?? this.pinCode),
       isTrashed: isTrashed ?? this.isTrashed,
       trashedAt: clearTrashedAt ? null : (trashedAt ?? this.trashedAt),
+      isWhiteboard: isWhiteboard ?? this.isWhiteboard,
+      customCoverImagePath: clearCustomCoverImagePath
+          ? null
+          : (customCoverImagePath ?? this.customCoverImagePath),
+      useFirstPageAsCover: useFirstPageAsCover ?? this.useFirstPageAsCover,
     );
   }
 
@@ -128,6 +143,9 @@ class Notebook {
       'pinCode': pinCode,
       'isTrashed': isTrashed,
       'trashedAt': trashedAt?.toIso8601String(),
+      'isWhiteboard': isWhiteboard,
+      'customCoverImagePath': customCoverImagePath,
+      'useFirstPageAsCover': useFirstPageAsCover,
     };
   }
 
@@ -162,6 +180,9 @@ class Notebook {
       trashedAt: json['trashedAt'] != null
           ? DateTime.tryParse(json['trashedAt'] as String)
           : null,
+      isWhiteboard: json['isWhiteboard'] as bool? ?? false,
+      customCoverImagePath: json['customCoverImagePath'] as String?,
+      useFirstPageAsCover: json['useFirstPageAsCover'] as bool? ?? false,
     );
   }
 }

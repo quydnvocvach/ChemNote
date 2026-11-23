@@ -13,6 +13,8 @@ class NotePage {
   final List<TapeElement> tapeElements;
   final List<AttachmentElement> attachmentElements;
   final List<AudioRecording> audioRecordings;
+  final List<StickyNoteElement> stickyNotes;
+  final bool isInfiniteWhiteboard;
   final String? pdfBackgroundPath;
   final int? pdfPageNumber;
   final bool isBookmarked;
@@ -32,6 +34,8 @@ class NotePage {
     this.tapeElements = const [],
     this.attachmentElements = const [],
     this.audioRecordings = const [],
+    this.stickyNotes = const [],
+    this.isInfiniteWhiteboard = false,
     this.pdfBackgroundPath,
     this.pdfPageNumber,
     this.isBookmarked = false,
@@ -52,6 +56,8 @@ class NotePage {
     List<TapeElement>? tapeElements,
     List<AttachmentElement>? attachmentElements,
     List<AudioRecording>? audioRecordings,
+    List<StickyNoteElement>? stickyNotes,
+    bool? isInfiniteWhiteboard,
     String? pdfBackgroundPath,
     bool clearPdfBackground = false,
     int? pdfPageNumber,
@@ -73,6 +79,8 @@ class NotePage {
       tapeElements: tapeElements ?? this.tapeElements,
       attachmentElements: attachmentElements ?? this.attachmentElements,
       audioRecordings: audioRecordings ?? this.audioRecordings,
+      stickyNotes: stickyNotes ?? this.stickyNotes,
+      isInfiniteWhiteboard: isInfiniteWhiteboard ?? this.isInfiniteWhiteboard,
       pdfBackgroundPath: clearPdfBackground
           ? null
           : (pdfBackgroundPath ?? this.pdfBackgroundPath),
@@ -98,6 +106,8 @@ class NotePage {
       'tapeElements': tapeElements.map((t) => t.toJson()).toList(),
       'attachmentElements': attachmentElements.map((a) => a.toJson()).toList(),
       'audioRecordings': audioRecordings.map((a) => a.toJson()).toList(),
+      'stickyNotes': stickyNotes.map((s) => s.toJson()).toList(),
+      'isInfiniteWhiteboard': isInfiniteWhiteboard,
       'pdfBackgroundPath': pdfBackgroundPath,
       'pdfPageNumber': pdfPageNumber,
       'isBookmarked': isBookmarked,
@@ -115,6 +125,7 @@ class NotePage {
     final rawAttachments =
         json['attachmentElements'] as List<dynamic>? ?? const [];
     final rawAudios = json['audioRecordings'] as List<dynamic>? ?? const [];
+    final rawStickies = json['stickyNotes'] as List<dynamic>? ?? const [];
 
     return NotePage(
       id: json['id'] as String,
@@ -143,6 +154,10 @@ class NotePage {
       audioRecordings: rawAudios
           .map((e) => AudioRecording.fromJson(e as Map<String, dynamic>))
           .toList(),
+      stickyNotes: rawStickies
+          .map((e) => StickyNoteElement.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      isInfiniteWhiteboard: json['isInfiniteWhiteboard'] as bool? ?? false,
       pdfBackgroundPath: json['pdfBackgroundPath'] as String?,
       pdfPageNumber: (json['pdfPageNumber'] as num?)?.toInt(),
       isBookmarked: json['isBookmarked'] as bool? ?? false,

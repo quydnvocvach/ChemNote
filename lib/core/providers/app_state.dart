@@ -55,6 +55,9 @@ class AppState extends ChangeNotifier {
   // Danh sách đường dẫn hình dán tùy chỉnh được thêm từ ảnh đã cắt ("Thêm vào hình dán")
   List<String> _customStickers = [];
 
+  // Danh sách ảnh bìa cá nhân do người dùng thêm trong "TÙY CHỈNH"
+  List<String> _customCoverPaths = [];
+
   // Danh sách đường dẫn ảnh chèn gần đây ("Ảnh gần đây" trong Image Popover)
   List<String> _recentImagePaths = [];
 
@@ -114,6 +117,7 @@ class AppState extends ChangeNotifier {
   List<PenPreset> get favoritePens => List.unmodifiable(_favoritePens);
   bool get showFavoritesBar => _showFavoritesBar;
   List<String> get customStickers => List.unmodifiable(_customStickers);
+  List<String> get customCoverPaths => List.unmodifiable(_customCoverPaths);
   List<String> get recentImagePaths => List.unmodifiable(_recentImagePaths);
   bool get palmRejectionEnabled => _palmRejectionEnabled;
   bool get readOnlyMode => _readOnlyMode;
@@ -412,6 +416,24 @@ class AppState extends ChangeNotifier {
     unawaited(_storage.saveCustomStickers(_customStickers));
   }
 
+  void addCustomCoverPath(String path) {
+    final trimmed = path.trim();
+    if (trimmed.isEmpty) return;
+    _customCoverPaths = [
+      trimmed,
+      ..._customCoverPaths.where((p) => p != trimmed),
+    ];
+    notifyListeners();
+    unawaited(_storage.saveCustomCovers(_customCoverPaths));
+  }
+
+  void removeCustomCoverPath(String path) {
+    if (!_customCoverPaths.contains(path)) return;
+    _customCoverPaths = _customCoverPaths.where((p) => p != path).toList();
+    notifyListeners();
+    unawaited(_storage.saveCustomCovers(_customCoverPaths));
+  }
+
   Future<void> loadAll() async {
     _isLoading = true;
     notifyListeners();
@@ -420,6 +442,7 @@ class AppState extends ChangeNotifier {
       _notebooks = await _storage.loadNotebooks();
       _favoritePens = await _storage.loadFavoritePens();
       _customStickers = await _storage.loadCustomStickers();
+      _customCoverPaths = await _storage.loadCustomCovers();
     } finally {
       _isLoading = false;
       notifyListeners();
@@ -519,6 +542,9 @@ class AppState extends ChangeNotifier {
     PaperTemplateType defaultTemplate = PaperTemplateType.sageRibbon,
     PaperColorType defaultPaperColor = PaperColorType.cream,
     bool defaultOrientationLandscape = false,
+    bool isWhiteboard = false,
+    String? customCoverImagePath,
+    bool useFirstPageAsCover = false,
     List<NotePage>? initialPages,
   }) async {
     final now = DateTime.now();
@@ -530,6 +556,7 @@ class AppState extends ChangeNotifier {
             templateType: defaultTemplate,
             paperColor: defaultPaperColor,
             isLandscape: defaultOrientationLandscape,
+            isInfiniteWhiteboard: isWhiteboard,
             updatedAt: now,
           ),
         ];
@@ -543,6 +570,9 @@ class AppState extends ChangeNotifier {
       defaultTemplate: defaultTemplate,
       defaultPaperColor: defaultPaperColor,
       defaultOrientationLandscape: defaultOrientationLandscape,
+      isWhiteboard: isWhiteboard,
+      customCoverImagePath: customCoverImagePath,
+      useFirstPageAsCover: useFirstPageAsCover,
       pages: pages,
       createdAt: now,
       updatedAt: now,
@@ -681,6 +711,7 @@ class AppState extends ChangeNotifier {
     PaperTemplateType? templateType,
     PaperColorType? paperColor,
     bool? isLandscape,
+    bool? isInfiniteWhiteboard,
     String? pdfBackgroundPath,
     int? pdfPageNumber,
     String? title,
@@ -699,6 +730,7 @@ class AppState extends ChangeNotifier {
       templateType: templateType ?? notebook.defaultTemplate,
       paperColor: paperColor ?? notebook.defaultPaperColor,
       isLandscape: isLandscape ?? notebook.defaultOrientationLandscape,
+      isInfiniteWhiteboard: isInfiniteWhiteboard ?? notebook.isWhiteboard,
       pdfBackgroundPath: pdfBackgroundPath,
       pdfPageNumber: pdfPageNumber,
       title: title,

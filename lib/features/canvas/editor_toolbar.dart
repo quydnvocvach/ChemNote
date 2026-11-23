@@ -28,9 +28,11 @@ enum EraserMode {
   precision,
 }
 
-/// Actions from the top-right `+` 5-item Insert Menu.
+/// Actions from the top-right `+` Insert Menu.
 enum InsertMenuAction {
   newPage,
+  newWhiteboard,
+  stickyNote,
   attachment,
   image,
   pdf,
@@ -325,6 +327,20 @@ class EditorTabBar extends StatelessWidget {
                     ),
                   ),
                   PopupMenuItem(
+                    value: InsertMenuAction.newWhiteboard,
+                    child: _InsertMenuRow(
+                      icon: Icons.dashboard_customize_outlined,
+                      label: 'Thêm Bảng vô cực',
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: InsertMenuAction.stickyNote,
+                    child: _InsertMenuRow(
+                      icon: Icons.sticky_note_2_outlined,
+                      label: 'Thêm Giấy nhớ dán',
+                    ),
+                  ),
+                  PopupMenuItem(
                     value: InsertMenuAction.attachment,
                     child: _InsertMenuRow(
                       icon: Icons.attach_file_rounded,
@@ -444,6 +460,7 @@ class EditorToolBar extends StatelessWidget {
   final VoidCallback onOpenEraserPopover;
   final VoidCallback onInsertImage;
   final VoidCallback onOpenStickerPicker;
+  final VoidCallback onAddStickyNote;
   final VoidCallback onToggleZoomWindow;
   final VoidCallback onToggleRuler;
   final VoidCallback onTogglePalmRejection;
@@ -469,6 +486,7 @@ class EditorToolBar extends StatelessWidget {
     required this.onOpenEraserPopover,
     required this.onInsertImage,
     required this.onOpenStickerPicker,
+    required this.onAddStickyNote,
     required this.onToggleZoomWindow,
     required this.onToggleRuler,
     required this.onTogglePalmRejection,
@@ -604,6 +622,14 @@ class EditorToolBar extends StatelessWidget {
               tooltip: 'Khuôn Hóa học & Hình dán',
               color: fg,
               onTap: onOpenStickerPicker,
+            ),
+
+            // Sticky Notes (Giấy nhớ dán GoodNotes)
+            _ChromeIconBtn(
+              icon: Icons.sticky_note_2_outlined,
+              tooltip: 'Thêm Giấy nhớ dán (Sticky Note)',
+              color: fg,
+              onTap: onAddStickyNote,
             ),
 
             _vDivider(border),

@@ -49,7 +49,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final Uuid _uuid = const Uuid();
   final TransformationController _transformController = TransformationController();
+  final TransformationController _whiteboardTransformController =
+      TransformationController();
   final ScrollController _verticalScrollController = ScrollController();
+  bool _whiteboardCenteredOnce = false;
+  double _whiteboardZoom = 1.0;
+  final Map<String, TextEditingController> _stickyControllers = {};
   late PageController _horizontalPageController;
   final LassoController _lassoController = LassoController();
   final PalmRejectionFilter _palmFilter = PalmRejectionFilter(stylusOnlyMode: false);
@@ -203,6 +208,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _lassoController.dispose();
     _laserController.dispose();
     _transformController.dispose();
+    _whiteboardTransformController.dispose();
+    for (final ctrl in _stickyControllers.values) {
+      ctrl.dispose();
+    }
     _verticalScrollController.dispose();
     _horizontalPageController.dispose();
     _activeStrokeNotifier.dispose();
@@ -1031,11 +1040,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   Future<void> _insertSavedImagePath(NotePage page, String savedPath) async {
     _ensureElementImageLoaded(savedPath);
     context.read<AppState>().addRecentImagePath(savedPath);
-    final pageSize = PaperMetrics.pageSize(isLandscape: page.isLandscape);
+    final pageSize = PaperMetrics.pageSize(
+      isLandscape: page.isLandscape,
+      isInfiniteWhiteboard: page.isInfiniteWhiteboard,
+    );
+    final double targetX = page.isInfiniteWhiteboard
+        ? PaperMetrics.whiteboardCenter.dx - 140
+        : (pageSize.width - 280) * 0.5;
+    final double targetY = page.isInfiniteWhiteboard
+        ? PaperMetrics.whiteboardCenter.dy - 110
+        : (pageSize.height - 220) * 0.32;
     final imgEl = ImageElement(
       id: _uuid.v4(),
-      x: (pageSize.width - 280) * 0.5,
-      y: (pageSize.height - 220) * 0.32,
+      x: targetX,
+      y: targetY,
       width: 280.0,
       height: 220.0,
       rotation: 0.0,
@@ -1072,46 +1090,59 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   Future<void> _showImageInsertOptions(NotePage page) async {
     final appState = context.read<AppState>();
-    final recentPaths = <String>[
-      ...appState.recentImagePaths,
-      ...appState.customStickers.where(
-        (p) => !appState.recentImagePaths.contains(p),
-      ),
-    ];
+    final deviceRecents =
+        await HardwareService.instance.getDeviceRecentImages(limit: 9);
+    if (!mounted) return;
 
-    final action = await showModalBottomSheet<String>(
+    // Build unified list of up to 9 items (device MediaStore photos first, then local recents)
+    final gridItems = <({String thumbPath, DeviceRecentImage? deviceItem, String? localPath})>[
+      for (final d in deviceRecents)
+        (thumbPath: d.thumbPath, deviceItem: d, localPath: null),
+    ];
+    for (final p in [...appState.recentImagePaths, ...appState.customStickers]) {
+      if (gridItems.length >= 9) break;
+      if (!gridItems.any((g) => g.localPath == p || g.thumbPath == p)) {
+        gridItems.add((thumbPath: p, deviceItem: null, localPath: p));
+      }
+    }
+
+    final selected = await showModalBottomSheet<Object>(
       context: context,
       showDragHandle: true,
+      isScrollControlled: true,
       builder: (ctx) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Padding(
-                padding: EdgeInsets.fromLTRB(18, 4, 18, 8),
+                padding: EdgeInsets.only(bottom: 10),
                 child: Text(
                   'Ảnh gần đây',
                   style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
                 ),
               ),
-              if (recentPaths.isNotEmpty)
-                SizedBox(
-                  height: 92,
-                  child: ListView.separated(
-                    scrollDirection: Axis.horizontal,
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    itemCount: recentPaths.length,
-                    separatorBuilder: (_, __) => const SizedBox(width: 10),
+              if (gridItems.isNotEmpty)
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 290),
+                  child: GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      crossAxisSpacing: 8,
+                      mainAxisSpacing: 8,
+                    ),
+                    itemCount: gridItems.length,
                     itemBuilder: (c, i) {
-                      final path = recentPaths[i];
-                      final file = File(path);
+                      final item = gridItems[i];
+                      final thumbFile = File(item.thumbPath);
                       return GestureDetector(
-                        onTap: () => Navigator.pop(ctx, 'recent:$path'),
+                        onTap: () => Navigator.pop(ctx, item),
                         child: Container(
-                          width: 88,
-                          height: 88,
                           decoration: BoxDecoration(
                             borderRadius: BorderRadius.circular(10),
                             border: Border.all(color: Colors.white24),
@@ -1119,8 +1150,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                           ),
                           child: ClipRRect(
                             borderRadius: BorderRadius.circular(9),
-                            child: file.existsSync()
-                                ? Image.file(file, fit: BoxFit.cover)
+                            child: thumbFile.existsSync()
+                                ? Image.file(thumbFile, fit: BoxFit.cover)
                                 : const Icon(Icons.image_outlined),
                           ),
                         ),
@@ -1130,19 +1161,34 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 )
               else
                 const Padding(
-                  padding: EdgeInsets.fromLTRB(18, 0, 18, 8),
+                  padding: EdgeInsets.only(bottom: 10),
                   child: Text(
-                    'Chưa có ảnh gần đây. Chọn ảnh bên dưới để chèn lên trang.',
+                    'Chưa có ảnh gần đây. Chọn ảnh từ thiết bị bên dưới.',
                     style: TextStyle(fontSize: 12.5, color: Colors.grey),
                   ),
                 ),
-              const Divider(height: 16),
+              const Divider(height: 20),
+              const Padding(
+                padding: EdgeInsets.only(bottom: 4),
+                child: Text(
+                  'Tùy chọn khác',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.grey,
+                  ),
+                ),
+              ),
               ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.camera_alt_outlined),
                 title: const Text('Chụp ảnh'),
                 onTap: () => Navigator.pop(ctx, 'camera'),
               ),
               ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.photo_library_outlined),
                 title: const Text('Chọn từ Bộ sưu tập'),
                 onTap: () => Navigator.pop(ctx, 'gallery'),
@@ -1152,16 +1198,36 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         ),
       ),
     );
-    if (action == null || !mounted) return;
+    if (selected == null || !mounted) return;
 
-    if (action.startsWith('recent:')) {
-      final path = action.substring('recent:'.length);
-      await _insertSavedImagePath(page, path);
+    if (selected is ({String thumbPath, DeviceRecentImage? deviceItem, String? localPath})) {
+      if (selected.deviceItem != null) {
+        final rootDir = await appState.storage.getRootDirectory();
+        final imgDir = Directory('${rootDir.path}${Platform.pathSeparator}images');
+        if (!await imgDir.exists()) {
+          await imgDir.create(recursive: true);
+        }
+        final destPath =
+            '${imgDir.path}${Platform.pathSeparator}${_uuid.v4()}.jpg';
+        final copied = await HardwareService.instance.copyUriToFile(
+          selected.deviceItem!.uri,
+          destPath,
+        );
+        final finalPath = copied ??
+            (selected.deviceItem!.filePath.isNotEmpty
+                ? selected.deviceItem!.filePath
+                : selected.deviceItem!.thumbPath);
+        if (mounted && finalPath.isNotEmpty) {
+          await _insertSavedImagePath(page, finalPath);
+        }
+      } else if (selected.localPath != null) {
+        await _insertSavedImagePath(page, selected.localPath!);
+      }
       return;
     }
 
     final source =
-        action == 'camera' ? ImageSource.camera : ImageSource.gallery;
+        selected == 'camera' ? ImageSource.camera : ImageSource.gallery;
     try {
       // Never downscale on import: keep full original resolution for crisp cropping!
       final picked = await _imagePicker.pickImage(source: source);
@@ -1194,6 +1260,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               templateType: currentPage.templateType,
               paperColor: currentPage.paperColor,
               isLandscape: currentPage.isLandscape,
+              isInfiniteWhiteboard: false,
               insertAfterIndex: currentIdx,
             );
         if (mounted) {
@@ -1205,6 +1272,28 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             ),
           );
         }
+        break;
+      case InsertMenuAction.newWhiteboard:
+        await context.read<AppState>().addPage(
+              notebook.id,
+              templateType: PaperTemplateType.dotted,
+              paperColor: currentPage.paperColor,
+              isInfiniteWhiteboard: true,
+              insertAfterIndex: currentIdx,
+            );
+        if (mounted) {
+          setState(() => _whiteboardCenteredOnce = false);
+          _jumpToPage(currentIdx + 1);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              duration: Duration(milliseconds: 1200),
+              content: Text('Đã thêm Bảng vô cực (6000 × 6000)'),
+            ),
+          );
+        }
+        break;
+      case InsertMenuAction.stickyNote:
+        await _addStickyNote(currentPage);
         break;
       case InsertMenuAction.attachment:
         await _pickAndInsertAttachment(currentPage);
@@ -1653,6 +1742,48 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     );
   }
 
+  Future<void> _addStickyNote(NotePage page) async {
+    double targetX;
+    double targetY;
+    if (page.isInfiniteWhiteboard) {
+      // Place near current viewport center on infinite whiteboard
+      final inv = Matrix4.tryInvert(_whiteboardTransformController.value);
+      final screenSize = MediaQuery.sizeOf(context);
+      if (inv != null) {
+        final centerInCanvas = MatrixUtils.transformPoint(
+          inv,
+          Offset(screenSize.width * 0.5, (screenSize.height - 100) * 0.5),
+        );
+        targetX = (centerInCanvas.dx - 105).clamp(60.0, 5700.0);
+        targetY = (centerInCanvas.dy - 95).clamp(60.0, 5700.0);
+      } else {
+        targetX = PaperMetrics.whiteboardCenter.dx - 105;
+        targetY = PaperMetrics.whiteboardCenter.dy - 95;
+      }
+    } else {
+      final pageSize = PaperMetrics.pageSize(isLandscape: page.isLandscape);
+      final stagger = (page.stickyNotes.length % 5) * 18.0;
+      targetX = (pageSize.width - 210) * 0.5 + stagger;
+      targetY = (pageSize.height - 190) * 0.35 + stagger;
+    }
+
+    final note = StickyNoteElement(
+      id: _uuid.v4(),
+      x: targetX,
+      y: targetY,
+      width: 210.0,
+      height: 190.0,
+      text: '',
+      colorValue: 0xFFFEF08A,
+      isCollapsed: false,
+      updatedAt: DateTime.now(),
+    );
+    await _commitPage(
+      page.copyWith(stickyNotes: [...page.stickyNotes, note]),
+      undoSnapshot: page,
+    );
+  }
+
   Future<void> _handleCheckForUpdate() async {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
@@ -1974,6 +2105,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             stencilElements: const [],
             imageElements: const [],
             tapeElements: const [],
+            stickyNotes: const [],
           ),
           undoSnapshot: currentPage,
         ),
@@ -2148,6 +2280,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             ),
             onInsertImage: () => _handleImageToolButtonTap(currentPage),
             onOpenStickerPicker: () => _openQuickStencilPicker(currentPage),
+            onAddStickyNote: () => _addStickyNote(currentPage),
             onToggleZoomWindow: () =>
                 setState(() => _zoomWindowEnabled = !_zoomWindowEnabled),
             onToggleRuler: () =>
@@ -2210,23 +2343,31 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               ),
             ),
 
-          // Main Canvas Area (Continuous Vertical Scroll or Horizontal Flip)
+          // Main Canvas Area (Infinite Whiteboard, Continuous Vertical Scroll, or Horizontal Flip)
           Expanded(
             child: Stack(
               children: [
-                InteractiveViewer(
-                  transformationController: _transformController,
-                  minScale: 0.45,
-                  maxScale: 4.5,
-                  boundaryMargin: EdgeInsets.all(
-                    appState.freePaperMovement ? 260 : 24,
+                if (currentPage.isInfiniteWhiteboard || notebook.isWhiteboard)
+                  _buildInfiniteWhiteboardView(
+                    notebook,
+                    currentPage,
+                    currentIdx,
+                    appState,
+                  )
+                else
+                  InteractiveViewer(
+                    transformationController: _transformController,
+                    minScale: 0.45,
+                    maxScale: 4.5,
+                    boundaryMargin: EdgeInsets.all(
+                      appState.freePaperMovement ? 260 : 24,
+                    ),
+                    panEnabled: allowZoomPan,
+                    scaleEnabled: allowZoomPan,
+                    child: appState.verticalContinuousScroll
+                        ? _buildVerticalContinuousPages(notebook)
+                        : _buildHorizontalFlipPages(notebook),
                   ),
-                  panEnabled: allowZoomPan,
-                  scaleEnabled: allowZoomPan,
-                  child: appState.verticalContinuousScroll
-                      ? _buildVerticalContinuousPages(notebook)
-                      : _buildHorizontalFlipPages(notebook),
-                ),
 
                 // Star-Only Floating Left Quick-Pen Favorites Dock
                 if (appState.showFavoritesBar &&
@@ -2428,8 +2569,141 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   }
 
   // ===========================================================================
-  // CONTINUOUS VERTICAL PAGES + PULL-TO-ADD-PAGE & HORIZONTAL FLIP
+  // INFINITE WHITEBOARD (6000 × 6000) + CONTINUOUS VERTICAL PAGES
   // ===========================================================================
+
+  void _centerWhiteboard(Size viewportSize) {
+    final tx = viewportSize.width * 0.5 - PaperMetrics.whiteboardCenter.dx;
+    final ty = viewportSize.height * 0.5 - PaperMetrics.whiteboardCenter.dy;
+    _whiteboardTransformController.value = Matrix4.identity()..translate(tx, ty);
+    _whiteboardZoom = 1.0;
+  }
+
+  Widget _buildInfiniteWhiteboardView(
+    Notebook notebook,
+    NotePage page,
+    int pageIndex,
+    AppState appState,
+  ) {
+    final bool allowWhiteboardPanZoom = _pointerDownPositions.length >= 2 ||
+        appState.readOnlyMode ||
+        (!_isDrawingPointerDown &&
+            (appState.palmRejectionEnabled ||
+                _activeTool == EditorTool.panZoom));
+
+    return LayoutBuilder(
+      builder: (ctx, constraints) {
+        final viewportSize = Size(constraints.maxWidth, constraints.maxHeight);
+        if (!_whiteboardCenteredOnce &&
+            viewportSize.width > 0 &&
+            viewportSize.height > 0) {
+          _whiteboardCenteredOnce = true;
+          _centerWhiteboard(viewportSize);
+        }
+
+        return Stack(
+          children: [
+            InteractiveViewer(
+              transformationController: _whiteboardTransformController,
+              constrained: false,
+              minScale: 0.25,
+              maxScale: 4.0,
+              boundaryMargin: const EdgeInsets.all(800),
+              panEnabled: allowWhiteboardPanZoom,
+              scaleEnabled: allowWhiteboardPanZoom,
+              onInteractionUpdate: (_) {
+                final scale = _whiteboardTransformController.value
+                    .getMaxScaleOnAxis()
+                    .clamp(0.25, 4.0);
+                if ((scale - _whiteboardZoom).abs() > 0.02) {
+                  setState(() => _whiteboardZoom = scale);
+                }
+              },
+              child: _buildSinglePageCanvas(
+                notebook,
+                page.isInfiniteWhiteboard
+                    ? page
+                    : page.copyWith(isInfiniteWhiteboard: true),
+                pageIndex,
+              ),
+            ),
+            // Floating bottom-right Về tâm (Center) + Zoom % pill
+            Positioned(
+              right: 16,
+              bottom: 16,
+              child: Material(
+                elevation: 6,
+                borderRadius: BorderRadius.circular(22),
+                color: EditorColors.obsidianSurface.withAlpha(235),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(22),
+                    border: Border.all(color: Colors.white12),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      InkWell(
+                        onTap: () => setState(() => _centerWhiteboard(viewportSize)),
+                        borderRadius: BorderRadius.circular(14),
+                        child: const Padding(
+                          padding:
+                              EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.my_location_rounded,
+                                size: 15,
+                                color: EditorColors.activeBlue,
+                              ),
+                              SizedBox(width: 5),
+                              Text(
+                                'Về tâm',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      Container(
+                        width: 1,
+                        height: 16,
+                        margin: const EdgeInsets.symmetric(horizontal: 6),
+                        color: Colors.white12,
+                      ),
+                      InkWell(
+                        onTap: () => setState(() => _centerWhiteboard(viewportSize)),
+                        borderRadius: BorderRadius.circular(12),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 5),
+                          child: Text(
+                            '${(_whiteboardZoom * 100).round()}%',
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
 
   Widget _buildVerticalContinuousPages(Notebook notebook) {
     return NotificationListener<ScrollNotification>(
@@ -2548,7 +2822,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     for (final img in page.imageElements) {
       _ensureElementImageLoaded(img.filePath);
     }
-    final pageSize = PaperMetrics.pageSize(isLandscape: page.isLandscape);
+    final pageSize = PaperMetrics.pageSize(
+      isLandscape: page.isLandscape,
+      isInfiniteWhiteboard: page.isInfiniteWhiteboard,
+    );
     final bool isActivePage = pageIndex == _currentPageIndex;
     final bool isLassoOwner = _lassoController.activePageId == page.id;
 
@@ -2642,6 +2919,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
             // Interactive Text Overlays
             for (final txt in page.textElements) _buildTextOverlay(page, txt),
+
+            // Interactive Sticky Notes (Giấy nhớ dán GoodNotes)
+            for (final sticky in page.stickyNotes)
+              _buildStickyNoteOverlay(
+                page,
+                sticky,
+                context.read<AppState>().readOnlyMode,
+              ),
 
             // Movable Zoom Window Focus Indicator on Active Page
             if (_zoomWindowEnabled && isActivePage)
@@ -3459,6 +3744,242 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               ],
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  static const List<int> _stickyPastelColors = [
+    0xFFFEF08A, // Vàng
+    0xFFFBCFE8, // Hồng
+    0xFFBBF7D0, // Xanh lá
+    0xFFBAE6FD, // Xanh dương
+    0xFFDDD6FE, // Tím
+  ];
+
+  Widget _buildStickyNoteOverlay(
+    NotePage page,
+    StickyNoteElement note,
+    bool readOnly,
+  ) {
+    final bgColor = Color(note.colorValue);
+    final headerColor = Color.lerp(bgColor, Colors.black, 0.08) ?? bgColor;
+    final ctrl = _stickyControllers.putIfAbsent(
+      note.id,
+      () => TextEditingController(text: note.text),
+    );
+    if (ctrl.text != note.text) {
+      ctrl.value = TextEditingValue(
+        text: note.text,
+        selection: TextSelection.collapsed(offset: note.text.length),
+      );
+    }
+
+    void updateSticky(StickyNoteElement Function(StickyNoteElement s) fn) {
+      final updated = page.stickyNotes
+          .map((s) => s.id == note.id ? fn(s) : s)
+          .toList();
+      context.read<AppState>().updatePage(
+            _activeNotebookId,
+            page.copyWith(stickyNotes: updated),
+          );
+    }
+
+    final firstLine = note.text.trim().isEmpty
+        ? 'Giấy nhớ dán'
+        : note.text.trim().split('\n').first;
+
+    return Positioned(
+      left: note.x,
+      top: note.y,
+      child: Container(
+        width: note.isCollapsed ? math.min(note.width, 196.0) : note.width,
+        height: note.isCollapsed ? 40.0 : note.height,
+        decoration: BoxDecoration(
+          color: bgColor,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Colors.black.withAlpha(28)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withAlpha(42),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Stack(
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Top Drag Header Bar
+                GestureDetector(
+                  onPanUpdate: readOnly
+                      ? null
+                      : (d) => updateSticky(
+                            (s) => s.copyWith(
+                              x: s.x + d.delta.dx,
+                              y: s.y + d.delta.dy,
+                            ),
+                          ),
+                  child: Container(
+                    height: 36,
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    decoration: BoxDecoration(
+                      color: headerColor,
+                      borderRadius: BorderRadius.vertical(
+                        top: const Radius.circular(9),
+                        bottom: note.isCollapsed
+                            ? const Radius.circular(9)
+                            : Radius.zero,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        if (note.isCollapsed)
+                          Expanded(
+                            child: Padding(
+                              padding: const EdgeInsets.only(left: 4),
+                              child: Text(
+                                firstLine,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Color(0xFF1E293B),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          )
+                        else ...[
+                          for (final cVal in _stickyPastelColors)
+                            GestureDetector(
+                              onTap: readOnly
+                                  ? null
+                                  : () => updateSticky(
+                                        (s) => s.copyWith(colorValue: cVal),
+                                      ),
+                              child: Container(
+                                width: 14,
+                                height: 14,
+                                margin:
+                                    const EdgeInsets.symmetric(horizontal: 2.5),
+                                decoration: BoxDecoration(
+                                  color: Color(cVal),
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: note.colorValue == cVal
+                                        ? const Color(0xFF1E293B)
+                                        : Colors.black26,
+                                    width: note.colorValue == cVal ? 1.8 : 1.0,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          const Spacer(),
+                        ],
+                        InkWell(
+                          onTap: () => updateSticky(
+                            (s) => s.copyWith(isCollapsed: !s.isCollapsed),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Icon(
+                              note.isCollapsed
+                                  ? Icons.unfold_more_rounded
+                                  : Icons.unfold_less_rounded,
+                              size: 16,
+                              color: const Color(0xFF334155),
+                            ),
+                          ),
+                        ),
+                        if (!readOnly)
+                          InkWell(
+                            onTap: () {
+                              _stickyControllers.remove(note.id)?.dispose();
+                              final updated = page.stickyNotes
+                                  .where((s) => s.id != note.id)
+                                  .toList();
+                              _commitPage(
+                                page.copyWith(stickyNotes: updated),
+                                undoSnapshot: page,
+                              );
+                            },
+                            child: const Padding(
+                              padding: EdgeInsets.all(4),
+                              child: Icon(
+                                Icons.close_rounded,
+                                size: 15,
+                                color: Color(0xFF334155),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+                // Inline Editable Body
+                if (!note.isCollapsed)
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(10, 4, 10, 10),
+                      child: TextField(
+                        controller: ctrl,
+                        readOnly: readOnly,
+                        maxLines: null,
+                        expands: true,
+                        style: const TextStyle(
+                          color: Color(0xFF1E293B),
+                          fontSize: 13.5,
+                          height: 1.35,
+                        ),
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          border: InputBorder.none,
+                          hintText: 'Ghi chú nhanh...',
+                          hintStyle: TextStyle(
+                            color: Color(0xFF64748B),
+                            fontSize: 13,
+                          ),
+                        ),
+                        onChanged: (val) => updateSticky(
+                          (s) => s.copyWith(
+                            text: val,
+                            updatedAt: DateTime.now(),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            // Bottom-Right Resize Handle
+            if (!note.isCollapsed && !readOnly)
+              Positioned(
+                right: 0,
+                bottom: 0,
+                child: GestureDetector(
+                  onPanUpdate: (d) => updateSticky(
+                    (s) => s.copyWith(
+                      width: math.max(140.0, s.width + d.delta.dx),
+                      height: math.max(110.0, s.height + d.delta.dy),
+                    ),
+                  ),
+                  child: Container(
+                    width: 20,
+                    height: 20,
+                    alignment: Alignment.bottomRight,
+                    padding: const EdgeInsets.all(3),
+                    child: Icon(
+                      Icons.drag_handle_rounded,
+                      size: 13,
+                      color: Colors.black.withAlpha(90),
+                    ),
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
     );

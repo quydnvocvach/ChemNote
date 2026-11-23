@@ -40,11 +40,12 @@ class CanvasPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // 1. Paper template layer
+    // 1. Paper template layer (A4 or seamless Infinite Whiteboard)
     PaperTemplatePainter(
       templateType: page.templateType,
       paperColor: page.paperColor,
       isLandscape: page.isLandscape,
+      isInfiniteWhiteboard: page.isInfiniteWhiteboard,
     ).paint(canvas, size);
 
     // 2. Optional PDF page background image

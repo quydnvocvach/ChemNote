@@ -3,6 +3,19 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+/// Ảnh gần đây lấy trực tiếp từ bộ nhớ máy (`MediaStore.Images`) trên Android / HarmonyOS.
+class DeviceRecentImage {
+  final String uri;
+  final String thumbPath;
+  final String filePath;
+
+  const DeviceRecentImage({
+    required this.uri,
+    required this.thumbPath,
+    this.filePath = '',
+  });
+}
+
 /// Cầu nối phần cứng cho Huawei MatePad 11.5"S (144Hz PaperMatte), Huawei M-Pencil 3 (NearLink)
 /// và Ghi âm / Phát lại bài giảng gốc Android (`MediaRecorder` / `MediaPlayer`).
 /// Tự động bỏ qua an toàn trên nền tảng không hỗ trợ (Web, Desktop, Unit Tests).
@@ -157,6 +170,55 @@ class HardwareService {
       return 0;
     } on PlatformException {
       return 0;
+    }
+  }
+
+  /// Lấy danh sách ảnh & ảnh chụp màn hình gần đây nhất trên máy tính bảng (`MediaStore.Images`).
+  Future<List<DeviceRecentImage>> getDeviceRecentImages({int limit = 12}) async {
+    if (kIsWeb) return const [];
+    try {
+      final raw = await _channel.invokeMethod<List<dynamic>>(
+        'getDeviceRecentImages',
+        {'limit': limit},
+      );
+      if (raw == null) return const [];
+      final results = <DeviceRecentImage>[];
+      for (final item in raw) {
+        if (item is Map) {
+          final uri = item['uri']?.toString() ?? '';
+          final thumbPath = item['thumbPath']?.toString() ?? '';
+          final filePath = item['filePath']?.toString() ?? '';
+          if (uri.isNotEmpty && thumbPath.isNotEmpty) {
+            results.add(
+              DeviceRecentImage(
+                uri: uri,
+                thumbPath: thumbPath,
+                filePath: filePath,
+              ),
+            );
+          }
+        }
+      }
+      return results;
+    } on MissingPluginException {
+      return const [];
+    } on PlatformException {
+      return const [];
+    }
+  }
+
+  /// Sao chép ảnh độ phân giải gốc từ `content://` URI sang `destPath` cục bộ của ứng dụng.
+  Future<String?> copyUriToFile(String uri, String destPath) async {
+    if (kIsWeb) return null;
+    try {
+      return await _channel.invokeMethod<String>('copyUriToFile', {
+        'uri': uri,
+        'destPath': destPath,
+      });
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
     }
   }
 

@@ -2,12 +2,19 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../../core/models/drawing_elements.dart';
 
-/// Standard logical page dimensions (A4 at 96 DPI, matching PdfExportService).
+/// Standard logical page dimensions (A4 at 96 DPI, matching PdfExportService)
+/// and Infinite Whiteboard virtual canvas dimensions (6000 × 6000).
 class PaperMetrics {
   static const double portraitWidth = 794.0;
   static const double portraitHeight = 1123.0;
+  static const Size whiteboardSize = Size(6000.0, 6000.0);
+  static const Offset whiteboardCenter = Offset(3000.0, 3000.0);
 
-  static Size pageSize({required bool isLandscape}) {
+  static Size pageSize({
+    required bool isLandscape,
+    bool isInfiniteWhiteboard = false,
+  }) {
+    if (isInfiniteWhiteboard) return whiteboardSize;
     return isLandscape
         ? const Size(portraitHeight, portraitWidth)
         : const Size(portraitWidth, portraitHeight);
@@ -127,11 +134,13 @@ class PaperTemplatePainter extends CustomPainter {
   final PaperTemplateType templateType;
   final PaperColorType paperColor;
   final bool isLandscape;
+  final bool isInfiniteWhiteboard;
 
   const PaperTemplatePainter({
     required this.templateType,
     required this.paperColor,
     this.isLandscape = false,
+    this.isInfiniteWhiteboard = false,
   });
 
   @override
@@ -140,6 +149,11 @@ class PaperTemplatePainter extends CustomPainter {
 
     // Fill paper background
     canvas.drawRect(Offset.zero & size, Paint()..color = palette.background);
+
+    if (isInfiniteWhiteboard) {
+      _paintInfiniteWhiteboard(canvas, size, palette);
+      return;
+    }
 
     switch (templateType) {
       case PaperTemplateType.blank:
@@ -172,6 +186,107 @@ class PaperTemplatePainter extends CustomPainter {
         _paintTwoColumnStudy(canvas, size, palette);
         break;
     }
+  }
+
+  /// Seamless full-bleed tiled pattern for Infinite Whiteboard pages (6000×6000).
+  void _paintInfiniteWhiteboard(
+    Canvas canvas,
+    Size size,
+    PaperPalette palette,
+  ) {
+    switch (templateType) {
+      case PaperTemplateType.blank:
+        break;
+      case PaperTemplateType.grid:
+      case PaperTemplateType.pastelGrid:
+        const double step = 32.0;
+        final minorPaint = Paint()
+          ..color = palette.line
+          ..strokeWidth = 0.85;
+        final majorPaint = Paint()
+          ..color = palette.majorLine
+          ..strokeWidth = 1.2;
+        int col = 0;
+        for (double x = 0; x <= size.width; x += step) {
+          canvas.drawLine(
+            Offset(x, 0),
+            Offset(x, size.height),
+            col % 5 == 0 ? majorPaint : minorPaint,
+          );
+          col++;
+        }
+        int row = 0;
+        for (double y = 0; y <= size.height; y += step) {
+          canvas.drawLine(
+            Offset(0, y),
+            Offset(size.width, y),
+            row % 5 == 0 ? majorPaint : minorPaint,
+          );
+          row++;
+        }
+        break;
+      case PaperTemplateType.hexagonal:
+        final hexPaint = Paint()
+          ..color = palette.line
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.0;
+        const double radius = 26.0;
+        final double hexWidth = math.sqrt(3) * radius;
+        const double verticalStep = radius * 1.5;
+        final Path path = Path();
+        int row = 0;
+        for (double cy = 0; cy <= size.height + radius; cy += verticalStep) {
+          final double xOffset = row.isOdd ? hexWidth * 0.5 : 0.0;
+          for (double cx = xOffset; cx <= size.width + hexWidth; cx += hexWidth) {
+            for (int i = 0; i < 6; i++) {
+              final double angle = (math.pi / 180.0) * (60 * i - 30);
+              final double vx = cx + radius * math.cos(angle);
+              final double vy = cy + radius * math.sin(angle);
+              if (i == 0) {
+                path.moveTo(vx, vy);
+              } else {
+                path.lineTo(vx, vy);
+              }
+            }
+            path.close();
+          }
+          row++;
+        }
+        canvas.drawPath(path, hexPaint);
+        break;
+      case PaperTemplateType.ruled:
+      case PaperTemplateType.sageRibbon:
+      case PaperTemplateType.vintageCream:
+      case PaperTemplateType.cornell:
+      case PaperTemplateType.twoColumnStudy:
+        final linePaint = Paint()
+          ..color = palette.line
+          ..strokeWidth = 1.0;
+        for (double y = 36.0; y < size.height; y += 36.0) {
+          canvas.drawLine(Offset(0, y), Offset(size.width, y), linePaint);
+        }
+        break;
+      case PaperTemplateType.dotted:
+        final dotPaint = Paint()
+          ..color = palette.majorLine
+          ..style = PaintingStyle.fill;
+        const double step = 32.0;
+        for (double y = step; y < size.height; y += step) {
+          for (double x = step; x < size.width; x += step) {
+            canvas.drawCircle(Offset(x, y), 1.45, dotPaint);
+          }
+        }
+        break;
+    }
+
+    // Subtle center origin crosshair at (3000, 3000)
+    final cx = size.width * 0.5;
+    final cy = size.height * 0.5;
+    final originPaint = Paint()
+      ..color = palette.majorLine.withAlpha(180)
+      ..strokeWidth = 1.4;
+    canvas.drawLine(Offset(cx - 14, cy), Offset(cx + 14, cy), originPaint);
+    canvas.drawLine(Offset(cx, cy - 14), Offset(cx, cy + 14), originPaint);
   }
 
   /// Huawei Notes signature sage-green header/footer paper with pastel peach
@@ -718,6 +833,7 @@ class PaperTemplatePainter extends CustomPainter {
   bool shouldRepaint(covariant PaperTemplatePainter oldDelegate) {
     return oldDelegate.templateType != templateType ||
         oldDelegate.paperColor != paperColor ||
-        oldDelegate.isLandscape != isLandscape;
+        oldDelegate.isLandscape != isLandscape ||
+        oldDelegate.isInfiniteWhiteboard != isInfiniteWhiteboard;
   }
 }
