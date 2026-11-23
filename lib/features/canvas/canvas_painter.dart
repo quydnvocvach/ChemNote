@@ -23,6 +23,8 @@ class CanvasPainter extends CustomPainter {
   final Map<String, ui.Image> elementImageCache;
   final LassoSelection lassoSelection;
   final Rect? lassoSelectionBounds;
+  final String? playingAudioId;
+  final int? playingAudioTimeMs;
   final int repaintVersion;
 
   const CanvasPainter({
@@ -31,6 +33,8 @@ class CanvasPainter extends CustomPainter {
     this.elementImageCache = const {},
     this.lassoSelection = const LassoSelection(),
     this.lassoSelectionBounds,
+    this.playingAudioId,
+    this.playingAudioTimeMs,
     this.repaintVersion = 0,
   });
 
@@ -61,15 +65,18 @@ class CanvasPainter extends CustomPainter {
       }
     }
 
-    // 3. Highlighter layer (underneath opaque pen ink)
+    // 3. Highlighter layer (underneath opaque pen ink; BlendMode.multiply on light paper)
     final bool isDarkPaper = page.paperColor == PaperColorType.dark;
     for (final stroke in page.strokes) {
       if (stroke.toolType == ToolType.highlighter) {
+        final audioState = _audioVisualForStroke(stroke);
         paintHighlighterStroke(
           canvas,
           stroke,
           isDarkPaper: isDarkPaper,
           isSelected: lassoSelection.strokeIds.contains(stroke.id),
+          opacityMultiplier: audioState.opacityMultiplier,
+          isAudioHighlighted: audioState.isHighlighted,
         );
       }
     }
@@ -86,10 +93,13 @@ class CanvasPainter extends CustomPainter {
     // 5. Committed pen / brush / pencil strokes
     for (final stroke in page.strokes) {
       if (stroke.toolType != ToolType.highlighter) {
+        final audioState = _audioVisualForStroke(stroke);
         paintInkStroke(
           canvas,
           stroke,
           isSelected: lassoSelection.strokeIds.contains(stroke.id),
+          opacityMultiplier: audioState.opacityMultiplier,
+          isAudioHighlighted: audioState.isHighlighted,
         );
       }
     }
@@ -194,17 +204,41 @@ class CanvasPainter extends CustomPainter {
     canvas.restore();
   }
 
+  ({double opacityMultiplier, bool isHighlighted}) _audioVisualForStroke(
+    Stroke stroke,
+  ) {
+    if (playingAudioId == null ||
+        playingAudioTimeMs == null ||
+        stroke.audioId != playingAudioId ||
+        stroke.audioTimeMs == null) {
+      return (opacityMultiplier: 1.0, isHighlighted: false);
+    }
+    final diff = stroke.audioTimeMs! - playingAudioTimeMs!;
+    if (diff > 0) {
+      return (opacityMultiplier: 0.22, isHighlighted: false);
+    }
+    if (diff.abs() < 1200) {
+      return (opacityMultiplier: 1.0, isHighlighted: true);
+    }
+    return (opacityMultiplier: 1.0, isHighlighted: false);
+  }
+
   static void paintHighlighterStroke(
     Canvas canvas,
     Stroke stroke, {
     required bool isDarkPaper,
     required bool isSelected,
+    double opacityMultiplier = 1.0,
+    bool isAudioHighlighted = false,
   }) {
     if (stroke.points.isEmpty) return;
 
     final baseColor = Color(stroke.colorValue);
+    final alpha = ((isDarkPaper ? 95 : 108) * opacityMultiplier)
+        .round()
+        .clamp(12, 255);
     final paint = Paint()
-      ..color = baseColor.withAlpha(isDarkPaper ? 95 : 108)
+      ..color = baseColor.withAlpha(alpha)
       ..style = PaintingStyle.stroke
       ..strokeWidth = stroke.width
       ..strokeCap = StrokeCap.square
@@ -213,6 +247,17 @@ class CanvasPainter extends CustomPainter {
       ..isAntiAlias = true;
 
     final path = StrokeEngine.buildCenterlinePath(stroke.points);
+    if (isAudioHighlighted) {
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = const Color(0xFF3B82F6).withAlpha(115)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = stroke.width + 6.0
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round,
+      );
+    }
     canvas.drawPath(path, paint);
 
     if (isSelected) {
@@ -232,14 +277,34 @@ class CanvasPainter extends CustomPainter {
     Canvas canvas,
     Stroke stroke, {
     required bool isSelected,
+    double opacityMultiplier = 1.0,
+    bool isAudioHighlighted = false,
   }) {
     if (stroke.points.isEmpty) return;
 
-    final color = Color(stroke.colorValue);
+    final baseColor = Color(stroke.colorValue);
+    final baseAlpha = (stroke.colorValue >> 24) & 0xFF;
+    final color = opacityMultiplier >= 0.99
+        ? baseColor
+        : baseColor.withAlpha(
+            (baseAlpha * opacityMultiplier).round().clamp(16, 255),
+          );
 
     // Recognized geometric shapes render with crisp uniform stroke width
     if (stroke.shapeType != ShapeType.none) {
       final path = StrokeEngine.buildCenterlinePath(stroke.points);
+      if (isAudioHighlighted) {
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = const Color(0xFF3B82F6).withAlpha(135)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = stroke.width + 8.0
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3.0),
+        );
+      }
       if (isSelected) {
         canvas.drawPath(
           path,
@@ -267,6 +332,18 @@ class CanvasPainter extends CustomPainter {
     // Variable-width ink ribbon for fountain, ballpoint, brush, and pencil
     final ribbonPath = StrokeEngine.buildVariableWidthPath(stroke);
 
+    if (isAudioHighlighted) {
+      canvas.drawPath(
+        ribbonPath,
+        Paint()
+          ..color = const Color(0xFF3B82F6).withAlpha(140)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 6.5
+          ..strokeJoin = StrokeJoin.round
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3.0),
+      );
+    }
+
     if (isSelected) {
       canvas.drawPath(
         ribbonPath,
@@ -280,7 +357,9 @@ class CanvasPainter extends CustomPainter {
 
     final bool isPencil = stroke.toolType == ToolType.pencil;
     final fillPaint = Paint()
-      ..color = isPencil ? color.withAlpha(195) : color
+      ..color = isPencil
+          ? color.withAlpha((195 * opacityMultiplier).round().clamp(16, 255))
+          : color
       ..style = PaintingStyle.fill
       ..isAntiAlias = true;
     if (isPencil) {
@@ -436,7 +515,9 @@ class CanvasPainter extends CustomPainter {
         oldDelegate.page != page ||
         oldDelegate.pdfBackgroundImage != pdfBackgroundImage ||
         oldDelegate.lassoSelection != lassoSelection ||
-        oldDelegate.lassoSelectionBounds != lassoSelectionBounds;
+        oldDelegate.lassoSelectionBounds != lassoSelectionBounds ||
+        oldDelegate.playingAudioId != playingAudioId ||
+        oldDelegate.playingAudioTimeMs != playingAudioTimeMs;
   }
 }
 

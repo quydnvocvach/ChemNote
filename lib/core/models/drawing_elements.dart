@@ -121,6 +121,8 @@ class Stroke {
   final List<StrokePoint> points;
   final bool isSmoothed;
   final ShapeType shapeType;
+  final String? audioId;
+  final int? audioTimeMs;
 
   const Stroke({
     required this.id,
@@ -130,6 +132,8 @@ class Stroke {
     required this.points,
     this.isSmoothed = false,
     this.shapeType = ShapeType.none,
+    this.audioId,
+    this.audioTimeMs,
   });
 
   Stroke copyWith({
@@ -140,6 +144,8 @@ class Stroke {
     List<StrokePoint>? points,
     bool? isSmoothed,
     ShapeType? shapeType,
+    String? audioId,
+    int? audioTimeMs,
   }) {
     return Stroke(
       id: id ?? this.id,
@@ -149,6 +155,8 @@ class Stroke {
       points: points ?? this.points,
       isSmoothed: isSmoothed ?? this.isSmoothed,
       shapeType: shapeType ?? this.shapeType,
+      audioId: audioId ?? this.audioId,
+      audioTimeMs: audioTimeMs ?? this.audioTimeMs,
     );
   }
 
@@ -161,6 +169,8 @@ class Stroke {
       'points': points.map((p) => p.toJson()).toList(),
       'isSmoothed': isSmoothed,
       'shapeType': shapeType.name,
+      if (audioId != null) 'audioId': audioId,
+      if (audioTimeMs != null) 'audioTimeMs': audioTimeMs,
     };
   }
 
@@ -180,6 +190,57 @@ class Stroke {
         json['shapeType'],
         ShapeType.none,
       ),
+      audioId: json['audioId'] as String?,
+      audioTimeMs: (json['audioTimeMs'] as num?)?.toInt(),
+    );
+  }
+}
+
+/// Bản ghi âm bài giảng gắn với từng trang (Audio Note Replay).
+class AudioRecording {
+  final String id;
+  final String filePath;
+  final int durationMs;
+  final DateTime createdAt;
+
+  const AudioRecording({
+    required this.id,
+    required this.filePath,
+    this.durationMs = 0,
+    required this.createdAt,
+  });
+
+  AudioRecording copyWith({
+    String? id,
+    String? filePath,
+    int? durationMs,
+    DateTime? createdAt,
+  }) {
+    return AudioRecording(
+      id: id ?? this.id,
+      filePath: filePath ?? this.filePath,
+      durationMs: durationMs ?? this.durationMs,
+      createdAt: createdAt ?? this.createdAt,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'filePath': filePath,
+      'durationMs': durationMs,
+      'createdAt': createdAt.toIso8601String(),
+    };
+  }
+
+  factory AudioRecording.fromJson(Map<String, dynamic> json) {
+    return AudioRecording(
+      id: json['id'] as String,
+      filePath: json['filePath'] as String? ?? '',
+      durationMs: (json['durationMs'] as num?)?.toInt() ?? 0,
+      createdAt: json['createdAt'] != null
+          ? DateTime.tryParse(json['createdAt'] as String) ?? DateTime.now()
+          : DateTime.now(),
     );
   }
 }

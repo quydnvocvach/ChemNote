@@ -12,6 +12,7 @@ class NotePage {
   final List<StencilElement> stencilElements;
   final List<TapeElement> tapeElements;
   final List<AttachmentElement> attachmentElements;
+  final List<AudioRecording> audioRecordings;
   final String? pdfBackgroundPath;
   final int? pdfPageNumber;
   final bool isBookmarked;
@@ -30,6 +31,7 @@ class NotePage {
     this.stencilElements = const [],
     this.tapeElements = const [],
     this.attachmentElements = const [],
+    this.audioRecordings = const [],
     this.pdfBackgroundPath,
     this.pdfPageNumber,
     this.isBookmarked = false,
@@ -49,6 +51,7 @@ class NotePage {
     List<StencilElement>? stencilElements,
     List<TapeElement>? tapeElements,
     List<AttachmentElement>? attachmentElements,
+    List<AudioRecording>? audioRecordings,
     String? pdfBackgroundPath,
     bool clearPdfBackground = false,
     int? pdfPageNumber,
@@ -69,6 +72,7 @@ class NotePage {
       stencilElements: stencilElements ?? this.stencilElements,
       tapeElements: tapeElements ?? this.tapeElements,
       attachmentElements: attachmentElements ?? this.attachmentElements,
+      audioRecordings: audioRecordings ?? this.audioRecordings,
       pdfBackgroundPath: clearPdfBackground
           ? null
           : (pdfBackgroundPath ?? this.pdfBackgroundPath),
@@ -93,6 +97,7 @@ class NotePage {
       'stencilElements': stencilElements.map((s) => s.toJson()).toList(),
       'tapeElements': tapeElements.map((t) => t.toJson()).toList(),
       'attachmentElements': attachmentElements.map((a) => a.toJson()).toList(),
+      'audioRecordings': audioRecordings.map((a) => a.toJson()).toList(),
       'pdfBackgroundPath': pdfBackgroundPath,
       'pdfPageNumber': pdfPageNumber,
       'isBookmarked': isBookmarked,
@@ -109,6 +114,7 @@ class NotePage {
     final rawTapes = json['tapeElements'] as List<dynamic>? ?? const [];
     final rawAttachments =
         json['attachmentElements'] as List<dynamic>? ?? const [];
+    final rawAudios = json['audioRecordings'] as List<dynamic>? ?? const [];
 
     return NotePage(
       id: json['id'] as String,
@@ -133,6 +139,9 @@ class NotePage {
           .toList(),
       attachmentElements: rawAttachments
           .map((e) => AttachmentElement.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      audioRecordings: rawAudios
+          .map((e) => AudioRecording.fromJson(e as Map<String, dynamic>))
           .toList(),
       pdfBackgroundPath: json['pdfBackgroundPath'] as String?,
       pdfPageNumber: (json['pdfPageNumber'] as num?)?.toInt(),

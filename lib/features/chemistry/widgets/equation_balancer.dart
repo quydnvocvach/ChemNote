@@ -11,25 +11,28 @@ class EquationBalanceException implements Exception {
   String toString() => 'EquationBalanceException: $message';
 }
 
-/// Một chất (chất tham gia hoặc sản phẩm) sau khi đã tìm được hệ số cân bằng.
+/// Một chất (hoặc ion) sau khi đã tìm được hệ số cân bằng.
 class BalancedSpecies {
   final String formula;
   final int coefficient;
+  final int charge;
   final String formatted;
 
   const BalancedSpecies({
     required this.formula,
     required this.coefficient,
+    this.charge = 0,
     required this.formatted,
   });
 }
 
-/// Kết quả cân bằng phương trình hóa học.
+/// Kết quả cân bằng phương trình hóa học (hỗ trợ cả phương trình phân tử và ion).
 class BalancedEquationResult {
-  /// Chuỗi phương trình đẹp có chỉ số dưới Unicode (VD: `3Fe + 2O₂ → Fe₃O₄`).
+  /// Chuỗi phương trình đẹp có chỉ số dưới & điện tích mũ Unicode
+  /// (VD: `MnO₄⁻ + 5Fe²⁺ + 8H⁺ → Mn²⁺ + 5Fe³⁺ + 4H₂O`).
   final String balanced;
 
-  /// Chuỗi phương trình ASCII (VD: `3Fe + 2O2 -> Fe3O4`).
+  /// Chuỗi phương trình ASCII (VD: `MnO4- + 5Fe2+ + 8H+ -> Mn2+ + 5Fe3+ + 4H2O`).
   final String plain;
 
   /// Mũi tên hiển thị (`→` hoặc `⇌`).
@@ -50,13 +53,34 @@ class BalancedEquationResult {
   });
 }
 
+class _ParsedSpecies {
+  final String rawToken;
+  final String baseFormula;
+  final Map<String, int> elements;
+  final int charge;
+  final bool isElectron;
+
+  const _ParsedSpecies({
+    required this.rawToken,
+    required this.baseFormula,
+    required this.elements,
+    required this.charge,
+    this.isElectron = false,
+  });
+}
+
 /// Bộ cân bằng phương trình hóa học thuần Dart dùng khử Gauss-Jordan
-/// trên phân số hữu tỉ chính xác (`BigInt`) — không sai số dấu phẩy động.
+/// trên phân số hữu tỉ chính xác (`BigInt`) — hỗ trợ cả phương trình phân tử
+/// và phương trình ion có điện tích (`MnO4-`, `Fe2+`, `Cr2O7^2-`, `e-`).
 class ChemicalEquationBalancer {
   const ChemicalEquationBalancer._();
 
   static const List<String> _subscriptDigits = [
     '₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉',
+  ];
+
+  static const List<String> _superscriptDigits = [
+    '⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹',
   ];
 
   /// Chuyển các chỉ số nguyên tử thành chỉ số dưới Unicode, giữ nguyên hệ số hydrat.
@@ -77,22 +101,34 @@ class ChemicalEquationBalancer {
     }).join('·');
   }
 
-  /// Cân bằng phương trình hóa học hỗ trợ `->`, `=`, `→`, `⇌`, `<=>`, ngoặc và hydrat.
+  /// Định dạng điện tích thành chỉ số trên Unicode (VD: `+2` -> `²⁺`, `-1` -> `⁻`).
+  static String formatChargeSuperscript(int charge) {
+    if (charge == 0) return '';
+    final sign = charge > 0 ? '⁺' : '⁻';
+    final mag = charge.abs();
+    if (mag == 1) return sign;
+    final digits = mag.toString().replaceAllMapped(
+          RegExp(r'[0-9]'),
+          (m) => _superscriptDigits[m.group(0)!.codeUnitAt(0) - 48],
+        );
+    return '$digits$sign';
+  }
+
+  /// Cân bằng phương trình hóa học phân tử & ion.
+  /// Hỗ trợ `->`, `=`, `→`, `⇌`, `<=>`, ngoặc, hydrat và điện tích (`+`, `-`, `2+`, `^2-`, `e-`).
   static BalancedEquationResult balance(String input) {
     final raw = input.trim();
     if (raw.isEmpty) {
       throw const EquationBalanceException(
-        'Vui lòng nhập phương trình hóa học (VD: Fe + O2 -> Fe3O4).',
+        'Vui lòng nhập phương trình hóa học (VD: Fe + O2 -> Fe3O4 hoặc MnO4- + Fe2+ + H+ -> Mn2+ + Fe3+ + H2O).',
       );
     }
 
-    // Chuẩn hóa chỉ số dưới Unicode về chữ số ASCII để phân tích
-    final asciiInput = raw.replaceAllMapped(
-      RegExp(r'[₀₁₂₃₄₅₆₇₈₉]'),
-      (m) => _subscriptDigits.indexOf(m.group(0)!).toString(),
-    );
+    // Chuẩn hóa chỉ số dưới Unicode về ASCII, giữ phân biệt chỉ số trên bằng dấu `^`
+    final normalizedInput = _normalizeUnicodeScripts(raw);
 
-    final arrowMatch = RegExp(r'<=>|<->|⇌|↔|->|=>|→|=').firstMatch(asciiInput);
+    final arrowMatch =
+        RegExp(r'<=>|<->|⇌|↔|->|=>|→|=').firstMatch(normalizedInput);
     if (arrowMatch == null) {
       throw const EquationBalanceException(
         'Thiếu dấu mũi tên phản ứng (dùng ->, =, → hoặc ⇌).',
@@ -103,20 +139,18 @@ class ChemicalEquationBalancer {
     final displayArrow =
         (rawArrow == '<=>' || rawArrow == '<->' || rawArrow == '⇌') ? '⇌' : '→';
 
-    final sides = asciiInput.split(rawArrow);
+    final sides = normalizedInput.split(rawArrow);
     if (sides.length != 2 || sides[0].trim().isEmpty || sides[1].trim().isEmpty) {
       throw const EquationBalanceException(
         'Phương trình phải có đúng 2 vế (chất tham gia và sản phẩm).',
       );
     }
 
-    final reactantTokens = sides[0]
-        .split('+')
+    final reactantTokens = _splitSpecies(sides[0])
         .map(_stripLeadingCoeff)
         .where((s) => s.isNotEmpty)
         .toList();
-    final productTokens = sides[1]
-        .split('+')
+    final productTokens = _splitSpecies(sides[1])
         .map(_stripLeadingCoeff)
         .where((s) => s.isNotEmpty)
         .toList();
@@ -128,33 +162,33 @@ class ChemicalEquationBalancer {
     }
 
     final allTokens = [...reactantTokens, ...productTokens];
-    final parsedList = <Map<String, int>>[];
-    for (final tok in allTokens) {
-      try {
-        parsedList.add(MolarMassCalculator.parseFormula(tok));
-      } on MolarMassException catch (e) {
-        throw EquationBalanceException('Lỗi chất "$tok": ${e.message}');
-      }
-    }
+    final parsedList = allTokens.map(_parseSpecies).toList();
+    final hasCharges = parsedList.any((s) => s.charge != 0);
 
     final elems = <String>[];
     final elemSet = <String>{};
-    for (final counts in parsedList) {
-      for (final sym in counts.keys) {
+    for (final sp in parsedList) {
+      for (final sym in sp.elements.keys) {
         if (elemSet.add(sym)) elems.add(sym);
       }
     }
 
-    final numRows = elems.length;
     final numCols = allTokens.length;
-    final mat = List<List<_BigFrac>>.generate(numRows, (r) {
-      final sym = elems[r];
-      return List<_BigFrac>.generate(numCols, (c) {
-        final cnt = parsedList[c][sym] ?? 0;
-        final sign = c < reactantTokens.length ? 1 : -1;
-        return _BigFrac.fromInt(sign * cnt);
-      });
-    });
+    final mat = <List<_BigFrac>>[
+      for (final sym in elems)
+        List<_BigFrac>.generate(numCols, (c) {
+          final cnt = parsedList[c].elements[sym] ?? 0;
+          final sign = c < reactantTokens.length ? 1 : -1;
+          return _BigFrac.fromInt(sign * cnt);
+        }),
+      if (hasCharges)
+        List<_BigFrac>.generate(numCols, (c) {
+          final sign = c < reactantTokens.length ? 1 : -1;
+          return _BigFrac.fromInt(sign * parsedList[c].charge);
+        }),
+    ];
+
+    final numRows = mat.length;
 
     // Khử Gauss-Jordan về dạng bậc thang rút gọn (RREF) trên trường hữu tỉ chính xác
     final pivotCols = <int>[];
@@ -200,7 +234,7 @@ class ChemicalEquationBalancer {
 
     if (freeCols.isEmpty) {
       throw const EquationBalanceException(
-        'Không thể cân bằng phương trình — kiểm tra lại nguyên tố hai vế.',
+        'Không thể cân bằng phương trình — kiểm tra lại nguyên tố và điện tích hai vế.',
       );
     }
 
@@ -232,7 +266,7 @@ class ChemicalEquationBalancer {
 
     if (intCoeffs.any((v) => v <= BigInt.zero)) {
       throw const EquationBalanceException(
-        'Không tìm được bộ hệ số nguyên dương — vui lòng kiểm tra lại các chất tham gia và sản phẩm.',
+        'Không tìm được bộ hệ số nguyên dương — vui lòng kiểm tra lại các chất và điện tích.',
       );
     }
 
@@ -242,19 +276,30 @@ class ChemicalEquationBalancer {
     }
     final coeffs = intCoeffs.map((v) => (v ~/ commonGcd).toInt()).toList();
 
-    final reactants = List<BalancedSpecies>.generate(reactantTokens.length, (i) {
-      final f = reactantTokens[i];
-      final c = coeffs[i];
-      final fmt = '${c > 1 ? c : ''}${formatFormulaSubscripts(f)}';
-      return BalancedSpecies(formula: f, coefficient: c, formatted: fmt);
-    });
+    BalancedSpecies buildSpecies(int index) {
+      final sp = parsedList[index];
+      final c = coeffs[index];
+      final coeffStr = c > 1 ? '$c' : '';
+      final bodyFmt = sp.isElectron
+          ? 'e⁻'
+          : '${formatFormulaSubscripts(sp.baseFormula)}${formatChargeSuperscript(sp.charge)}';
+      return BalancedSpecies(
+        formula: sp.rawToken,
+        coefficient: c,
+        charge: sp.charge,
+        formatted: '$coeffStr$bodyFmt',
+      );
+    }
 
-    final products = List<BalancedSpecies>.generate(productTokens.length, (i) {
-      final f = productTokens[i];
-      final c = coeffs[reactantTokens.length + i];
-      final fmt = '${c > 1 ? c : ''}${formatFormulaSubscripts(f)}';
-      return BalancedSpecies(formula: f, coefficient: c, formatted: fmt);
-    });
+    final reactants = List<BalancedSpecies>.generate(
+      reactantTokens.length,
+      (i) => buildSpecies(i),
+    );
+
+    final products = List<BalancedSpecies>.generate(
+      productTokens.length,
+      (i) => buildSpecies(reactantTokens.length + i),
+    );
 
     final balanced =
         '${reactants.map((r) => r.formatted).join(' + ')} $displayArrow ${products.map((p) => p.formatted).join(' + ')}';
@@ -268,6 +313,151 @@ class ChemicalEquationBalancer {
       coefficients: coeffs,
       reactants: reactants,
       products: products,
+    );
+  }
+
+  /// Chuẩn hóa chỉ số dưới Unicode về số ASCII và chuyển điện tích mũ Unicode
+  /// (VD: `²⁺`, `⁻`) sang cú pháp `^2+`, `^-` không mơ hồ.
+  static String _normalizeUnicodeScripts(String raw) {
+    var s = raw.replaceAllMapped(
+      RegExp(r'[₀₁₂₃₄₅₆₇₈₉]'),
+      (m) => _subscriptDigits.indexOf(m.group(0)!).toString(),
+    );
+    s = s.replaceAllMapped(RegExp(r'[⁰¹²³⁴⁵⁶⁷⁸⁹]*[⁺⁻]'), (m) {
+      final text = m.group(0)!;
+      final buf = StringBuffer('^');
+      for (int i = 0; i < text.length; i++) {
+        final ch = text[i];
+        if (ch == '⁺') {
+          buf.write('+');
+        } else if (ch == '⁻') {
+          buf.write('-');
+        } else {
+          final idx = _superscriptDigits.indexOf(ch);
+          if (idx >= 0) buf.write(idx);
+        }
+      }
+      return buf.toString();
+    });
+    return s;
+  }
+
+  /// Tách các chất/ion theo dấu `+` mà KHÔNG cắt nhầm điện tích dương (`Fe2+ + H+`, `Fe2++H+`).
+  static List<String> _splitSpecies(String side) {
+    final s = side.trim();
+    final parts = <String>[];
+    final buf = StringBuffer();
+
+    for (int i = 0; i < s.length; i++) {
+      final ch = s[i];
+      if (ch == '+') {
+        final prevIsSpace = i > 0 && s[i - 1].trim().isEmpty;
+        final prevIsCaret = i > 0 && s[i - 1] == '^';
+        final atEnd = i == s.length - 1;
+        final nextChar = atEnd ? '' : s[i + 1];
+
+        // Tìm ký tự không phải khoảng trắng kế tiếp
+        int j = i + 1;
+        while (j < s.length && s[j].trim().isEmpty) {
+          j++;
+        }
+        final nextNonSpace = j < s.length ? s[j] : '';
+
+        bool isSeparator;
+        if (prevIsSpace) {
+          isSeparator = true;
+        } else if (prevIsCaret || atEnd) {
+          isSeparator = false;
+        } else if (nextChar == '+') {
+          // Trường hợp viết dính `Fe2++H+`: dấu `+` đầu là điện tích, dấu sau là ngăn cách
+          isSeparator = false;
+        } else if (nextChar.trim().isEmpty && (nextNonSpace == '+' || nextNonSpace.isEmpty)) {
+          // Trường hợp `Fe2+ + H+`: dấu `+` ngay sau `Fe2` là điện tích
+          isSeparator = false;
+        } else {
+          // Trường hợp viết dính không khoảng trắng `Fe+O2`, `KMnO4+HCl`
+          isSeparator = true;
+        }
+
+        if (isSeparator) {
+          final token = buf.toString().trim();
+          if (token.isNotEmpty) parts.add(token);
+          buf.clear();
+          continue;
+        }
+      }
+      buf.write(ch);
+    }
+
+    final last = buf.toString().trim();
+    if (last.isNotEmpty) parts.add(last);
+    return parts;
+  }
+
+  /// Phân tích một chất hoặc ion thành `{elements, charge}`.
+  static _ParsedSpecies _parseSpecies(String token) {
+    final t = token.trim();
+    if (t == 'e-' || t == 'e^-') {
+      return _ParsedSpecies(
+        rawToken: 'e-',
+        baseFormula: 'e',
+        elements: const {},
+        charge: -1,
+        isElectron: true,
+      );
+    }
+
+    String baseFormula = t;
+    int charge = 0;
+
+    // 1. Điện tích tường minh có dấu `^` (VD: Cr2O7^2-, C2O4^2-, Fe^3+, MnO4^-, Fe^+2)
+    final caretIdx = t.lastIndexOf('^');
+    if (caretIdx > 0) {
+      baseFormula = t.substring(0, caretIdx).trim();
+      final chargeStr = t.substring(caretIdx + 1).trim();
+      charge = _parseChargeString(chargeStr, t);
+    } else if (t.endsWith('+') || t.endsWith('-')) {
+      // 2. Điện tích đuôi trực tiếp (VD: MnO4-, Fe2+, Fe3+, H+, OH-, NH4+)
+      final sign = t.endsWith('+') ? 1 : -1;
+      final beforeSign = t.substring(0, t.length - 1);
+
+      // Nếu là ion đơn nguyên tử có 1 chữ số ngay trước dấu (VD: Fe2+, Mn2+, Cr3+, S2-)
+      final monoIonMatch = RegExp(r'^([A-Z][a-z]?)([1-9])$').firstMatch(beforeSign);
+      if (monoIonMatch != null) {
+        baseFormula = monoIonMatch.group(1)!;
+        charge = sign * int.parse(monoIonMatch.group(2)!);
+      } else {
+        baseFormula = beforeSign;
+        charge = sign;
+      }
+    }
+
+    try {
+      final elems = MolarMassCalculator.parseFormula(baseFormula);
+      return _ParsedSpecies(
+        rawToken: t,
+        baseFormula: baseFormula,
+        elements: elems,
+        charge: charge,
+      );
+    } on MolarMassException catch (e) {
+      throw EquationBalanceException('Lỗi chất "$t": ${e.message}');
+    }
+  }
+
+  static int _parseChargeString(String chargeStr, String fullToken) {
+    final m1 = RegExp(r'^(\d*)([+-])$').firstMatch(chargeStr);
+    if (m1 != null) {
+      final mag = m1.group(1)!.isEmpty ? 1 : int.parse(m1.group(1)!);
+      return m1.group(2) == '+' ? mag : -mag;
+    }
+    final m2 = RegExp(r'^([+-])(\d+)$').firstMatch(chargeStr);
+    if (m2 != null) {
+      final mag = int.parse(m2.group(2)!);
+      return m2.group(1) == '+' ? mag : -mag;
+    }
+    throw EquationBalanceException(
+      'Điện tích không hợp lệ trong "$fullToken" (dùng VD: Fe2+, Cr2O7^2-, MnO4-).',
     );
   }
 
@@ -334,7 +524,7 @@ class _BigFrac {
   _BigFrac operator -() => _BigFrac._(-n, d);
 }
 
-/// Giao diện Cân bằng Phương trình Hóa học trực quan cho ChemNote.
+/// Giao diện Cân bằng Phương trình Hóa học (phân tử & ion) trực quan cho ChemNote.
 class EquationBalancerWidget extends StatefulWidget {
   final ValueChanged<String>? onInsertText;
 
@@ -349,17 +539,17 @@ class EquationBalancerWidget extends StatefulWidget {
 
 class _EquationBalancerWidgetState extends State<EquationBalancerWidget> {
   static const List<String> _presets = [
-    'Fe + O2 -> Fe3O4',
+    'MnO4- + Fe2+ + H+ -> Mn2+ + Fe3+ + H2O',
+    'Cr2O7^2- + H+ + Fe2+ -> Cr3+ + Fe3+ + H2O',
+    'MnO4- + C2O4^2- + H+ -> Mn2+ + CO2 + H2O',
     'KMnO4 + HCl -> KCl + MnCl2 + Cl2 + H2O',
     'Cu + HNO3 -> Cu(NO3)2 + NO + H2O',
-    'Al + H2SO4 -> Al2(SO4)3 + H2',
+    'Fe + O2 -> Fe3O4',
     'FeS2 + O2 -> Fe2O3 + SO2',
-    'C6H12O6 + O2 -> CO2 + H2O',
-    'Na2CO3 + HCl -> NaCl + CO2 + H2O',
   ];
 
   final TextEditingController _controller = TextEditingController(
-    text: 'KMnO4 + HCl -> KCl + MnCl2 + Cl2 + H2O',
+    text: 'MnO4- + Fe2+ + H+ -> Mn2+ + Fe3+ + H2O',
   );
   BalancedEquationResult? _result;
   String? _errorText;
@@ -424,8 +614,8 @@ class _EquationBalancerWidgetState extends State<EquationBalancerWidget> {
             controller: _controller,
             onChanged: _solve,
             decoration: InputDecoration(
-              labelText: 'Nhập phương trình cần cân bằng',
-              hintText: 'VD: Fe + O2 -> Fe3O4 hoặc Cu + HNO3 = Cu(NO3)2 + NO + H2O',
+              labelText: 'Nhập phương trình phân tử hoặc ion',
+              hintText: 'VD: MnO4- + Fe2+ + H+ -> Mn2+ + Fe3+ + H2O',
               prefixIcon: const Icon(Icons.balance_outlined),
               suffixIcon: _controller.text.isNotEmpty
                   ? IconButton(
@@ -445,7 +635,7 @@ class _EquationBalancerWidgetState extends State<EquationBalancerWidget> {
           ),
           const SizedBox(height: 12),
           Text(
-            'Ví dụ mẫu',
+            'Ví dụ mẫu (Phân tử & Ion)',
             style: theme.textTheme.labelMedium?.copyWith(
               color: colors.onSurfaceVariant,
               fontWeight: FontWeight.w600,

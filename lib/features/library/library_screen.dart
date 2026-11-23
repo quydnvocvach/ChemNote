@@ -702,8 +702,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             ),
             FilledButton(
               onPressed: () {
-                final expected = notebook.pinCode ?? '0000';
-                if (controller.text.trim() == expected) {
+                if (AppState.verifyPin(controller.text, notebook.pinCode)) {
                   Navigator.of(ctx).pop(true);
                 } else {
                   setDialogState(() => errorText = 'Mã PIN không chính xác');

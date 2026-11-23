@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
@@ -59,6 +61,9 @@ class AppState extends ChangeNotifier {
   // Chế độ Khoá lòng bàn tay (Chống tỳ tay: Bút viết, 1 ngón tay cuộn trang)
   bool _palmRejectionEnabled = true;
 
+  // Chế độ Chỉ đọc (Read-Only): khóa toàn bộ thao tác viết để xem bài an toàn
+  bool _readOnlyMode = false;
+
   // Tùy chọn trình ghi chú (Huawei Notes × GoodNotes 6 + MatePad 11.5"S)
   bool _verticalContinuousScroll = true;
   bool _freePaperMovement = true;
@@ -111,6 +116,7 @@ class AppState extends ChangeNotifier {
   List<String> get customStickers => List.unmodifiable(_customStickers);
   List<String> get recentImagePaths => List.unmodifiable(_recentImagePaths);
   bool get palmRejectionEnabled => _palmRejectionEnabled;
+  bool get readOnlyMode => _readOnlyMode;
 
   bool get isLoading => _isLoading;
   ThemeMode get themeMode => _themeMode;
@@ -157,6 +163,105 @@ class AppState extends ChangeNotifier {
   void togglePalmRejection() {
     _palmRejectionEnabled = !_palmRejectionEnabled;
     notifyListeners();
+  }
+
+  void setReadOnlyMode(bool value) {
+    if (_readOnlyMode == value) return;
+    _readOnlyMode = value;
+    notifyListeners();
+  }
+
+  void toggleReadOnlyMode() {
+    _readOnlyMode = !_readOnlyMode;
+    notifyListeners();
+  }
+
+  /// Băm mã PIN bằng SHA-256 thuần Dart (FIPS 180-4, không phụ thuộc gói ngoài).
+  static String hashPin(String pin) {
+    final trimmed = pin.trim();
+    if (trimmed.startsWith('sha256_')) return trimmed;
+    return 'sha256_${_sha256Hex('chemnote_pin_v3:$trimmed')}';
+  }
+
+  /// Xác thực mã PIN (tương thích ngược với mã PIN thuần cũ như '1234' hoặc '0000').
+  static bool verifyPin(String input, String? storedPin) {
+    final candidate = input.trim();
+    final expected = (storedPin ?? '0000').trim();
+    if (expected.startsWith('sha256_')) {
+      return hashPin(candidate) == expected;
+    }
+    return candidate == expected;
+  }
+
+  static String _sha256Hex(String input) {
+    const k = <int>[
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+      0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+      0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+      0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+      0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+      0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+      0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+      0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+      0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    int h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+    int h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+
+    final bytes = utf8.encode(input);
+    final bitLen = bytes.length * 8;
+    final paddedLen = ((bytes.length + 9 + 63) ~/ 64) * 64;
+    final msg = Uint8List(paddedLen);
+    msg.setRange(0, bytes.length, bytes);
+    msg[bytes.length] = 0x80;
+    final bd = ByteData.sublistView(msg);
+    bd.setUint32(paddedLen - 8, (bitLen ~/ 0x100000000) & 0xffffffff);
+    bd.setUint32(paddedLen - 4, bitLen & 0xffffffff);
+
+    int rotr(int x, int n) => ((x & 0xffffffff) >> n) | ((x << (32 - n)) & 0xffffffff);
+
+    final w = Uint32List(64);
+    for (int offset = 0; offset < paddedLen; offset += 64) {
+      for (int i = 0; i < 16; i++) {
+        w[i] = bd.getUint32(offset + i * 4);
+      }
+      for (int i = 16; i < 64; i++) {
+        final s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        final s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & 0xffffffff;
+      }
+      int a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+      for (int i = 0; i < 64; i++) {
+        final s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        final ch = (e & f) ^ ((~e & 0xffffffff) & g);
+        final temp1 = (h + s1 + ch + k[i] + w[i]) & 0xffffffff;
+        final s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        final maj = (a & b) ^ (a & c) ^ (b & c);
+        final temp2 = (s0 + maj) & 0xffffffff;
+        h = g;
+        g = f;
+        f = e;
+        e = (d + temp1) & 0xffffffff;
+        d = c;
+        c = b;
+        b = a;
+        a = (temp1 + temp2) & 0xffffffff;
+      }
+      h0 = (h0 + a) & 0xffffffff;
+      h1 = (h1 + b) & 0xffffffff;
+      h2 = (h2 + c) & 0xffffffff;
+      h3 = (h3 + d) & 0xffffffff;
+      h4 = (h4 + e) & 0xffffffff;
+      h5 = (h5 + f) & 0xffffffff;
+      h6 = (h6 + g) & 0xffffffff;
+      h7 = (h7 + h) & 0xffffffff;
+    }
+
+    String hex8(int v) => (v & 0xffffffff).toRadixString(16).padLeft(8, '0');
+    return '${hex8(h0)}${hex8(h1)}${hex8(h2)}${hex8(h3)}'
+        '${hex8(h4)}${hex8(h5)}${hex8(h6)}${hex8(h7)}';
   }
 
   void addRecentImagePath(String path) {
@@ -497,8 +602,11 @@ class AppState extends ChangeNotifier {
   }) async {
     final nb = getNotebookById(notebookId);
     if (nb == null) return;
+    final hashedPin = pinCode != null
+        ? hashPin(pinCode)
+        : (nb.pinCode != null ? hashPin(nb.pinCode!) : hashPin('0000'));
     final updated = isLocked
-        ? nb.copyWith(isLocked: true, pinCode: pinCode ?? nb.pinCode ?? '0000')
+        ? nb.copyWith(isLocked: true, pinCode: hashedPin)
         : nb.copyWith(isLocked: false, clearPinCode: true);
     await updateNotebook(updated);
   }

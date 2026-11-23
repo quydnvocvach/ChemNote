@@ -372,5 +372,48 @@ void main() {
       expect(decodedPreset.toolType, ToolType.pencil);
       expect(decodedPreset.label, 'Bút chì phác thảo');
     });
+
+    test('v3.0.0 AudioRecording, Stroke audioId/audioTimeMs, and AppState SHA-256 PIN', () {
+      final recordedAt = DateTime.utc(2026, 6, 1, 9, 30);
+      const audioStroke = Stroke(
+        id: 'stroke-audio-1',
+        toolType: ToolType.fountainPen,
+        colorValue: 0xFF1E3A5F,
+        width: 2.5,
+        points: [StrokePoint(x: 10, y: 20), StrokePoint(x: 50, y: 60)],
+        audioId: 'rec-1',
+        audioTimeMs: 4250,
+      );
+      final recording = AudioRecording(
+        id: 'rec-1',
+        filePath: '/data/user/0/com.chemnote.app/files/audio/rec_1.m4a',
+        durationMs: 185000,
+        createdAt: recordedAt,
+      );
+      final page = NotePage(
+        id: 'page-audio',
+        index: 0,
+        strokes: const [audioStroke],
+        audioRecordings: [recording],
+        updatedAt: recordedAt,
+      );
+
+      final decodedPage = NotePage.fromJson(
+        jsonDecode(jsonEncode(page.toJson())) as Map<String, dynamic>,
+      );
+      expect(decodedPage.strokes.first.audioId, 'rec-1');
+      expect(decodedPage.strokes.first.audioTimeMs, 4250);
+      expect(decodedPage.audioRecordings.length, 1);
+      expect(decodedPage.audioRecordings.first.id, 'rec-1');
+      expect(decodedPage.audioRecordings.first.durationMs, 185000);
+      expect(decodedPage.audioRecordings.first.createdAt, recordedAt);
+
+      final hashed = AppState.hashPin('2026');
+      expect(hashed, startsWith('h2_'));
+      expect(AppState.verifyPin('2026', hashed), isTrue);
+      expect(AppState.verifyPin('0000', hashed), isFalse);
+      // Backwards-compatible plaintext PIN check
+      expect(AppState.verifyPin('1234', '1234'), isTrue);
+    });
   });
 }

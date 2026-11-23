@@ -37,6 +37,26 @@ void main() {
       expect(eqAscii.arrow, '⇌');
     });
 
+    test('balances ionic redox equations with charge conservation', () {
+      final permanganate = ChemicalEquationBalancer.balance(
+        'MnO4- + Fe2+ + H+ -> Mn2+ + Fe3+ + H2O',
+      );
+      expect(permanganate.coefficients, [1, 5, 8, 1, 5, 4]);
+      expect(permanganate.balanced, 'MnO₄⁻ + 5Fe²⁺ + 8H⁺ → Mn²⁺ + 5Fe³⁺ + 4H₂O');
+
+      final dichromate = ChemicalEquationBalancer.balance(
+        'Cr2O7^2- + H+ + Fe2+ -> Cr3+ + Fe3+ + H2O',
+      );
+      expect(dichromate.coefficients, [1, 14, 6, 2, 6, 7]);
+      expect(dichromate.balanced, 'Cr₂O₇²⁻ + 14H⁺ + 6Fe²⁺ → 2Cr³⁺ + 6Fe³⁺ + 7H₂O');
+
+      final oxalate = ChemicalEquationBalancer.balance(
+        'MnO4- + C2O4^2- + H+ -> Mn2+ + CO2 + H2O',
+      );
+      expect(oxalate.coefficients, [2, 5, 16, 2, 10, 8]);
+      expect(oxalate.balanced, '2MnO₄⁻ + 5C₂O₄²⁻ + 16H⁺ → 2Mn²⁺ + 10CO₂ + 8H₂O');
+    });
+
     test('formats subscripts while keeping hydrate coefficients intact', () {
       expect(
         ChemicalEquationBalancer.formatFormulaSubscripts('CuSO4.5H2O'),

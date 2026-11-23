@@ -14,6 +14,7 @@ import '../../core/models/drawing_elements.dart';
 import '../../core/models/note_page.dart';
 import '../../core/models/notebook.dart';
 import '../../core/providers/app_state.dart';
+import '../../core/services/app_updater_service.dart';
 import '../../core/services/hardware_service.dart';
 import '../chemistry/chemistry_hub_sheet.dart';
 import '../chemistry/widgets/stencil_picker_sheet.dart';
@@ -135,6 +136,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   final Set<String> _loadingElementImagePaths = {};
   bool _isBusyPdf = false;
 
+  // Audio Note Recording & Synced Stroke Replay state
+  bool _isRecordingAudio = false;
+  String? _activeRecordingId;
+  String? _activeRecordingPath;
+  int _recordingStartMs = 0;
+  String? _playingAudioId;
+  bool _isAudioPlaying = false;
+  int _audioPositionMs = 0;
+  double _audioSpeed = 1.0;
+  Timer? _audioPollTimer;
+
   Color get _effectiveColor =>
       _activeTool == EditorTool.highlighter ? _highlighterColor : _penColor;
 
@@ -184,6 +196,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   @override
   void dispose() {
     _shapeHoldTimer?.cancel();
+    _audioPollTimer?.cancel();
+    HardwareService.instance.stopAudio();
     _stylusDoubleTapSub?.cancel();
     _lassoController.removeListener(_onLassoChanged);
     _lassoController.dispose();
@@ -434,7 +448,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     final appState = context.read<AppState>();
     _palmFilter.stylusOnlyMode = appState.palmRejectionEnabled;
 
-    if (_activeTool == EditorTool.panZoom) return;
+    if (appState.readOnlyMode || _activeTool == EditorTool.panZoom) return;
 
     final rawPos = event.localPosition;
 
@@ -579,6 +593,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         points: [firstPoint],
         isSmoothed: false,
         shapeType: ShapeType.none,
+        audioId: _isRecordingAudio ? _activeRecordingId : null,
+        audioTimeMs: _isRecordingAudio
+            ? (DateTime.now().millisecondsSinceEpoch - _recordingStartMs)
+            : null,
       );
       _lastHoldCheckPos = pos;
       _scheduleShapeHoldTimer();
@@ -592,6 +610,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
 
     if (_pointerDownPositions.length >= 2 ||
+        context.read<AppState>().readOnlyMode ||
         _activeTool == EditorTool.panZoom) {
       return;
     }
@@ -1485,6 +1504,213 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   }
 
   // ===========================================================================
+  // AUDIO NOTE RECORDING, SYNCED STROKE REPLAY & IN-APP APK UPDATER
+  // ===========================================================================
+
+  Future<void> _toggleAudioRecording(NotePage page) async {
+    if (_isRecordingAudio) {
+      final durationMs = await HardwareService.instance.stopAudioRecording();
+      final recId = _activeRecordingId;
+      final recPath = _activeRecordingPath;
+      final fallbackDuration =
+          DateTime.now().millisecondsSinceEpoch - _recordingStartMs;
+      setState(() {
+        _isRecordingAudio = false;
+        _activeRecordingId = null;
+        _activeRecordingPath = null;
+      });
+      if (recId != null && recPath != null) {
+        final rec = AudioRecording(
+          id: recId,
+          filePath: recPath,
+          durationMs: durationMs > 0 ? durationMs : math.max(1000, fallbackDuration),
+          createdAt: DateTime.now(),
+        );
+        await _commitPage(
+          page.copyWith(audioRecordings: [...page.audioRecordings, rec]),
+          undoSnapshot: page,
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              duration: Duration(milliseconds: 1400),
+              content: Text('Đã lưu bản ghi âm bài giảng đồng bộ nét viết'),
+            ),
+          );
+        }
+      }
+      return;
+    }
+
+    // Start new recording
+    final appState = context.read<AppState>();
+    final rootDir = await appState.storage.getRootDirectory();
+    final audioDir = Directory('${rootDir.path}${Platform.pathSeparator}audio');
+    if (!await audioDir.exists()) {
+      await audioDir.create(recursive: true);
+    }
+    final recId = _uuid.v4();
+    final path = '${audioDir.path}${Platform.pathSeparator}$recId.m4a';
+    final started = await HardwareService.instance.startAudioRecording(path);
+    if (!mounted) return;
+    if (!started) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Cần cấp quyền Micro để ghi âm bài giảng (hỗ trợ trên Android / MatePad).',
+          ),
+        ),
+      );
+      return;
+    }
+    setState(() {
+      _isRecordingAudio = true;
+      _activeRecordingId = recId;
+      _activeRecordingPath = path;
+      _recordingStartMs = DateTime.now().millisecondsSinceEpoch;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        duration: Duration(milliseconds: 1400),
+        content: Text('Đang ghi âm... Mọi nét viết sẽ tự động đồng bộ mốc thời gian'),
+      ),
+    );
+  }
+
+  Future<void> _togglePlayAudio(AudioRecording rec) async {
+    if (_isAudioPlaying && _playingAudioId == rec.id) {
+      await HardwareService.instance.pauseAudio();
+      _audioPollTimer?.cancel();
+      if (mounted) {
+        setState(() => _isAudioPlaying = false);
+      }
+      return;
+    }
+
+    final ok = await HardwareService.instance.playAudio(rec.filePath);
+    if (!mounted) return;
+    if (ok) {
+      await HardwareService.instance.setAudioSpeed(_audioSpeed);
+      if (_playingAudioId == rec.id && _audioPositionMs > 0) {
+        await HardwareService.instance.seekAudio(_audioPositionMs);
+      }
+    }
+    setState(() {
+      _playingAudioId = rec.id;
+      _isAudioPlaying = true;
+    });
+    _audioPollTimer?.cancel();
+    _audioPollTimer = Timer.periodic(const Duration(milliseconds: 80), (_) async {
+      if (!mounted || !_isAudioPlaying) return;
+      final pos = await HardwareService.instance.getAudioPositionMs();
+      if (!mounted) return;
+      if (pos >= rec.durationMs && rec.durationMs > 0) {
+        _audioPollTimer?.cancel();
+        setState(() {
+          _isAudioPlaying = false;
+          _audioPositionMs = rec.durationMs;
+          _repaintVersion++;
+        });
+      } else {
+        setState(() {
+          _audioPositionMs = pos;
+          _repaintVersion++;
+        });
+      }
+    });
+  }
+
+  Future<void> _seekAudio(AudioRecording rec, int ms) async {
+    setState(() {
+      _playingAudioId = rec.id;
+      _audioPositionMs = ms;
+      _repaintVersion++;
+    });
+    await HardwareService.instance.seekAudio(ms);
+  }
+
+  Future<void> _cycleAudioSpeed() async {
+    final next = _audioSpeed == 1.0
+        ? 1.5
+        : (_audioSpeed == 1.5 ? 2.0 : 1.0);
+    setState(() => _audioSpeed = next);
+    await HardwareService.instance.setAudioSpeed(next);
+  }
+
+  Future<void> _deleteAudioRecording(NotePage page, AudioRecording rec) async {
+    if (_playingAudioId == rec.id) {
+      _audioPollTimer?.cancel();
+      await HardwareService.instance.stopAudio();
+      _playingAudioId = null;
+      _isAudioPlaying = false;
+      _audioPositionMs = 0;
+    }
+    final updated =
+        page.audioRecordings.where((r) => r.id != rec.id).toList();
+    await _commitPage(
+      page.copyWith(audioRecordings: updated),
+      undoSnapshot: page,
+    );
+  }
+
+  Future<void> _handleCheckForUpdate() async {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        duration: Duration(milliseconds: 1200),
+        content: Text('Đang kiểm tra bản cập nhật APK mới nhất...'),
+      ),
+    );
+    final info = await AppUpdaterService.checkForUpdate();
+    if (!mounted) return;
+
+    if (info.errorMessage != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(info.errorMessage!)),
+      );
+      return;
+    }
+
+    if (!info.hasUpdate) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'ChemNote v${info.currentVersion} là phiên bản mới nhất!',
+          ),
+        ),
+      );
+      return;
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Có bản cập nhật ChemNote v${info.latestVersion}'),
+        content: SingleChildScrollView(
+          child: Text(
+            info.releaseNotes.trim().isNotEmpty
+                ? info.releaseNotes.trim()
+                : 'Phiên bản mới đã sẵn sàng trên GitHub Releases. Nhấn tải để cài đặt APK mới nhất cho MatePad 11.5"S.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Để sau'),
+          ),
+          FilledButton.icon(
+            onPressed: () {
+              Navigator.pop(ctx);
+              AppUpdaterService.openDownloadUrl(info.downloadUrl);
+            },
+            icon: const Icon(Icons.download_rounded, size: 18),
+            label: const Text('Tải APK mới'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ===========================================================================
   // MODALS: TAB PICKER & PAGE GRID / OUTLINE
   // ===========================================================================
 
@@ -1714,6 +1940,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         : [notebook];
     final currentIdx = _currentPageIndex.clamp(0, notebook.pages.length - 1);
     final bool allowZoomPan = _pointerDownPositions.length >= 2 ||
+        appState.readOnlyMode ||
         (!_isDrawingPointerDown && _activeTool == EditorTool.panZoom);
 
     return Scaffold(
@@ -1776,6 +2003,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             );
           }
         },
+        onCheckForUpdate: _handleCheckForUpdate,
       ),
       body: Column(
         children: [
@@ -1813,6 +2041,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             zoomWindowEnabled: _zoomWindowEnabled,
             rulerVisible: _rulerVisible,
             palmRejectionEnabled: appState.palmRejectionEnabled,
+            isRecordingAudio: _isRecordingAudio,
             onUndo: () => _undo(currentPage),
             onRedo: () => _redo(currentPage),
             onSelectTool: (tool) {
@@ -1937,6 +2166,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 ),
               );
             },
+            onToggleAudioRecording: () => _toggleAudioRecording(currentPage),
             onSelectColor: (c) => setState(() {
               if (_activeTool == EditorTool.highlighter) {
                 _highlighterColor = c;
@@ -1957,6 +2187,28 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               }),
             ),
           ),
+
+          // Compact Audio Note Replay Bar (shown when current page has an AudioRecording)
+          if (currentPage.audioRecordings.isNotEmpty)
+            AudioReplayBar(
+              recording: currentPage.audioRecordings.last,
+              isPlaying: _isAudioPlaying &&
+                  _playingAudioId == currentPage.audioRecordings.last.id,
+              positionMs:
+                  _playingAudioId == currentPage.audioRecordings.last.id
+                      ? _audioPositionMs
+                      : 0,
+              speed: _audioSpeed,
+              onTogglePlay: () =>
+                  _togglePlayAudio(currentPage.audioRecordings.last),
+              onSeek: (ms) =>
+                  _seekAudio(currentPage.audioRecordings.last, ms),
+              onCycleSpeed: _cycleAudioSpeed,
+              onDelete: () => _deleteAudioRecording(
+                currentPage,
+                currentPage.audioRecordings.last,
+              ),
+            ),
 
           // Main Canvas Area (Continuous Vertical Scroll or Horizontal Flip)
           Expanded(
@@ -2201,6 +2453,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         controller: _verticalScrollController,
         physics: !_isDrawingPointerDown &&
                 (context.read<AppState>().palmRejectionEnabled ||
+                    context.read<AppState>().readOnlyMode ||
                     _activeTool == EditorTool.panZoom)
             ? const AlwaysScrollableScrollPhysics()
             : const NeverScrollableScrollPhysics(),
@@ -2267,6 +2520,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       controller: _horizontalPageController,
       physics: !_isDrawingPointerDown &&
               (context.read<AppState>().palmRejectionEnabled ||
+                  context.read<AppState>().readOnlyMode ||
                   _activeTool == EditorTool.panZoom)
           ? const PageScrollPhysics()
           : const NeverScrollableScrollPhysics(),
@@ -2329,6 +2583,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         : const LassoSelection(),
                     lassoSelectionBounds:
                         isLassoOwner ? _lassoController.selectionBounds : null,
+                    playingAudioId: _playingAudioId,
+                    playingAudioTimeMs:
+                        _playingAudioId != null ? _audioPositionMs : null,
                     repaintVersion: _repaintVersion,
                   ),
                 ),

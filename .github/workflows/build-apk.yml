@@ -8,6 +8,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-apk:
     name: Build Release APK (144Hz + M-Pencil 3 + GMS-Free)
@@ -23,11 +26,10 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Set up Flutter 3.24
+      - name: Set up Flutter Stable
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          flutter-version: '3.24.x'
           cache: true
 
       - name: Generate Android Gradle wrapper while preserving custom MatePad native files
@@ -40,6 +42,7 @@ jobs:
 
           flutter create --platforms=android --org com.chemnote --project-name chemnote .
 
+          rm -f android/app/build.gradle.kts
           cp -r /tmp/chemnote_backup/kotlin/* android/app/src/main/kotlin/
           cp /tmp/chemnote_backup/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
           cp /tmp/chemnote_backup/app_build.gradle android/app/build.gradle
@@ -49,7 +52,6 @@ jobs:
         run: flutter pub get
 
       - name: Run unit tests
-        continue-on-error: true
         run: flutter test --reporter expanded
 
       - name: Build Release APK for Huawei MatePad 11.5"S & Android
@@ -64,8 +66,18 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Attach APK to GitHub Release (when tagged)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Publish Release v3.0.0 with APK
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v3.0.0
+          name: ChemNote Pro v3.0.0 (Huawei MatePad 11.5"S & Android)
+          body: |
+            ### ChemNote Pro v3.0.0 — Native APK cho Huawei MatePad 11.5"S & Android
+            - Tối ưu phần cứng **144Hz PaperMatte** + **M-Pencil 3 (NearLink)** (gõ đúp thân bút đổi Bút ↔ Tẩy).
+            - **Ghi âm bài giảng đồng bộ nét viết tay (Audio Note Replay)** dùng `MediaRecorder` / `MediaPlayer` gốc Android.
+            - **Cân bằng phương trình phân tử & phương trình ion** (`MnO4- + Fe2+ + H+ -> Mn2+ + Fe3+ + H2O`).
+            - **10 mẫu giấy thẩm mỹ**, cắt ảnh độ phân giải gốc không vỡ nét, nhập/xuất PDF, đồng bộ Google Drive **không cần GMS**.
+            - Tích hợp **Kiểm tra cập nhật APK** trực tiếp trong Cài đặt.
           files: ChemNote-MatePad-11.5s-release.apk
+          make_latest: true

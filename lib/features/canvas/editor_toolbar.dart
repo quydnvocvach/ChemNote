@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../../core/models/drawing_elements.dart';
 import '../../core/models/notebook.dart';
 import '../../core/providers/app_state.dart';
+import '../../core/services/app_updater_service.dart';
 import 'paper_templates.dart';
 
 /// Active interaction tool in the Huawei Notes × GoodNotes 6 editor.
@@ -435,6 +436,7 @@ class EditorToolBar extends StatelessWidget {
   final bool zoomWindowEnabled;
   final bool rulerVisible;
   final bool palmRejectionEnabled;
+  final bool isRecordingAudio;
   final VoidCallback onUndo;
   final VoidCallback onRedo;
   final ValueChanged<EditorTool> onSelectTool;
@@ -445,6 +447,7 @@ class EditorToolBar extends StatelessWidget {
   final VoidCallback onToggleZoomWindow;
   final VoidCallback onToggleRuler;
   final VoidCallback onTogglePalmRejection;
+  final VoidCallback onToggleAudioRecording;
   final ValueChanged<Color> onSelectColor;
   final VoidCallback onOpenColorPalette;
 
@@ -458,6 +461,7 @@ class EditorToolBar extends StatelessWidget {
     required this.zoomWindowEnabled,
     required this.rulerVisible,
     required this.palmRejectionEnabled,
+    required this.isRecordingAudio,
     required this.onUndo,
     required this.onRedo,
     required this.onSelectTool,
@@ -468,6 +472,7 @@ class EditorToolBar extends StatelessWidget {
     required this.onToggleZoomWindow,
     required this.onToggleRuler,
     required this.onTogglePalmRejection,
+    required this.onToggleAudioRecording,
     required this.onSelectColor,
     required this.onOpenColorPalette,
   });
@@ -640,6 +645,37 @@ class EditorToolBar extends StatelessWidget {
               color: fg,
               isActive: rulerVisible,
               onTap: onToggleRuler,
+            ),
+            Tooltip(
+              message: isRecordingAudio
+                  ? 'Đang ghi âm bài giảng — Nhấn để dừng'
+                  : 'Ghi âm bài giảng đồng bộ nét viết (Audio Note Replay)',
+              child: InkWell(
+                onTap: onToggleAudioRecording,
+                borderRadius: BorderRadius.circular(18),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 160),
+                  width: 34,
+                  height: 34,
+                  margin: const EdgeInsets.symmetric(horizontal: 2),
+                  decoration: BoxDecoration(
+                    color: isRecordingAudio
+                        ? const Color(0xFFEF4444).withAlpha(46)
+                        : Colors.transparent,
+                    shape: BoxShape.circle,
+                    border: isRecordingAudio
+                        ? Border.all(color: const Color(0xFFEF4444), width: 1.4)
+                        : null,
+                  ),
+                  child: Icon(
+                    isRecordingAudio
+                        ? Icons.stop_circle_outlined
+                        : Icons.mic_none_rounded,
+                    size: 19,
+                    color: isRecordingAudio ? const Color(0xFFEF4444) : fg,
+                  ),
+                ),
+              ),
             ),
 
             _vDivider(border),
@@ -1937,6 +1973,7 @@ class EditorSettingsDrawer extends StatelessWidget {
   final VoidCallback onImportPdf;
   final VoidCallback onExportPdf;
   final VoidCallback onToggleLockNotebook;
+  final VoidCallback onCheckForUpdate;
 
   const EditorSettingsDrawer({
     super.key,
@@ -1953,6 +1990,7 @@ class EditorSettingsDrawer extends StatelessWidget {
     required this.onImportPdf,
     required this.onExportPdf,
     required this.onToggleLockNotebook,
+    required this.onCheckForUpdate,
   });
 
   @override
@@ -2128,9 +2166,30 @@ class EditorSettingsDrawer extends StatelessWidget {
             SwitchListTile(
               dense: true,
               contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+              title: const Text('Chế độ Chỉ đọc (Read-Only)'),
+              subtitle: const Text(
+                'Tạm khóa viết/xoá để đọc tài liệu an toàn',
+                style: TextStyle(fontSize: 11.5),
+              ),
+              value: appState.readOnlyMode,
+              onChanged: appState.setReadOnlyMode,
+            ),
+            SwitchListTile(
+              dense: true,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
               title: const Text('Giao diện Obsidian Tối'),
               value: appState.isDarkMode,
               onChanged: appState.setDarkMode,
+            ),
+            const Divider(height: 24),
+            _drawerTile(
+              icon: Icons.system_update_alt_rounded,
+              title: 'Kiểm tra cập nhật APK (v$kAppVersion)',
+              color: EditorColors.activeBlue,
+              onTap: () {
+                Navigator.pop(context);
+                onCheckForUpdate();
+              },
             ),
           ],
         ),
@@ -2165,6 +2224,131 @@ class EditorSettingsDrawer extends StatelessWidget {
       leading: Icon(icon, size: 20, color: color),
       title: Text(title, style: TextStyle(fontSize: 13.5, color: color)),
       onTap: onTap,
+    );
+  }
+}
+
+// =============================================================================
+// COMPACT AUDIO NOTE REPLAY BAR (Synced with Handwriting Strokes)
+// =============================================================================
+
+class AudioReplayBar extends StatelessWidget {
+  final AudioRecording recording;
+  final bool isPlaying;
+  final int positionMs;
+  final double speed;
+  final VoidCallback onTogglePlay;
+  final ValueChanged<int> onSeek;
+  final VoidCallback onCycleSpeed;
+  final VoidCallback onDelete;
+
+  const AudioReplayBar({
+    super.key,
+    required this.recording,
+    required this.isPlaying,
+    required this.positionMs,
+    required this.speed,
+    required this.onTogglePlay,
+    required this.onSeek,
+    required this.onCycleSpeed,
+    required this.onDelete,
+  });
+
+  String _formatMs(int ms) {
+    final totalSec = (ms / 1000).floor().clamp(0, 35999);
+    final m = (totalSec ~/ 60).toString().padLeft(2, '0');
+    final s = (totalSec % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = isDark ? EditorColors.obsidianSurface : Colors.white;
+    final border =
+        isDark ? Colors.white.withAlpha(20) : Colors.black.withAlpha(18);
+    final maxMs = recording.durationMs > 0 ? recording.durationMs : 1000;
+    final clampedPos = positionMs.clamp(0, maxMs);
+
+    return Container(
+      height: 44,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: bg,
+        border: Border(bottom: BorderSide(color: border)),
+      ),
+      child: Row(
+        children: [
+          IconButton(
+            tooltip: isPlaying ? 'Tạm dừng' : 'Phát lại ghi âm đồng bộ nét viết',
+            icon: Icon(
+              isPlaying
+                  ? Icons.pause_circle_filled_rounded
+                  : Icons.play_circle_filled_rounded,
+              color: EditorColors.activeBlue,
+              size: 26,
+            ),
+            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            onPressed: onTogglePlay,
+          ),
+          const SizedBox(width: 6),
+          Text(
+            _formatMs(clampedPos),
+            style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600),
+          ),
+          Expanded(
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                trackHeight: 2.5,
+                thumbShape:
+                    const RoundSliderThumbShape(enabledThumbRadius: 6),
+              ),
+              child: Slider(
+                value: clampedPos.toDouble(),
+                min: 0,
+                max: maxMs.toDouble(),
+                activeColor: EditorColors.activeBlue,
+                onChanged: (v) => onSeek(v.round()),
+              ),
+            ),
+          ),
+          Text(
+            _formatMs(maxMs),
+            style: const TextStyle(fontSize: 11.5, color: Colors.grey),
+          ),
+          const SizedBox(width: 6),
+          InkWell(
+            onTap: onCycleSpeed,
+            borderRadius: BorderRadius.circular(10),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              decoration: BoxDecoration(
+                color: EditorColors.activeBlue.withAlpha(32),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                '${speed == speed.roundToDouble() ? speed.toInt() : speed}×',
+                style: const TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w700,
+                  color: EditorColors.activeBlue,
+                ),
+              ),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Xóa bản ghi âm trang này',
+            icon: const Icon(
+              Icons.delete_outline_rounded,
+              size: 18,
+              color: Color(0xFFEF4444),
+            ),
+            visualDensity: VisualDensity.compact,
+            onPressed: onDelete,
+          ),
+        ],
+      ),
     );
   }
 }
