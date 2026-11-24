@@ -60,6 +60,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       _stickyDragNotifier = ValueNotifier(null);
   final ValueNotifier<Stroke?> _activeStickyStrokeNotifier = ValueNotifier(null);
   String? _activeStickyStrokeNoteId;
+  final ValueNotifier<double> _pullAddProgressNotifier = ValueNotifier(0.0);
+  final GlobalKey _viewportStackKey = GlobalKey();
   final Map<String, TextEditingController> _stickyControllers = {};
   late PageController _horizontalPageController;
   final LassoController _lassoController = LassoController();
@@ -94,6 +96,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   EditorTool _lastPenTool = EditorTool.fountainPen;
   EditorTool _toolBeforeEraserToggle = EditorTool.fountainPen;
   EraserMode _eraserMode = EraserMode.stroke;
+  double _eraserRadius = 18.0;
   Color _penColor = EditorColors.penSwatches[2];
   Color _highlighterColor = EditorColors.highlighterSwatches.first;
   double _penWidth = 2.6;
@@ -232,6 +235,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _imageDragNotifier.dispose();
     _stickyDragNotifier.dispose();
     _activeStickyStrokeNotifier.dispose();
+    _pullAddProgressNotifier.dispose();
     _activeTextController?.dispose();
     _activeTextFocusNode?.dispose();
     for (final img in _pdfImageCache.values) {
@@ -533,7 +537,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
 
     final pos = (_rulerVisible && _activeTool.isDrawingTool)
-        ? _rulerState.snapPointIfNearEdge(rawPos)
+        ? _snapToViewportRuler(event, rawPos, page)
         : rawPos;
 
     // Study Tape: tap existing tape to toggle reveal/hide, or drag to create new tape
@@ -634,6 +638,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         audioTimeMs: _isRecordingAudio
             ? (DateTime.now().millisecondsSinceEpoch - _recordingStartMs)
             : null,
+        zIndex: DateTime.now().millisecondsSinceEpoch,
       );
       _lastHoldCheckPos = pos;
       _scheduleShapeHoldTimer();
@@ -655,7 +660,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
     final rawPos = event.localPosition;
     final pos = (_rulerVisible && _activeTool.isDrawingTool)
-        ? _rulerState.snapPointIfNearEdge(rawPos)
+        ? _snapToViewportRuler(event, rawPos, page)
         : rawPos;
 
     if (_activeTool == EditorTool.studyTape && _tapeDragStart != null) {
@@ -901,8 +906,22 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     return null;
   }
 
+  Offset _snapToViewportRuler(PointerEvent event, Offset rawPos, NotePage page) {
+    final renderBox =
+        _viewportStackKey.currentContext?.findRenderObject() as RenderBox?;
+    if (renderBox == null) return _rulerState.snapPointIfNearEdge(rawPos);
+    final vpPos = renderBox.globalToLocal(event.position);
+    final snappedVp = _rulerState.snapPointIfNearEdge(vpPos);
+    if (snappedVp == vpPos) return rawPos;
+    final Matrix4 m = page.isInfiniteWhiteboard
+        ? _whiteboardTransformController.value
+        : _transformController.value;
+    final double scale = m.getMaxScaleOnAxis().clamp(0.25, 4.0);
+    return rawPos + (snappedVp - vpPos) / scale;
+  }
+
   void _applyEraserAt(NotePage page, Offset pos) {
-    const double eraserRadius = 18.0;
+    final double eraserRadius = _eraserRadius;
     if (_eraserMode == EraserMode.stroke) {
       final remaining = page.strokes
           .where((s) => !StrokeEngine.hitTestStroke(s, pos, tolerance: eraserRadius))
@@ -960,6 +979,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       fontSize: 18.0,
       // ignore: deprecated_member_use
       colorValue: _penColor.value,
+      zIndex: DateTime.now().millisecondsSinceEpoch,
     );
     await _commitPage(
       page.copyWith(textElements: [...page.textElements, newText]),
@@ -1082,6 +1102,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       fontSize: 17.0,
       // ignore: deprecated_member_use
       colorValue: _penColor.value,
+      zIndex: DateTime.now().millisecondsSinceEpoch,
     );
     await _commitPage(
       page.copyWith(textElements: [...page.textElements, element]),
@@ -1106,6 +1127,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       // ignore: deprecated_member_use
       colorValue: _penColor.value,
       strokeWidth: 2.2,
+      zIndex: DateTime.now().millisecondsSinceEpoch,
     );
     await _commitPage(
       page.copyWith(stencilElements: [...page.stencilElements, stencil]),
@@ -1131,6 +1153,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       height: 220.0,
       rotation: 0.0,
       filePath: savedPath,
+      zIndex: DateTime.now().millisecondsSinceEpoch,
     );
     await _commitPage(
       page.copyWith(imageElements: [...page.imageElements, imgEl]),
@@ -1777,6 +1800,36 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
   }
 
+  void _updatePullToAddProgress(Notebook notebook, Size viewportSize) {
+    if (notebook.pages.isEmpty || _isAddingPullPage) return;
+    double totalContentHeight = 18.0 + 18.0 + 44.0 + 36.0;
+    for (int i = 0; i < notebook.pages.length; i++) {
+      totalContentHeight +=
+          PaperMetrics.pageSize(isLandscape: notebook.pages[i].isLandscape)
+              .height;
+      if (i < notebook.pages.length - 1) totalContentHeight += 14.0;
+    }
+    final m = _transformController.value;
+    final scale = m.getMaxScaleOnAxis().clamp(0.5, 4.0);
+    final ty = m.getTranslation().y;
+    final contentBottom = ty + totalContentHeight * scale;
+    final thresholdY = viewportSize.height - 50.0;
+    if (contentBottom < thresholdY) {
+      final overscroll = thresholdY - contentBottom;
+      _pullAddProgressNotifier.value = (overscroll / 75.0).clamp(0.0, 1.0);
+    } else if (_pullAddProgressNotifier.value != 0.0) {
+      _pullAddProgressNotifier.value = 0.0;
+    }
+  }
+
+  void _finishPullToAddIfReady(Notebook notebook) {
+    final progress = _pullAddProgressNotifier.value;
+    _pullAddProgressNotifier.value = 0.0;
+    if (progress >= 0.85 && notebook.pages.isNotEmpty && !_isAddingPullPage) {
+      _handlePullAddPage(notebook, notebook.pages.last);
+    }
+  }
+
   Future<void> _handlePullAddPage(Notebook notebook, NotePage lastPage) async {
     if (_isAddingPullPage) return;
     _isAddingPullPage = true;
@@ -1967,6 +2020,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       colorValue: 0xFFFEF08A,
       isCollapsed: false,
       updatedAt: DateTime.now(),
+      zIndex: DateTime.now().millisecondsSinceEpoch,
     );
     await _commitPage(
       page.copyWith(stickyNotes: [...page.stickyNotes, note]),
@@ -2176,13 +2230,100 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                     borderRadius: const BorderRadius.vertical(
                                       top: Radius.circular(8),
                                     ),
-                                    child: CustomPaint(
-                                      painter: PaperTemplatePainter(
-                                        templateType: p.templateType,
-                                        paperColor: p.paperColor,
+                                    child: () {
+                                      final thumbSize = PaperMetrics.pageSize(
                                         isLandscape: p.isLandscape,
-                                      ),
-                                    ),
+                                      );
+                                      return RepaintBoundary(
+                                        child: FittedBox(
+                                          fit: BoxFit.contain,
+                                          child: SizedBox(
+                                            width: thumbSize.width,
+                                            height: thumbSize.height,
+                                            child: IgnorePointer(
+                                              child: Stack(
+                                                children: [
+                                                  Positioned.fill(
+                                                    child: CustomPaint(
+                                                      size: thumbSize,
+                                                      painter: CanvasPainter(
+                                                        page: p,
+                                                        pdfBackgroundImage:
+                                                            p.pdfBackgroundPath !=
+                                                                    null
+                                                                ? _pdfImageCache[
+                                                                    p.pdfBackgroundPath!]
+                                                                : null,
+                                                        elementImageCache:
+                                                            _elementImageCache,
+                                                        repaintVersion:
+                                                            _repaintVersion,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                  for (final txt
+                                                      in p.textElements)
+                                                    Positioned(
+                                                      left: txt.x,
+                                                      top: txt.y,
+                                                      width: txt.width,
+                                                      child: Text(
+                                                        txt.text,
+                                                        style: TextStyle(
+                                                          color: Color(
+                                                              txt.colorValue),
+                                                          fontSize:
+                                                              txt.fontSize,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  for (final st in p.stickyNotes)
+                                                    Positioned(
+                                                      left: st.x,
+                                                      top: st.y,
+                                                      width: st.isCollapsed
+                                                          ? math.min(
+                                                              st.width, 210.0)
+                                                          : st.width,
+                                                      height: st.isCollapsed
+                                                          ? 40.0
+                                                          : st.height,
+                                                      child: Container(
+                                                        decoration:
+                                                            BoxDecoration(
+                                                          color: Color(
+                                                              st.colorValue),
+                                                          borderRadius:
+                                                              BorderRadius
+                                                                  .circular(10),
+                                                          border: Border.all(
+                                                              color: Colors
+                                                                  .black26),
+                                                        ),
+                                                        child: st.isCollapsed
+                                                            ? null
+                                                            : CustomPaint(
+                                                                painter:
+                                                                    _StickyCanvasPainter(
+                                                                  strokes: st
+                                                                      .strokes,
+                                                                  activeStrokeNotifier:
+                                                                      _activeStickyStrokeNotifier,
+                                                                  noteId: st.id,
+                                                                  getActiveNoteId:
+                                                                      () =>
+                                                                          null,
+                                                                ),
+                                                              ),
+                                                      ),
+                                                    ),
+                                                ],
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      );
+                                    }(),
                                   ),
                                 ),
                                 if (p.isBookmarked)
@@ -2495,6 +2636,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             onOpenEraserPopover: () => showEraserSettingsSheet(
               context: context,
               currentMode: _eraserMode,
+              eraserRadius: _eraserRadius,
+              onEraserRadiusChanged: (r) => setState(() => _eraserRadius = r),
               onSelectMode: (m) => setState(() => _eraserMode = m),
               onClearCurrentPage: () => _commitPage(
                 currentPage.copyWith(strokes: const []),
@@ -2506,8 +2649,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             onAddStickyNote: () => _addStickyNote(currentPage),
             onToggleZoomWindow: () =>
                 setState(() => _zoomWindowEnabled = !_zoomWindowEnabled),
-            onToggleRuler: () =>
-                setState(() => _rulerVisible = !_rulerVisible),
+            onToggleRuler: () => setState(() {
+              _rulerVisible = !_rulerVisible;
+              if (_rulerVisible &&
+                  _editorViewportSize.width > 0 &&
+                  _editorViewportSize.height > 0) {
+                _rulerState.center = Offset(
+                  _editorViewportSize.width * 0.5,
+                  _editorViewportSize.height * 0.5,
+                );
+              }
+            }),
             onTogglePalmRejection: () {
               appState.togglePalmRejection();
               _palmFilter.stylusOnlyMode = appState.palmRejectionEnabled;
@@ -2593,6 +2745,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 }
 
                 return Stack(
+                  key: _viewportStackKey,
                   children: [
                     if (currentPage.isInfiniteWhiteboard ||
                         notebook.isWhiteboard)
@@ -2611,6 +2764,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         boundaryMargin: const EdgeInsets.all(200),
                         panEnabled: allowZoomPan,
                         scaleEnabled: allowZoomPan,
+                        onInteractionUpdate: (_) =>
+                            _updatePullToAddProgress(notebook, vpSize),
+                        onInteractionEnd: (_) =>
+                            _finishPullToAddIfReady(notebook),
                         child: _buildVerticalContinuousPages(notebook),
                       )
                     else
@@ -2624,6 +2781,80 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         panEnabled: allowZoomPan,
                         scaleEnabled: allowZoomPan,
                         child: _buildHorizontalFlipPages(notebook),
+                      ),
+
+                    // Pull-down-to-add-new-page animated spring pill (vertical continuous mode)
+                    if (appState.verticalContinuousScroll &&
+                        !currentPage.isInfiniteWhiteboard &&
+                        !notebook.isWhiteboard)
+                      ValueListenableBuilder<double>(
+                        valueListenable: _pullAddProgressNotifier,
+                        builder: (_, progress, __) {
+                          if (progress <= 0.05) return const SizedBox.shrink();
+                          final bool ready = progress >= 0.85;
+                          return Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: 18 + (progress * 10.0),
+                            child: IgnorePointer(
+                              child: Center(
+                                child: AnimatedScale(
+                                  scale: ready ? 1.05 : 0.94 + progress * 0.08,
+                                  duration: const Duration(milliseconds: 90),
+                                  child: Material(
+                                    elevation: 6,
+                                    borderRadius: BorderRadius.circular(22),
+                                    color: ready
+                                        ? EditorColors.activeBlue
+                                        : EditorColors.obsidianSurface
+                                            .withAlpha(235),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 16,
+                                        vertical: 8,
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Icon(
+                                            ready
+                                                ? Icons.add_circle_rounded
+                                                : Icons.arrow_downward_rounded,
+                                            size: 16,
+                                            color: Colors.white,
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Text(
+                                            ready
+                                                ? 'Thả tay để thêm trang mới'
+                                                : 'Kéo mạnh để thêm trang mới',
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 12.5,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+
+                    // Single Viewport-Centered Interactive Ruler (never duplicates on new pages!)
+                    if (_rulerVisible)
+                      InteractiveRulerOverlay(
+                        ruler: _rulerState,
+                        onChanged: () => setState(() {}),
+                        onClose: () => setState(() => _rulerVisible = false),
+                        onDragStart: () =>
+                            setState(() => _isOverlayDragging = true),
+                        onDragEnd: () =>
+                            setState(() => _isOverlayDragging = false),
                       ),
 
                     // Item 3: Clear `×` close pill whenever Study Tape or Laser Pointer mode is active
@@ -3131,69 +3362,141 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         child: Stack(
           children: [
             // Layer 1 (Cached RepaintBoundary): Paper + PDF + High-Res Images + Committed Ink + Stencils + Tapes
-            Positioned.fill(
-              child: RepaintBoundary(
-                child: CustomPaint(
-                  size: pageSize,
-                  painter: CanvasPainter(
-                    page: page,
-                    pdfBackgroundImage: page.pdfBackgroundPath != null
-                        ? _pdfImageCache[page.pdfBackgroundPath!]
-                        : null,
-                    elementImageCache: _elementImageCache,
-                    lassoSelection: isLassoOwner
-                        ? _lassoController.selection
-                        : const LassoSelection(),
-                    lassoSelectionBounds:
-                        isLassoOwner ? _lassoController.selectionBounds : null,
-                    playingAudioId: _playingAudioId,
-                    playingAudioTimeMs:
-                        _playingAudioId != null ? _audioPositionMs : null,
-                    repaintVersion: _repaintVersion,
-                  ),
-                ),
-              ),
-            ),
+            // Layer 1 (Cached RepaintBoundary): Paper + PDF + Chronological Z-Index Images/Ink/Stencils
+            // When Sticky Notes exist, base layer paints everything <= first sticky note's zIndex,
+            // and upper slices paint newer images/strokes cleanly ON TOP OF earlier Sticky Notes!
+            ...() {
+              final sortedStickies = List<StickyNoteElement>.from(page.stickyNotes)
+                ..sort((a, b) => a.zIndex.compareTo(b.zIndex));
+              final bool hasStickies = sortedStickies.isNotEmpty;
+              final int? baseMaxZ =
+                  hasStickies ? sortedStickies.first.zIndex : null;
+              final bool readOnly = context.read<AppState>().readOnlyMode;
 
-            // Layer 2 (144Hz Live Ink Overlay in its own RepaintBoundary — Zero Widget Rebuilds)
-            Positioned.fill(
-              child: Listener(
-                behavior: HitTestBehavior.translucent,
-                onPointerHover: (e) => _handlePointerHover(e, page),
-                onPointerDown: (e) => _handlePointerDown(e, page, pageIndex),
-                onPointerMove: (e) => _handlePointerMove(e, page),
-                onPointerUp: (e) => _handlePointerUp(e, page),
-                onPointerCancel: (e) => _handlePointerUp(e, page),
-                child: (_activeDrawingPageId == page.id || isActivePage)
-                    ? RepaintBoundary(
-                        child: CustomPaint(
-                          size: pageSize,
-                          painter: ActiveStrokePainter(
-                            activeStroke: _activeStrokeNotifier,
-                            eraserCursor: _eraserCursorNotifier,
-                            lassoPath: _lassoPathNotifier,
-                            tapeDraftRect: _tapeDraftNotifier,
-                            isDarkPaper: page.paperColor == PaperColorType.dark,
-                          ),
-                        ),
-                      )
-                    : const SizedBox.expand(),
-              ),
-            ),
+              bool hasCanvasItemInRange(int minExcl, int? maxIncl) {
+                bool match(int z) =>
+                    z > minExcl && (maxIncl == null || z <= maxIncl);
+                return page.strokes.any((s) => match(s.zIndex)) ||
+                    page.imageElements.any((e) => match(e.zIndex)) ||
+                    page.stencilElements.any((e) => match(e.zIndex));
+              }
 
-            // Laser Pointer Fading Trail Overlay in its own RepaintBoundary
-            if (isActivePage)
-              Positioned.fill(
-                child: IgnorePointer(
+              return <Widget>[
+                Positioned.fill(
                   child: RepaintBoundary(
                     child: CustomPaint(
-                      painter: LaserPointerPainter(controller: _laserController),
+                      size: pageSize,
+                      painter: CanvasPainter(
+                        page: page,
+                        pdfBackgroundImage: page.pdfBackgroundPath != null
+                            ? _pdfImageCache[page.pdfBackgroundPath!]
+                            : null,
+                        elementImageCache: _elementImageCache,
+                        lassoSelection: isLassoOwner
+                            ? _lassoController.selection
+                            : const LassoSelection(),
+                        lassoSelectionBounds: isLassoOwner
+                            ? _lassoController.selectionBounds
+                            : null,
+                        playingAudioId: _playingAudioId,
+                        playingAudioTimeMs: _playingAudioId != null
+                            ? _audioPositionMs
+                            : null,
+                        repaintVersion: _repaintVersion,
+                        drawBackground: true,
+                        drawOverlays: !hasStickies,
+                        maxZInclusive: baseMaxZ,
+                      ),
                     ),
                   ),
                 ),
-              ),
 
-            // Interactive Image Overlays (8 handles + 6-button Crop/Edit Pill)
+                // Layer 2 (144Hz Live Ink Overlay in its own RepaintBoundary — Zero Widget Rebuilds)
+                Positioned.fill(
+                  child: Listener(
+                    behavior: HitTestBehavior.translucent,
+                    onPointerHover: (e) => _handlePointerHover(e, page),
+                    onPointerDown: (e) => _handlePointerDown(e, page, pageIndex),
+                    onPointerMove: (e) => _handlePointerMove(e, page),
+                    onPointerUp: (e) => _handlePointerUp(e, page),
+                    onPointerCancel: (e) => _handlePointerUp(e, page),
+                    child: (_activeDrawingPageId == page.id || isActivePage)
+                        ? RepaintBoundary(
+                            child: CustomPaint(
+                              size: pageSize,
+                              painter: ActiveStrokePainter(
+                                activeStroke: _activeStrokeNotifier,
+                                eraserCursor: _eraserCursorNotifier,
+                                lassoPath: _lassoPathNotifier,
+                                tapeDraftRect: _tapeDraftNotifier,
+                                isDarkPaper:
+                                    page.paperColor == PaperColorType.dark,
+                                eraserRadius: _eraserRadius,
+                              ),
+                            ),
+                          )
+                        : const SizedBox.expand(),
+                  ),
+                ),
+
+                // Laser Pointer Fading Trail Overlay in its own RepaintBoundary
+                if (isActivePage)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: RepaintBoundary(
+                        child: CustomPaint(
+                          painter:
+                              LaserPointerPainter(controller: _laserController),
+                        ),
+                      ),
+                    ),
+                  ),
+
+                // Chronological Sticky Notes interleaved with newer Images/Strokes/Stencils
+                for (int si = 0; si < sortedStickies.length; si++) ...[
+                  _buildStickyNoteOverlay(page, sortedStickies[si], readOnly),
+                  if (hasCanvasItemInRange(
+                        sortedStickies[si].zIndex,
+                        si + 1 < sortedStickies.length
+                            ? sortedStickies[si + 1].zIndex
+                            : null,
+                      ) ||
+                      si == sortedStickies.length - 1)
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: RepaintBoundary(
+                          child: CustomPaint(
+                            size: pageSize,
+                            painter: CanvasPainter(
+                              page: page,
+                              elementImageCache: _elementImageCache,
+                              lassoSelection: isLassoOwner
+                                  ? _lassoController.selection
+                                  : const LassoSelection(),
+                              lassoSelectionBounds: isLassoOwner
+                                  ? _lassoController.selectionBounds
+                                  : null,
+                              playingAudioId: _playingAudioId,
+                              playingAudioTimeMs: _playingAudioId != null
+                                  ? _audioPositionMs
+                                  : null,
+                              repaintVersion: _repaintVersion,
+                              drawBackground: false,
+                              drawOverlays: si == sortedStickies.length - 1,
+                              minZExclusive: sortedStickies[si].zIndex,
+                              maxZInclusive: si + 1 < sortedStickies.length
+                                  ? sortedStickies[si + 1].zIndex
+                                  : null,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ];
+            }(),
+
+            // Interactive Image Overlays (8 handles; 6-button Pill rendered as outer Stack sibling below)
             for (final img in page.imageElements) _buildImageOverlay(page, img),
 
             // Interactive Attachment Cards (DOC/PPT/PDF/Files)
@@ -3206,14 +3509,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
             // Interactive Text Overlays
             for (final txt in page.textElements) _buildTextOverlay(page, txt),
-
-            // Interactive Sticky Notes (Giấy nhớ dán GoodNotes)
-            for (final sticky in page.stickyNotes)
-              _buildStickyNoteOverlay(
-                page,
-                sticky,
-                context.read<AppState>().readOnlyMode,
-              ),
 
             // 6-Button Floating Image Action Pill (Direct sibling in outer Stack so hit-testing works 100%!)
             if ((_activeTool == EditorTool.image ||
@@ -3355,16 +3650,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     ),
                   ),
                 ),
-              ),
-
-            // Interactive Translucent Ruler Overlay (locks page pan while dragging!)
-            if (_rulerVisible && isActivePage)
-              InteractiveRulerOverlay(
-                ruler: _rulerState,
-                onChanged: () => setState(() {}),
-                onClose: () => setState(() => _rulerVisible = false),
-                onDragStart: () => setState(() => _isOverlayDragging = true),
-                onDragEnd: () => setState(() => _isOverlayDragging = false),
               ),
 
             // Subtle Top-Left Bookmark Ribbon on Bookmarked Pages
@@ -4603,7 +4888,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                 colorValue: stickyInkColorValue(),
                                 width: width,
                                 points: [pt],
-                                isFilled: false,
                               );
                             },
                             onPointerMove: (e) {

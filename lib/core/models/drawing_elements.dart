@@ -123,6 +123,7 @@ class Stroke {
   final ShapeType shapeType;
   final String? audioId;
   final int? audioTimeMs;
+  final int zIndex;
 
   const Stroke({
     required this.id,
@@ -134,6 +135,7 @@ class Stroke {
     this.shapeType = ShapeType.none,
     this.audioId,
     this.audioTimeMs,
+    this.zIndex = 0,
   });
 
   Stroke copyWith({
@@ -146,6 +148,7 @@ class Stroke {
     ShapeType? shapeType,
     String? audioId,
     int? audioTimeMs,
+    int? zIndex,
   }) {
     return Stroke(
       id: id ?? this.id,
@@ -157,6 +160,7 @@ class Stroke {
       shapeType: shapeType ?? this.shapeType,
       audioId: audioId ?? this.audioId,
       audioTimeMs: audioTimeMs ?? this.audioTimeMs,
+      zIndex: zIndex ?? this.zIndex,
     );
   }
 
@@ -171,6 +175,7 @@ class Stroke {
       'shapeType': shapeType.name,
       if (audioId != null) 'audioId': audioId,
       if (audioTimeMs != null) 'audioTimeMs': audioTimeMs,
+      'zIndex': zIndex,
     };
   }
 
@@ -192,6 +197,7 @@ class Stroke {
       ),
       audioId: json['audioId'] as String?,
       audioTimeMs: (json['audioTimeMs'] as num?)?.toInt(),
+      zIndex: (json['zIndex'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -256,6 +262,7 @@ class StickyNoteElement {
   final int colorValue;
   final bool isCollapsed;
   final List<Stroke> strokes;
+  final int zIndex;
   final DateTime updatedAt;
 
   StickyNoteElement({
@@ -268,6 +275,7 @@ class StickyNoteElement {
     this.colorValue = 0xFFFEF08A,
     this.isCollapsed = false,
     this.strokes = const [],
+    this.zIndex = 0,
     DateTime? updatedAt,
   }) : updatedAt = updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -281,6 +289,7 @@ class StickyNoteElement {
     int? colorValue,
     bool? isCollapsed,
     List<Stroke>? strokes,
+    int? zIndex,
     DateTime? updatedAt,
   }) {
     return StickyNoteElement(
@@ -293,6 +302,7 @@ class StickyNoteElement {
       colorValue: colorValue ?? this.colorValue,
       isCollapsed: isCollapsed ?? this.isCollapsed,
       strokes: strokes ?? this.strokes,
+      zIndex: zIndex ?? this.zIndex,
       updatedAt: updatedAt ?? this.updatedAt,
     );
   }
@@ -308,6 +318,7 @@ class StickyNoteElement {
       'colorValue': colorValue,
       'isCollapsed': isCollapsed,
       'strokes': strokes.map((s) => s.toJson()).toList(),
+      'zIndex': zIndex,
       'updatedAt': updatedAt.toIso8601String(),
     };
   }
@@ -326,6 +337,7 @@ class StickyNoteElement {
       strokes: rawStrokes
           .map((e) => Stroke.fromJson(e as Map<String, dynamic>))
           .toList(),
+      zIndex: (json['zIndex'] as num?)?.toInt() ?? 0,
       updatedAt: json['updatedAt'] != null
           ? DateTime.tryParse(json['updatedAt'] as String) ?? DateTime.now()
           : DateTime.now(),
@@ -344,6 +356,7 @@ class TextElement {
   final int colorValue;
   final bool isBold;
   final bool isItalic;
+  final int zIndex;
 
   const TextElement({
     required this.id,
@@ -356,6 +369,7 @@ class TextElement {
     this.colorValue = 0xFF1F2937,
     this.isBold = false,
     this.isItalic = false,
+    this.zIndex = 0,
   });
 
   TextElement copyWith({
@@ -369,6 +383,7 @@ class TextElement {
     int? colorValue,
     bool? isBold,
     bool? isItalic,
+    int? zIndex,
   }) {
     return TextElement(
       id: id ?? this.id,
@@ -381,6 +396,7 @@ class TextElement {
       colorValue: colorValue ?? this.colorValue,
       isBold: isBold ?? this.isBold,
       isItalic: isItalic ?? this.isItalic,
+      zIndex: zIndex ?? this.zIndex,
     );
   }
 
@@ -396,6 +412,7 @@ class TextElement {
       'colorValue': colorValue,
       'isBold': isBold,
       'isItalic': isItalic,
+      'zIndex': zIndex,
     };
   }
 
@@ -411,6 +428,7 @@ class TextElement {
       colorValue: (json['colorValue'] as num?)?.toInt() ?? 0xFF1F2937,
       isBold: json['isBold'] as bool? ?? false,
       isItalic: json['isItalic'] as bool? ?? false,
+      zIndex: (json['zIndex'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -430,6 +448,7 @@ class ImageElement {
   final double cropRight;
   final double cropBottom;
   final List<StrokePoint> freehandClipPath;
+  final int zIndex;
 
   const ImageElement({
     required this.id,
@@ -444,6 +463,7 @@ class ImageElement {
     this.cropRight = 1.0,
     this.cropBottom = 1.0,
     this.freehandClipPath = const [],
+    this.zIndex = 0,
   });
 
   ImageElement copyWith({
@@ -459,6 +479,7 @@ class ImageElement {
     double? cropRight,
     double? cropBottom,
     List<StrokePoint>? freehandClipPath,
+    int? zIndex,
   }) {
     return ImageElement(
       id: id ?? this.id,
@@ -473,6 +494,7 @@ class ImageElement {
       cropRight: cropRight ?? this.cropRight,
       cropBottom: cropBottom ?? this.cropBottom,
       freehandClipPath: freehandClipPath ?? this.freehandClipPath,
+      zIndex: zIndex ?? this.zIndex,
     );
   }
 
@@ -490,6 +512,7 @@ class ImageElement {
       'cropRight': cropRight,
       'cropBottom': cropBottom,
       'freehandClipPath': freehandClipPath.map((p) => p.toJson()).toList(),
+      'zIndex': zIndex,
     };
   }
 
@@ -512,6 +535,7 @@ class ImageElement {
       freehandClipPath: rawClip
           .map((e) => StrokePoint.fromJson(e as Map<String, dynamic>))
           .toList(),
+      zIndex: (json['zIndex'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -603,6 +627,7 @@ class StencilElement {
   final double rotation;
   final int colorValue;
   final double strokeWidth;
+  final int zIndex;
 
   const StencilElement({
     required this.id,
@@ -614,6 +639,7 @@ class StencilElement {
     this.rotation = 0.0,
     this.colorValue = 0xFF1F2937,
     this.strokeWidth = 2.0,
+    this.zIndex = 0,
   });
 
   StencilElement copyWith({
@@ -626,6 +652,7 @@ class StencilElement {
     double? rotation,
     int? colorValue,
     double? strokeWidth,
+    int? zIndex,
   }) {
     return StencilElement(
       id: id ?? this.id,
@@ -637,6 +664,7 @@ class StencilElement {
       rotation: rotation ?? this.rotation,
       colorValue: colorValue ?? this.colorValue,
       strokeWidth: strokeWidth ?? this.strokeWidth,
+      zIndex: zIndex ?? this.zIndex,
     );
   }
 
@@ -651,6 +679,7 @@ class StencilElement {
       'rotation': rotation,
       'colorValue': colorValue,
       'strokeWidth': strokeWidth,
+      'zIndex': zIndex,
     };
   }
 
@@ -665,6 +694,7 @@ class StencilElement {
       rotation: (json['rotation'] as num?)?.toDouble() ?? 0.0,
       colorValue: (json['colorValue'] as num?)?.toInt() ?? 0xFF1F2937,
       strokeWidth: (json['strokeWidth'] as num?)?.toDouble() ?? 2.0,
+      zIndex: (json['zIndex'] as num?)?.toInt() ?? 0,
     );
   }
 }

@@ -133,19 +133,24 @@ void main() {
       expect(result.shapeType, ShapeType.triangle);
     });
 
-    test('recognizes a regular hexagon (benzene ring)', () {
+    test('recognizes an oval / ellipse', () {
       const cx = 250.0;
-      const cy = 250.0;
-      const r = 90.0;
-      final hexVerts = List.generate(6, (i) {
-        final a = -math.pi / 6 + i * math.pi / 3;
-        return (cx + r * math.cos(a), cy + r * math.sin(a));
+      const cy = 220.0;
+      const rx = 120.0;
+      const ry = 65.0;
+      final raw = List.generate(48, (i) {
+        final theta = (i / 47) * 2 * math.pi;
+        return StrokePoint(
+          x: cx + rx * math.cos(theta),
+          y: cy + ry * math.sin(theta),
+          pressure: 0.6,
+          timestamp: 1000 + i * 16,
+        );
       });
-      final raw = _samplePolygon(hexVerts, stepsPerEdge: 8);
 
       final result = StrokeEngine.recognizeShape(raw);
       expect(result.recognized, isTrue);
-      expect(result.shapeType, ShapeType.hexagon);
+      expect(result.shapeType, ShapeType.circle);
     });
 
     test('returns ShapeType.none for too-short strokes', () {

@@ -137,22 +137,33 @@ class LaserPointerPainter extends CustomPainter {
   bool shouldRepaint(covariant LaserPointerPainter oldDelegate) => false;
 }
 
-/// Interactive translucent ruler with millimeter ticks, angle readout,
+/// Interactive translucent ruler with centimeter/millimeter ticks (1 cm = 37.8 px,
+/// matching A4 794 px = 21 cm), adjustable length (6 cm .. 20 cm), angle readout,
 /// magnetic angle snapping (0°, 30°, 45°, 60°, 90°), and stroke-edge snapping.
 class RulerState {
+  static const double pxPerCm = 37.8;
+  static const double minCm = 6.0;
+  static const double maxCm = 20.0;
+  static const double endPaddingPx = 42.0;
+
   Offset center;
   double angleRad;
-  final double length;
+  double lengthCm;
   final double thickness;
 
   RulerState({
-    this.center = const Offset(397, 420),
+    this.center = const Offset(420, 320),
     this.angleRad = 0.0,
-    this.length = 560.0,
-    this.thickness = 64.0,
+    this.lengthCm = 14.0,
+    this.thickness = 68.0,
   });
 
+  double get length => lengthCm * pxPerCm + endPaddingPx * 2;
   double get degrees => (angleRad * 180.0 / math.pi) % 360.0;
+
+  void setLengthCm(double cm) {
+    lengthCm = cm.clamp(minCm, maxCm);
+  }
 
   /// Snaps an incoming drawing point [pt] onto the ruler's top or bottom edge
   /// if it is within [snapThreshold] logical pixels of the edge.
@@ -177,7 +188,7 @@ class RulerState {
     }
     if (snappedLocalY == null) return pt;
 
-    // Transform back to page space
+    // Transform back to caller coordinate space
     final cosB = math.cos(angleRad);
     final sinB = math.sin(angleRad);
     return Offset(
@@ -221,7 +232,8 @@ class InteractiveRulerOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final degNormalized = ((ruler.angleRad * 180.0 / math.pi) % 180.0 + 180.0) % 180.0;
+    final degNormalized =
+        ((ruler.angleRad * 180.0 / math.pi) % 180.0 + 180.0) % 180.0;
     final displayDeg = degNormalized > 90 ? 180 - degNormalized : degNormalized;
 
     return Positioned(
@@ -230,9 +242,9 @@ class InteractiveRulerOverlay extends StatelessWidget {
       child: Transform.rotate(
         angle: ruler.angleRad,
         child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
           onPanStart: (_) => onDragStart?.call(),
           onPanUpdate: (details) {
-            // Rotate delta back to page coordinates
             final cosA = math.cos(ruler.angleRad);
             final sinA = math.sin(ruler.angleRad);
             final pageDx = details.delta.dx * cosA - details.delta.dy * sinA;
@@ -248,35 +260,119 @@ class InteractiveRulerOverlay extends StatelessWidget {
             child: Stack(
               children: [
                 Positioned.fill(
-                  child: CustomPaint(
-                    painter: _RulerBodyPainter(
-                      angleLabel: '${displayDeg.toStringAsFixed(0)}°',
+                  child: RepaintBoundary(
+                    child: CustomPaint(
+                      painter: _RulerBodyPainter(
+                        angleLabel: '${displayDeg.toStringAsFixed(0)}°',
+                        lengthCm: ruler.lengthCm,
+                      ),
                     ),
                   ),
                 ),
-                // Left rotate -15° button
+                // Left edge drag-to-resize handle
                 Positioned(
-                  left: 10,
-                  top: (ruler.thickness - 28) * 0.5,
-                  child: _RulerMiniBtn(
-                    icon: Icons.rotate_left_rounded,
-                    tooltip: 'Xoay -15°',
-                    onTap: () => _rotateBy(-math.pi / 12),
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: 14,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onPanStart: (_) => onDragStart?.call(),
+                    onPanUpdate: (d) {
+                      ruler.setLengthCm(
+                        ruler.lengthCm - (d.delta.dx * 2.0) / RulerState.pxPerCm,
+                      );
+                      onChanged();
+                    },
+                    onPanEnd: (_) => onDragEnd?.call(),
+                    onPanCancel: () => onDragEnd?.call(),
+                    child: Center(
+                      child: Container(
+                        width: 4,
+                        height: 24,
+                        decoration: BoxDecoration(
+                          color: Colors.white54,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
-                // Right rotate +15° & close buttons
+                // Right edge drag-to-resize handle
                 Positioned(
-                  right: 10,
-                  top: (ruler.thickness - 28) * 0.5,
+                  right: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: 14,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onPanStart: (_) => onDragStart?.call(),
+                    onPanUpdate: (d) {
+                      ruler.setLengthCm(
+                        ruler.lengthCm + (d.delta.dx * 2.0) / RulerState.pxPerCm,
+                      );
+                      onChanged();
+                    },
+                    onPanEnd: (_) => onDragEnd?.call(),
+                    onPanCancel: () => onDragEnd?.call(),
+                    child: Center(
+                      child: Container(
+                        width: 4,
+                        height: 24,
+                        decoration: BoxDecoration(
+                          color: Colors.white54,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                // Left controls: rotate -15° & shorten (-2 cm)
+                Positioned(
+                  left: 16,
+                  top: (ruler.thickness - 26) * 0.5,
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      _RulerMiniBtn(
+                        icon: Icons.rotate_left_rounded,
+                        tooltip: 'Xoay -15°',
+                        onTap: () => _rotateBy(-math.pi / 12),
+                      ),
+                      const SizedBox(width: 4),
+                      _RulerMiniBtn(
+                        icon: Icons.remove_rounded,
+                        tooltip: 'Thu ngắn (-2 cm)',
+                        onTap: () {
+                          ruler.setLengthCm((ruler.lengthCm - 2.0).roundToDouble());
+                          onChanged();
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+                // Right controls: lengthen (+2 cm), rotate +15° & close
+                Positioned(
+                  right: 16,
+                  top: (ruler.thickness - 26) * 0.5,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _RulerMiniBtn(
+                        icon: Icons.add_rounded,
+                        tooltip: 'Kéo dài (+2 cm)',
+                        onTap: () {
+                          ruler.setLengthCm((ruler.lengthCm + 2.0).roundToDouble());
+                          onChanged();
+                        },
+                      ),
+                      const SizedBox(width: 4),
                       _RulerMiniBtn(
                         icon: Icons.rotate_right_rounded,
                         tooltip: 'Xoay +15°',
                         onTap: () => _rotateBy(math.pi / 12),
                       ),
-                      const SizedBox(width: 6),
+                      const SizedBox(width: 4),
                       _RulerMiniBtn(
                         icon: Icons.close_rounded,
                         tooltip: 'Ẩn thước',
@@ -312,14 +408,14 @@ class _RulerMiniBtn extends StatelessWidget {
       child: GestureDetector(
         onTap: onTap,
         child: Container(
-          width: 28,
-          height: 28,
+          width: 26,
+          height: 26,
           decoration: BoxDecoration(
-            color: const Color(0xFF16181D).withAlpha(205),
-            borderRadius: BorderRadius.circular(14),
+            color: const Color(0xFF16181D).withAlpha(210),
+            borderRadius: BorderRadius.circular(13),
             border: Border.all(color: Colors.white24),
           ),
-          child: Icon(icon, size: 15, color: Colors.white),
+          child: Icon(icon, size: 14, color: Colors.white),
         ),
       ),
     );
@@ -328,8 +424,12 @@ class _RulerMiniBtn extends StatelessWidget {
 
 class _RulerBodyPainter extends CustomPainter {
   final String angleLabel;
+  final double lengthCm;
 
-  const _RulerBodyPainter({required this.angleLabel});
+  const _RulerBodyPainter({
+    required this.angleLabel,
+    required this.lengthCm,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -339,67 +439,91 @@ class _RulerBodyPainter extends CustomPainter {
     // Translucent frosted ruler body
     canvas.drawRRect(
       rrect,
-      Paint()..color = const Color(0xFF1E293B).withAlpha(185),
+      Paint()..color = const Color(0xFF1E293B).withAlpha(192),
     );
     canvas.drawRRect(
       rrect,
       Paint()
-        ..color = const Color(0xFF60A5FA).withAlpha(190)
+        ..color = const Color(0xFF60A5FA).withAlpha(195)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.4,
     );
 
-    // Millimeter & centimeter ticks along top & bottom edges
-    final tickPaint = Paint()
-      ..color = Colors.white.withAlpha(200)
-      ..strokeWidth = 1.0;
+    // Calibrated cm & mm ticks along top & bottom edges (1 cm = 37.8 px)
+    final cmTickPaint = Paint()
+      ..color = Colors.white.withAlpha(235)
+      ..strokeWidth = 1.25;
+    final mmTickPaint = Paint()
+      ..color = Colors.white.withAlpha(165)
+      ..strokeWidth = 0.85;
 
-    const double pxPerMm = 4.0;
-    final int totalMm = ((size.width - 100) / pxPerMm).floor();
-    const double startX = 50.0;
+    const double pxPerMm = RulerState.pxPerCm / 10.0;
+    const double startX = RulerState.endPaddingPx;
+    final int totalCm = lengthCm.floor();
+    final int totalMm = (lengthCm * 10.0).round();
 
     for (int mm = 0; mm <= totalMm; mm++) {
       final x = startX + mm * pxPerMm;
+      if (x > size.width - RulerState.endPaddingPx + 1.0) break;
       final isCm = mm % 10 == 0;
       final isHalf = mm % 5 == 0;
-      final len = isCm ? 13.0 : (isHalf ? 9.0 : 5.5);
+      final len = isCm ? 13.0 : (isHalf ? 8.5 : 5.0);
+      final p = isCm ? cmTickPaint : mmTickPaint;
 
-      canvas.drawLine(Offset(x, 0), Offset(x, len), tickPaint);
+      canvas.drawLine(Offset(x, 0), Offset(x, len), p);
       canvas.drawLine(
         Offset(x, size.height),
         Offset(x, size.height - len),
-        tickPaint,
+        p,
       );
+
+      if (isCm) {
+        final cmVal = mm ~/ 10;
+        final label = cmVal == totalCm ? '${cmVal}cm' : '$cmVal';
+        final numTp = TextPainter(
+          text: TextSpan(
+            text: label,
+            style: TextStyle(
+              color: Colors.white.withAlpha(220),
+              fontSize: 9.5,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        numTp.paint(canvas, Offset(x - numTp.width * 0.5, 13.5));
+      }
     }
 
-    // Center angle badge
+    // Center angle & length badge
     final tp = TextPainter(
       text: TextSpan(
-        text: angleLabel,
+        text: '$angleLabel · ${lengthCm.toStringAsFixed(0)} cm',
         style: const TextStyle(
           color: Colors.white,
-          fontSize: 13,
+          fontSize: 11.5,
           fontWeight: FontWeight.w700,
-          letterSpacing: 0.4,
+          letterSpacing: 0.3,
         ),
       ),
       textDirection: TextDirection.ltr,
     )..layout();
     final cx = (size.width - tp.width) * 0.5;
-    final cy = (size.height - tp.height) * 0.5;
+    final cy = (size.height - tp.height) * 0.5 + 4.0;
     canvas.drawRRect(
       RRect.fromRectAndRadius(
-        Rect.fromLTWH(cx - 10, cy - 4, tp.width + 20, tp.height + 8),
-        const Radius.circular(12),
+        Rect.fromLTWH(cx - 10, cy - 3, tp.width + 20, tp.height + 6),
+        const Radius.circular(11),
       ),
-      Paint()..color = const Color(0xFF3B82F6).withAlpha(220),
+      Paint()..color = const Color(0xFF3B82F6).withAlpha(225),
     );
     tp.paint(canvas, Offset(cx, cy));
   }
 
   @override
   bool shouldRepaint(covariant _RulerBodyPainter oldDelegate) {
-    return oldDelegate.angleLabel != angleLabel;
+    return oldDelegate.angleLabel != angleLabel ||
+        oldDelegate.lengthCm != lengthCm;
   }
 }
 

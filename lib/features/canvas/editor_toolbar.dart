@@ -1755,54 +1755,171 @@ Future<void> showEraserSettingsSheet({
   required EraserMode currentMode,
   required ValueChanged<EraserMode> onSelectMode,
   required VoidCallback onClearCurrentPage,
+  double eraserRadius = 18.0,
+  ValueChanged<double>? onEraserRadiusChanged,
 }) {
   return showModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
-    builder: (ctx) => SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const ListTile(
-            title: Text('Tùy chọn Tẩy',
-                style: TextStyle(fontWeight: FontWeight.w700)),
-          ),
-          RadioListTile<EraserMode>(
-            value: EraserMode.stroke,
-            groupValue: currentMode,
-            title: const Text('Xóa nguyên nét (Stroke Eraser)'),
-            subtitle: const Text('Chạm vào bất kỳ phần nào của nét để xóa cả nét'),
-            onChanged: (v) {
-              if (v != null) onSelectMode(v);
-              Navigator.pop(ctx);
-            },
-          ),
-          RadioListTile<EraserMode>(
-            value: EraserMode.precision,
-            groupValue: currentMode,
-            title: const Text('Xóa theo điểm (Precision Eraser)'),
-            subtitle: const Text('Cắt xóa chính xác từng đoạn nhỏ'),
-            onChanged: (v) {
-              if (v != null) onSelectMode(v);
-              Navigator.pop(ctx);
-            },
-          ),
-          const Divider(),
-          ListTile(
-            leading:
-                const Icon(Icons.delete_sweep_outlined, color: Color(0xFFEF4444)),
-            title: const Text(
-              'Xóa toàn bộ nét viết trên trang này',
-              style: TextStyle(color: Color(0xFFEF4444)),
+    builder: (ctx) {
+      EraserMode localMode = currentMode;
+      double localRadius = eraserRadius.clamp(8.0, 48.0);
+      return StatefulBuilder(
+        builder: (sheetCtx, setSheetState) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const ListTile(
+                  title: Text(
+                    'Tùy chọn Tẩy',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                // Eraser size slider + live circular preview + 3 quick presets
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 18),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Text(
+                            'Cỡ tẩy',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13.5,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            '${localRadius.round()} px',
+                            style: const TextStyle(
+                              color: EditorColors.activeBlue,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 13,
+                            ),
+                          ),
+                          const Spacer(),
+                          // Live circular eraser size preview
+                          Container(
+                            width: 44,
+                            height: 44,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: Colors.grey.withAlpha(26),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: Colors.grey.withAlpha(60),
+                              ),
+                            ),
+                            child: Container(
+                              width: (localRadius * 0.85).clamp(8.0, 38.0),
+                              height: (localRadius * 0.85).clamp(8.0, 38.0),
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: EditorColors.activeBlue.withAlpha(45),
+                                border: Border.all(
+                                  color: EditorColors.activeBlue,
+                                  width: 1.6,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      Slider(
+                        value: localRadius,
+                        min: 8.0,
+                        max: 48.0,
+                        divisions: 40,
+                        activeColor: EditorColors.activeBlue,
+                        onChanged: (val) {
+                          setSheetState(() => localRadius = val);
+                          onEraserRadiusChanged?.call(val);
+                        },
+                      ),
+                      Row(
+                        children: [
+                          for (final preset in const [
+                            ('Nhỏ', 12.0),
+                            ('Vừa', 22.0),
+                            ('Lớn', 36.0),
+                          ])
+                            Expanded(
+                              child: Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 4),
+                                child: ChoiceChip(
+                                  label: Center(
+                                    child: Text(
+                                      '${preset.$1} (${preset.$2.round()})',
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                  ),
+                                  selected: (localRadius - preset.$2).abs() < 2.0,
+                                  onSelected: (_) {
+                                    setSheetState(() => localRadius = preset.$2);
+                                    onEraserRadiusChanged?.call(preset.$2);
+                                  },
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Divider(),
+                RadioListTile<EraserMode>(
+                  value: EraserMode.stroke,
+                  groupValue: localMode,
+                  title: const Text('Xóa nguyên nét (Stroke Eraser)'),
+                  subtitle: const Text(
+                    'Chạm vào bất kỳ phần nào của nét để xóa cả nét',
+                  ),
+                  onChanged: (v) {
+                    if (v != null) {
+                      setSheetState(() => localMode = v);
+                      onSelectMode(v);
+                    }
+                  },
+                ),
+                RadioListTile<EraserMode>(
+                  value: EraserMode.precision,
+                  groupValue: localMode,
+                  title: const Text('Xóa theo điểm (Precision Eraser)'),
+                  subtitle: const Text('Cắt xóa chính xác từng đoạn nhỏ'),
+                  onChanged: (v) {
+                    if (v != null) {
+                      setSheetState(() => localMode = v);
+                      onSelectMode(v);
+                    }
+                  },
+                ),
+                const Divider(),
+                ListTile(
+                  leading: const Icon(
+                    Icons.delete_sweep_outlined,
+                    color: Color(0xFFEF4444),
+                  ),
+                  title: const Text(
+                    'Xóa toàn bộ nét viết trên trang này',
+                    style: TextStyle(color: Color(0xFFEF4444)),
+                  ),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    onClearCurrentPage();
+                  },
+                ),
+              ],
             ),
-            onTap: () {
-              Navigator.pop(ctx);
-              onClearCurrentPage();
-            },
           ),
-        ],
-      ),
-    ),
+        ),
+      );
+    },
   );
 }
 

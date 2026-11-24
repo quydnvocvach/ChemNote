@@ -477,5 +477,54 @@ void main() {
       expect(legacyPage.isInfiniteWhiteboard, isFalse);
       expect(legacyPage.stickyNotes, isEmpty);
     });
+
+    test('v3.3.0 chronological zIndex round-trip across Stroke, Image, StickyNote, Text, and Stencil', () {
+      const stroke = Stroke(
+        id: 's-z',
+        toolType: ToolType.fountainPen,
+        colorValue: 0xFF111827,
+        width: 2.0,
+        points: [StrokePoint(x: 0, y: 0), StrokePoint(x: 10, y: 10)],
+        zIndex: 1001,
+      );
+      const img = ImageElement(
+        id: 'img-z',
+        x: 20,
+        y: 20,
+        filePath: '/tmp/a.png',
+        zIndex: 2002,
+      );
+      final sticky = StickyNoteElement(
+        id: 'st-z',
+        x: 30,
+        y: 30,
+        text: 'Z-order test',
+        zIndex: 3003,
+      );
+      const txt = TextElement(
+        id: 'txt-z',
+        x: 40,
+        y: 40,
+        text: 'H2SO4',
+        zIndex: 4004,
+      );
+      const stencil = StencilElement(
+        id: 'stn-z',
+        stencilId: 'benzene_ring',
+        x: 50,
+        y: 50,
+        zIndex: 5005,
+      );
+
+      expect(Stroke.fromJson(jsonDecode(jsonEncode(stroke.toJson())) as Map<String, dynamic>).zIndex, 1001);
+      expect(ImageElement.fromJson(jsonDecode(jsonEncode(img.toJson())) as Map<String, dynamic>).zIndex, 2002);
+      expect(StickyNoteElement.fromJson(jsonDecode(jsonEncode(sticky.toJson())) as Map<String, dynamic>).zIndex, 3003);
+      expect(TextElement.fromJson(jsonDecode(jsonEncode(txt.toJson())) as Map<String, dynamic>).zIndex, 4004);
+      expect(StencilElement.fromJson(jsonDecode(jsonEncode(stencil.toJson())) as Map<String, dynamic>).zIndex, 5005);
+
+      // Safe default 0 when legacy JSON omits zIndex
+      expect(Stroke.fromJson({'id': 'legacy-s'}).zIndex, 0);
+      expect(ImageElement.fromJson({'id': 'legacy-i', 'x': 0, 'y': 0}).zIndex, 0);
+    });
   });
 }

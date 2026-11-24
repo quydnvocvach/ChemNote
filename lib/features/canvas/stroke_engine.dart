@@ -805,18 +805,7 @@ class StrokeEngine {
       }
     }
 
-    // Candidate C: Regular Hexagon (Benzene ring!)
-    if (vertices.length >= 5 && vertices.length <= 7) {
-      final double hexRadius = meanR / 0.91;
-      final double hexErr = _regularHexagonError(rawPoints, center, hexRadius);
-      if (hexErr < bestError) {
-        bestError = hexErr;
-        bestType = ShapeType.hexagon;
-        bestPoints = _generateRegularHexagon(rawPoints, center, hexRadius);
-      }
-    }
-
-    // Candidate D: Circle / Ellipse
+    // Candidate C: Circle / Oval-Ellipse (Complex polygons removed from freehand Pen auto-snap)
     final double ellipseErr = _circleEllipseRmsError(rawPoints, bounds);
     if (ellipseErr < bestError) {
       final double aspect =

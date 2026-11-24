@@ -160,19 +160,18 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.2.2 with APK
+      - name: Publish Release v3.3.0 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.2.2
-          name: ChemNote Pro v3.2.2 (Huawei MatePad 11.5"S & Android)
+          tag_name: v3.3.0
+          name: ChemNote Pro v3.3.0 (Huawei MatePad 11.5"S & Android)
           body: |
-            ### ChemNote Pro v3.2.2 — Cài đè trực tiếp không mất dữ liệu!
-            - **Sửa triệt để lỗi Google Drive OAuth 401:** Chuyển sang chuẩn RFC 8252 Loopback (`http://127.0.0.1`) hỗ trợ loại **Desktop app** (Client ID + Client Secret), không cần GMS hay SHA-1!
-            - **Xuất PDF nhanh hơn 5× kèm Thanh tiến trình (%):** Lọc bớt điểm thừa 240Hz, bộ nhớ đệm ảnh trùng lặp, và hộp thoại hiển thị tiến độ xuất từng trang.
-            - **Zero-Lag 144Hz Pinch-Zoom & Di chuyển Ảnh/Sticky Note:** Loại bỏ hoàn toàn `setState` khi zoom/kéo/đổi cỡ bằng `ValueNotifier` + `RepaintBoundary`.
-            - **Sửa triệt để thanh công cụ Ảnh (`ImageActionPill`):** Tất cả 6 nút (`Cắt hình chữ nhật`, `Cắt tùy chỉnh`, `Sao chép`, `Cắt`, `Thêm vào hình dán`, `Xóa`) phản hồi nhạy 100%.
-            - **Sửa nhận diện Hình học (Auto Shape):** Nắn chính xác Đường thẳng, Tròn, Chữ nhật, Tam giác, Lục giác đều (Benzen) không còn nét gạch ngang lỗi.
-            - **Viết tay trực tiếp trên Sticky Notes:** Dùng bút M-Pencil 3 viết, tô sáng và tẩy ngay trên tờ giấy nhớ dán pastel (kèm xuất PDF đầy đủ nét viết tay)!
+            ### ChemNote Pro v3.3.0 — Bản hoàn thiện toàn diện cho MatePad 11.5"S + M-Pencil 3!
+            - **Phân lớp theo thời gian (Chronological Z-Index):** Ảnh / Sticky Note dán sau che gọn nét cũ, còn nét viết mới sau đó nằm đè lên trên ảnh chuẩn xác!
+            - **Thước kẻ đơn đo theo `cm` (`1 cm = 37.8 px`) & Kéo đổi độ dài:** Luôn bật ngay giữa màn hình, không còn bị lặp trên trang mới.
+            - **Cỡ tẩy tùy chỉnh (`8 -> 48 px`)** với thanh trượt & 3 cỡ nhanh Nhỏ / Vừa / Lớn; **nhận diện hình cơ bản cực chuẩn** (Đường thẳng, Tròn/Bầu dục, Chữ nhật, Tam giác).
+            - **Kéo xuống cuối trang để thêm trang mới** + **Ảnh thu nhỏ (Thumbnail) hiển thị trực tiếp nội dung thực tế** trong danh sách trang.
+            - **Viết tay trực tiếp trên Sticky Notes**, **Xuất PDF nhanh 5× kèm thanh tiến trình %**, và **Sửa triệt để lỗi Google Drive OAuth 401 (RFC 8252 Loopback)**.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

@@ -26,6 +26,10 @@ class CanvasPainter extends CustomPainter {
   final String? playingAudioId;
   final int? playingAudioTimeMs;
   final int repaintVersion;
+  final bool drawBackground;
+  final bool drawOverlays;
+  final int? minZExclusive;
+  final int? maxZInclusive;
 
   const CanvasPainter({
     required this.page,
@@ -36,87 +40,121 @@ class CanvasPainter extends CustomPainter {
     this.playingAudioId,
     this.playingAudioTimeMs,
     this.repaintVersion = 0,
+    this.drawBackground = true,
+    this.drawOverlays = true,
+    this.minZExclusive,
+    this.maxZInclusive,
   });
+
+  bool _inZRange(int z) {
+    if (minZExclusive != null && z <= minZExclusive!) return false;
+    if (maxZInclusive != null && z > maxZInclusive!) return false;
+    return true;
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
     // 1. Paper template layer (A4 or seamless Infinite Whiteboard)
-    PaperTemplatePainter(
-      templateType: page.templateType,
-      paperColor: page.paperColor,
-      isLandscape: page.isLandscape,
-      isInfiniteWhiteboard: page.isInfiniteWhiteboard,
-    ).paint(canvas, size);
+    if (drawBackground) {
+      PaperTemplatePainter(
+        templateType: page.templateType,
+        paperColor: page.paperColor,
+        isLandscape: page.isLandscape,
+        isInfiniteWhiteboard: page.isInfiniteWhiteboard,
+      ).paint(canvas, size);
 
-    // 2. Optional PDF page background image
-    if (pdfBackgroundImage != null) {
-      _paintPdfBackground(canvas, size, pdfBackgroundImage!);
-    }
-
-    // 2b. High-resolution non-destructive cropped ImageElements
-    for (final img in page.imageElements) {
-      final uiImg = elementImageCache[img.filePath];
-      if (uiImg != null) {
-        _paintHighResImageElement(
-          canvas,
-          img,
-          uiImg,
-          isSelected: lassoSelection.imageIds.contains(img.id),
-        );
+      // 2. Optional PDF page background image
+      if (pdfBackgroundImage != null) {
+        _paintPdfBackground(canvas, size, pdfBackgroundImage!);
       }
     }
 
-    // 3. Highlighter layer (underneath opaque pen ink; BlendMode.multiply on light paper)
+    // 3. Chronological Z-Index Layering across Images, Stencils, Highlighters & Pen Strokes
+    // Tie-break order for legacy zIndex == 0: 0=image, 1=highlighter, 2=stencil, 3=ink
     final bool isDarkPaper = page.paperColor == PaperColorType.dark;
-    for (final stroke in page.strokes) {
-      if (stroke.toolType == ToolType.highlighter) {
-        final audioState = _audioVisualForStroke(stroke);
-        paintHighlighterStroke(
-          canvas,
-          stroke,
-          isDarkPaper: isDarkPaper,
-          isSelected: lassoSelection.strokeIds.contains(stroke.id),
-          opacityMultiplier: audioState.opacityMultiplier,
-          isAudioHighlighted: audioState.isHighlighted,
-        );
+    final items = <({int z, int tie, int seq, Object item})>[];
+    int seq = 0;
+
+    for (final img in page.imageElements) {
+      if (_inZRange(img.zIndex)) {
+        items.add((z: img.zIndex, tie: 0, seq: seq++, item: img));
       }
     }
-
-    // 4. Vector chemistry stencils layer
+    for (final stroke in page.strokes) {
+      if (_inZRange(stroke.zIndex)) {
+        final tie = stroke.toolType == ToolType.highlighter ? 1 : 3;
+        items.add((z: stroke.zIndex, tie: tie, seq: seq++, item: stroke));
+      }
+    }
     for (final stencil in page.stencilElements) {
-      _paintStencilElement(
-        canvas,
-        stencil,
-        isSelected: lassoSelection.stencilIds.contains(stencil.id),
-      );
-    }
-
-    // 5. Committed pen / brush / pencil strokes
-    for (final stroke in page.strokes) {
-      if (stroke.toolType != ToolType.highlighter) {
-        final audioState = _audioVisualForStroke(stroke);
-        paintInkStroke(
-          canvas,
-          stroke,
-          isSelected: lassoSelection.strokeIds.contains(stroke.id),
-          opacityMultiplier: audioState.opacityMultiplier,
-          isAudioHighlighted: audioState.isHighlighted,
-        );
+      if (_inZRange(stencil.zIndex)) {
+        items.add((z: stencil.zIndex, tie: 2, seq: seq++, item: stencil));
       }
     }
 
-    // 6. Study Tape elements
-    for (final tape in page.tapeElements) {
-      paintStudyTape(
-        canvas,
-        tape,
-        isSelected: lassoSelection.tapeIds.contains(tape.id),
-      );
+    items.sort((a, b) {
+      final c = a.z.compareTo(b.z);
+      if (c != 0) return c;
+      final t = a.tie.compareTo(b.tie);
+      if (t != 0) return t;
+      return a.seq.compareTo(b.seq);
+    });
+
+    for (final entry in items) {
+      final obj = entry.item;
+      if (obj is ImageElement) {
+        final uiImg = elementImageCache[obj.filePath];
+        if (uiImg != null) {
+          _paintHighResImageElement(
+            canvas,
+            obj,
+            uiImg,
+            isSelected: lassoSelection.imageIds.contains(obj.id),
+          );
+        }
+      } else if (obj is StencilElement) {
+        _paintStencilElement(
+          canvas,
+          obj,
+          isSelected: lassoSelection.stencilIds.contains(obj.id),
+        );
+      } else if (obj is Stroke) {
+        final audioState = _audioVisualForStroke(obj);
+        if (obj.toolType == ToolType.highlighter) {
+          paintHighlighterStroke(
+            canvas,
+            obj,
+            isDarkPaper: isDarkPaper,
+            isSelected: lassoSelection.strokeIds.contains(obj.id),
+            opacityMultiplier: audioState.opacityMultiplier,
+            isAudioHighlighted: audioState.isHighlighted,
+          );
+        } else {
+          paintInkStroke(
+            canvas,
+            obj,
+            isSelected: lassoSelection.strokeIds.contains(obj.id),
+            opacityMultiplier: audioState.opacityMultiplier,
+            isAudioHighlighted: audioState.isHighlighted,
+          );
+        }
+      }
     }
 
-    // 7. Lasso selection bounding box
-    if (lassoSelectionBounds != null && lassoSelection.isNotEmpty) {
-      _paintSelectionBounds(canvas, lassoSelectionBounds!);
+    if (drawOverlays) {
+      // 4. Study Tape elements
+      for (final tape in page.tapeElements) {
+        paintStudyTape(
+          canvas,
+          tape,
+          isSelected: lassoSelection.tapeIds.contains(tape.id),
+        );
+      }
+
+      // 5. Lasso selection bounding box
+      if (lassoSelectionBounds != null && lassoSelection.isNotEmpty) {
+        _paintSelectionBounds(canvas, lassoSelectionBounds!);
+      }
     }
   }
 
@@ -525,7 +563,11 @@ class CanvasPainter extends CustomPainter {
         oldDelegate.lassoSelection != lassoSelection ||
         oldDelegate.lassoSelectionBounds != lassoSelectionBounds ||
         oldDelegate.playingAudioId != playingAudioId ||
-        oldDelegate.playingAudioTimeMs != playingAudioTimeMs;
+        oldDelegate.playingAudioTimeMs != playingAudioTimeMs ||
+        oldDelegate.drawBackground != drawBackground ||
+        oldDelegate.drawOverlays != drawOverlays ||
+        oldDelegate.minZExclusive != minZExclusive ||
+        oldDelegate.maxZInclusive != maxZInclusive;
   }
 }
 
