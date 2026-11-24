@@ -84,7 +84,7 @@ class AppState extends ChangeNotifier {
   ];
 
   // Tùy chọn lướt trang & đồng bộ tiết kiệm pin (v3.5.0)
-  double _scrollSpeedMultiplier = 1.6;
+  double _scrollSpeedMultiplier = 1.0;
   int _foregroundSyncMinutes = 15; // 0 (thủ công), 5, 15, 45, 120
   int _idleSyncDays = 1; // 0 (tắt), 1, 3, 5
   bool _wifiOnlySync = true;
@@ -259,7 +259,7 @@ class AppState extends ChangeNotifier {
   }
 
   void setScrollSpeedMultiplier(double value) {
-    final clamped = value.clamp(0.8, 3.0);
+    final clamped = value.clamp(1.0, 10.0);
     if ((_scrollSpeedMultiplier - clamped).abs() < 0.01) return;
     _scrollSpeedMultiplier = clamped;
     notifyListeners();
@@ -636,7 +636,7 @@ class AppState extends ChangeNotifier {
         _scrollSpeedMultiplier =
             ((penPrefs['scrollSpeedMultiplier'] as num?)?.toDouble() ??
                     _scrollSpeedMultiplier)
-                .clamp(0.8, 3.0);
+                .clamp(1.0, 10.0);
         _foregroundSyncMinutes =
             (penPrefs['foregroundSyncMinutes'] as num?)?.toInt() ??
                 _foregroundSyncMinutes;

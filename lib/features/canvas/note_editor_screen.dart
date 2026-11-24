@@ -1424,15 +1424,49 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   }
 
   Future<void> _insertSavedImagePath(NotePage page, String savedPath) async {
+    ui.Image? decoded = _elementImageCache[savedPath];
+    if (decoded == null) {
+      try {
+        final file = File(savedPath);
+        if (await file.exists()) {
+          final bytes = await file.readAsBytes();
+          final codec = await ui.instantiateImageCodec(bytes);
+          final frame = await codec.getNextFrame();
+          if (mounted) {
+            decoded = frame.image;
+            _elementImageCache[savedPath] = decoded;
+          } else {
+            frame.image.dispose();
+            return;
+          }
+        }
+      } catch (_) {}
+    }
     _ensureElementImageLoaded(savedPath);
+    if (!mounted) return;
     context.read<AppState>().addRecentImagePath(savedPath);
+    double w = 280.0;
+    double h = 220.0;
+    if (decoded != null && decoded.width > 0 && decoded.height > 0) {
+      final double natW = decoded.width.toDouble();
+      final double natH = decoded.height.toDouble();
+      final double ratio = natW / natH;
+      const double maxDim = 340.0;
+      if (ratio >= 1.0) {
+        w = maxDim;
+        h = (maxDim / ratio).clamp(48.0, 520.0);
+      } else {
+        h = maxDim;
+        w = (maxDim * ratio).clamp(48.0, 520.0);
+      }
+    }
     final center = _visibleCenterOnPage(page, _currentPageIndex);
     final imgEl = ImageElement(
       id: _uuid.v4(),
-      x: (center.dx - 140).clamp(16.0, 5600.0),
-      y: (center.dy - 110).clamp(16.0, 5600.0),
-      width: 280.0,
-      height: 220.0,
+      x: (center.dx - w * 0.5).clamp(16.0, 5600.0),
+      y: (center.dy - h * 0.5).clamp(16.0, 5600.0),
+      width: w,
+      height: h,
       rotation: 0.0,
       filePath: savedPath,
       zIndex: DateTime.now().millisecondsSinceEpoch,
@@ -1701,21 +1735,40 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     String emptyLabel = 'tệp đính kèm',
   }) async {
     try {
-      final res = await FilePicker.platform.pickFiles(
-        type: allowedExtensions != null ? FileType.custom : FileType.any,
-        allowedExtensions: allowedExtensions,
+      String pickedName = 'file';
+      String savedPath = '';
+      int pickedSize = 0;
+
+      final nativePick = await HardwareService.instance.pickDocumentFile(
+        allowedExtensions: allowedExtensions ?? const <String>[],
       );
-      if (res == null || res.files.isEmpty || !mounted) return;
-      final picked = res.files.first;
-      String savedPath = picked.path ?? '';
+      if (nativePick.handled) {
+        final f = nativePick.file;
+        if (f == null || !mounted) return;
+        pickedName = f.name;
+        savedPath = f.path;
+        pickedSize = f.size;
+      } else {
+        final res = await FilePicker.platform.pickFiles(
+          type: allowedExtensions != null ? FileType.custom : FileType.any,
+          allowedExtensions: allowedExtensions,
+        );
+        if (res == null || res.files.isEmpty || !mounted) return;
+        final picked = res.files.first;
+        pickedName = picked.name;
+        savedPath = picked.path ?? '';
+        pickedSize = picked.size;
+      }
+
       if (savedPath.isNotEmpty && File(savedPath).existsSync()) {
         savedPath = await context.read<AppState>().storage.saveImportedFile(
               File(savedPath),
               subfolder: 'attachments',
             );
       }
-      final ext = (picked.extension ??
-              (picked.name.contains('.') ? picked.name.split('.').last : 'FILE'))
+      final ext = (pickedName.contains('.')
+              ? pickedName.split('.').last
+              : 'FILE')
           .toUpperCase();
       final pageSize = PaperMetrics.pageSize(isLandscape: page.isLandscape);
       final attachment = AttachmentElement(
@@ -1724,10 +1777,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         y: (pageSize.height - 64) * 0.35,
         width: 260.0,
         height: 64.0,
-        fileName: picked.name,
+        fileName: pickedName,
         filePath: savedPath,
         fileExtension: ext,
-        fileSizeBytes: picked.size,
+        fileSizeBytes: pickedSize,
       );
       await _commitPage(
         page.copyWith(
@@ -1737,7 +1790,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Đã đính kèm $emptyLabel: ${picked.name}')),
+          SnackBar(content: Text('Đã đính kèm $emptyLabel: $pickedName')),
         );
       }
     } catch (e) {
@@ -1856,22 +1909,44 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     NotePage currentPage,
   ) async {
     try {
-      final res = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
+      String pickedName = 'file';
+      String savedPath = '';
+      int pickedSize = 0;
+
+      final nativePick = await HardwareService.instance.pickDocumentFile(
         allowedExtensions: const ['doc', 'docx', 'ppt', 'pptx'],
       );
-      if (res == null || res.files.isEmpty || !mounted) return;
-      final picked = res.files.first;
-      final ext = (picked.extension ??
-              (picked.name.contains('.') ? picked.name.split('.').last : ''))
+      if (nativePick.handled) {
+        final f = nativePick.file;
+        if (f == null || !mounted) return;
+        pickedName = f.name;
+        savedPath = f.path;
+        pickedSize = f.size;
+      } else {
+        final res = await FilePicker.platform.pickFiles(
+          type: FileType.custom,
+          allowedExtensions: const ['doc', 'docx', 'ppt', 'pptx'],
+        );
+        if (res == null || res.files.isEmpty || !mounted) return;
+        final picked = res.files.first;
+        pickedName = picked.name;
+        savedPath = picked.path ?? '';
+        pickedSize = picked.size;
+      }
+
+      final ext = (pickedName.contains('.')
+              ? pickedName.split('.').last
+              : '')
           .toLowerCase();
 
-      if (ext == 'docx' && picked.path != null && File(picked.path!).existsSync()) {
+      if (ext == 'docx' &&
+          savedPath.isNotEmpty &&
+          File(savedPath).existsSync()) {
         await _runImportWithProgress(
           title: 'Đang nhập tài liệu Word (.docx)',
           notebook: notebook,
           task: (onProgress) => _pdfImportService.importDocxFile(
-            File(picked.path!),
+            File(savedPath),
             startIndex: notebook.pages.length,
             onProgress: onProgress,
           ),
@@ -1880,7 +1955,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       }
 
       // Graceful attachment fallback for legacy binary .doc / .ppt / .pptx
-      String savedPath = picked.path ?? '';
       if (savedPath.isNotEmpty && File(savedPath).existsSync()) {
         savedPath = await context.read<AppState>().storage.saveImportedFile(
               File(savedPath),
@@ -1895,10 +1969,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         y: (pageSize.height - 64) * 0.35,
         width: 260.0,
         height: 64.0,
-        fileName: picked.name,
+        fileName: pickedName,
         filePath: savedPath,
         fileExtension: ext.toUpperCase(),
-        fileSizeBytes: picked.size,
+        fileSizeBytes: pickedSize,
       );
       await _commitPage(
         currentPage.copyWith(
@@ -3386,15 +3460,69 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       InteractiveViewer(
                         transformationController: _transformController,
                         constrained: false,
-                        minScale: 0.5,
+                        minScale: 0.35,
                         maxScale: 4.0,
-                        boundaryMargin: EdgeInsets.all(
-                          appState.freePaperMovement ? 200 : 24,
-                        ),
+                        boundaryMargin: appState.freePaperMovement
+                            ? const EdgeInsets.all(800)
+                            : const EdgeInsets.symmetric(
+                                horizontal: 300,
+                                vertical: 160,
+                              ),
                         panEnabled: allowZoomPan,
-                        scaleEnabled: allowZoomPan,
-                        onInteractionUpdate: (_) =>
-                            _updatePullToAddProgress(notebook, vpSize),
+                        scaleEnabled: !_isOverlayDragging && !_isStylusDown,
+                        onInteractionUpdate: (details) {
+                          if (details.pointerCount == 1 &&
+                              (details.scale - 1.0).abs() < 0.001 &&
+                              details.focalPointDelta != Offset.zero) {
+                            final double effectiveSpeed = 3.0 *
+                                appState.scrollSpeedMultiplier.clamp(1.0, 10.0);
+                            final double extraFactor = effectiveSpeed - 1.0;
+                            final m = _transformController.value;
+                            final double scale =
+                                m.getMaxScaleOnAxis().clamp(0.35, 4.0);
+                            final double curTx = m.getTranslation().x;
+                            final double curTy = m.getTranslation().y;
+                            final double contentH =
+                                _totalVerticalContentHeight(notebook);
+                            final double scaledH = contentH * scale;
+                            final double marginY =
+                                appState.freePaperMovement ? 800.0 : 160.0;
+                            final double minTy =
+                                math.min(0.0, vpSize.height - scaledH) -
+                                    marginY;
+                            final double maxTy = marginY;
+                            final double nextTy = (curTy +
+                                    details.focalPointDelta.dy * extraFactor)
+                                .clamp(minTy, maxTy)
+                                .toDouble();
+
+                            double maxPageW = 0.0;
+                            for (final p in notebook.pages) {
+                              final pw = PaperMetrics.pageSize(
+                                isLandscape: p.isLandscape,
+                              ).width;
+                              if (pw > maxPageW) maxPageW = pw;
+                            }
+                            final double scaledW = (maxPageW + 48.0) * scale;
+                            final double marginX =
+                                appState.freePaperMovement ? 800.0 : 300.0;
+                            double nextTx = curTx;
+                            if (appState.freePaperMovement ||
+                                scaledW > vpSize.width) {
+                              final double minTx =
+                                  math.min(0.0, vpSize.width - scaledW) -
+                                      marginX;
+                              nextTx = (curTx +
+                                      details.focalPointDelta.dx * extraFactor)
+                                  .clamp(minTx, marginX)
+                                  .toDouble();
+                            }
+                            final updated = m.clone()
+                              ..setTranslationRaw(nextTx, nextTy, 0.0);
+                            _transformController.value = updated;
+                          }
+                          _updatePullToAddProgress(notebook, vpSize);
+                        },
                         onInteractionEnd: (_) =>
                             _finishPullToAddIfReady(notebook),
                         child: _buildVerticalContinuousPages(notebook),
@@ -3402,13 +3530,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     else
                       InteractiveViewer(
                         transformationController: _transformController,
-                        minScale: 0.5,
+                        minScale: 0.35,
                         maxScale: 4.0,
-                        boundaryMargin: EdgeInsets.all(
-                          appState.freePaperMovement ? 200 : 24,
-                        ),
+                        boundaryMargin: appState.freePaperMovement
+                            ? const EdgeInsets.all(800)
+                            : const EdgeInsets.symmetric(
+                                horizontal: 300,
+                                vertical: 160,
+                              ),
                         panEnabled: allowZoomPan,
-                        scaleEnabled: allowZoomPan,
+                        scaleEnabled: !_isOverlayDragging && !_isStylusDown,
                         child: _buildHorizontalFlipPages(notebook),
                       ),
 

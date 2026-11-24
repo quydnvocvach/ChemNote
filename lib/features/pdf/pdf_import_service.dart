@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../core/models/drawing_elements.dart';
 import '../../core/models/note_page.dart';
+import '../../core/services/hardware_service.dart';
 
 /// Callback báo tiến độ nhập PDF / DOCX để hiển thị thanh tiến trình mượt mà.
 typedef PdfImportProgressCallback = void Function(
@@ -71,20 +72,37 @@ class PdfImportService {
     void Function(int currentPage)? onPageRendered,
     PdfImportProgressCallback? onProgress,
   }) async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
+    final nativePick = await HardwareService.instance.pickDocumentFile(
       allowedExtensions: const <String>['pdf'],
-      withData: true,
     );
+    Uint8List? bytes;
+    String? pickedPath;
+    String pickedName = 'tai_lieu.pdf';
 
-    if (result == null || result.files.isEmpty) {
-      return null;
+    if (nativePick.handled) {
+      final f = nativePick.file;
+      if (f == null) return null;
+      pickedPath = f.path;
+      pickedName = f.name;
+    } else {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const <String>['pdf'],
+        withData: true,
+      );
+
+      if (result == null || result.files.isEmpty) {
+        return null;
+      }
+
+      final picked = result.files.first;
+      bytes = picked.bytes;
+      pickedPath = picked.path;
+      pickedName = picked.name;
     }
 
-    final picked = result.files.first;
-    Uint8List? bytes = picked.bytes;
-    if (bytes == null && picked.path != null) {
-      bytes = await File(picked.path!).readAsBytes();
+    if (bytes == null && pickedPath != null) {
+      bytes = await File(pickedPath).readAsBytes();
     }
 
     if (bytes == null || bytes.isEmpty) {
@@ -93,7 +111,7 @@ class PdfImportService {
 
     return importPdfBytes(
       bytes,
-      fileName: picked.name,
+      fileName: pickedName,
       startIndex: startIndex,
       dpi: dpi,
       onPageRendered: onPageRendered,
@@ -219,31 +237,51 @@ class PdfImportService {
     int startIndex = 0,
     PdfImportProgressCallback? onProgress,
   }) async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
+    final nativePick = await HardwareService.instance.pickDocumentFile(
       allowedExtensions: const <String>['docx', 'doc', 'ppt', 'pptx'],
-      withData: true,
     );
+    Uint8List? bytes;
+    String? pickedPath;
+    String pickedName = 'tai_lieu.docx';
+    int pickedSize = 0;
 
-    if (result == null || result.files.isEmpty) {
-      return null;
+    if (nativePick.handled) {
+      final f = nativePick.file;
+      if (f == null) return null;
+      pickedPath = f.path;
+      pickedName = f.name;
+      pickedSize = f.size;
+    } else {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const <String>['docx', 'doc', 'ppt', 'pptx'],
+        withData: true,
+      );
+
+      if (result == null || result.files.isEmpty) {
+        return null;
+      }
+
+      final picked = result.files.first;
+      bytes = picked.bytes;
+      pickedPath = picked.path;
+      pickedName = picked.name;
+      pickedSize = picked.size;
     }
 
-    final picked = result.files.first;
-    final ext = _extensionOf(picked.name);
+    final ext = _extensionOf(pickedName);
     if (ext != 'docx') {
       return _buildFallbackAttachmentResult(
-        fileName: picked.name,
-        sourcePath: picked.path ?? '',
-        fileSizeBytes: picked.size,
+        fileName: pickedName,
+        sourcePath: pickedPath ?? '',
+        fileSizeBytes: pickedSize,
         extension: ext,
         startIndex: startIndex,
       );
     }
 
-    Uint8List? bytes = picked.bytes;
-    if (bytes == null && picked.path != null) {
-      bytes = await File(picked.path!).readAsBytes();
+    if (bytes == null && pickedPath != null) {
+      bytes = await File(pickedPath).readAsBytes();
     }
     if (bytes == null || bytes.isEmpty) {
       throw const PdfImportException(
@@ -253,7 +291,7 @@ class PdfImportService {
 
     return importDocxBytes(
       bytes,
-      fileName: picked.name,
+      fileName: pickedName,
       startIndex: startIndex,
       onProgress: onProgress,
     );

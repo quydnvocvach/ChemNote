@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -358,10 +359,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           ],
                         ),
                         Slider(
-                          value: state.scrollSpeedMultiplier,
-                          min: 0.8,
-                          max: 3.0,
-                          divisions: 22,
+                          value: state.scrollSpeedMultiplier.clamp(1.0, 10.0),
+                          min: 1.0,
+                          max: 10.0,
+                          divisions: 18,
                           onChanged: (val) => state.setScrollSpeedMultiplier(val),
                         ),
                       ],
@@ -937,6 +938,29 @@ class _LibraryScreenState extends State<LibraryScreen> {
         subfolder: 'images',
       );
       appState.addRecentImagePath(savedPath);
+      double w = 560.0;
+      double h = 420.0;
+      try {
+        final bytes = await File(savedPath).readAsBytes();
+        final codec = await ui.instantiateImageCodec(bytes);
+        final frame = await codec.getNextFrame();
+        final img = frame.image;
+        if (img.width > 0 && img.height > 0) {
+          final double ratio = img.width / img.height;
+          const double maxW = 620.0;
+          const double maxH = 820.0;
+          if (maxW / maxH >= ratio) {
+            h = maxH;
+            w = maxH * ratio;
+          } else {
+            w = maxW;
+            h = maxW / ratio;
+          }
+        }
+        img.dispose();
+      } catch (_) {}
+      final double x = ((794.0 - w) * 0.5).clamp(24.0, 740.0);
+      final double y = ((1123.0 - h) * 0.5).clamp(40.0, 1040.0);
       final now = DateTime.now();
       final page = NotePage(
         id: const Uuid().v4(),
@@ -946,10 +970,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
         imageElements: [
           ImageElement(
             id: const Uuid().v4(),
-            x: 80,
-            y: 120,
-            width: 560,
-            height: 420,
+            x: x,
+            y: y,
+            width: w,
+            height: h,
             filePath: savedPath,
           ),
         ],

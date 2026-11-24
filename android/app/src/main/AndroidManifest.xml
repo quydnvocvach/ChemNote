@@ -90,5 +90,7 @@
             <action android:name="android.intent.action.PROCESS_TEXT" />
             <data android:mimeType="text/plain" />
         </intent>
+        <package android:name="com.huawei.filemanager" />
+        <package android:name="com.hihonor.filemanager" />
     </queries>
 </manifest>

@@ -14,7 +14,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -34,6 +36,7 @@ class MainActivity : FlutterActivity() {
         private const val REQ_RECORD_AUDIO = 4012
         private const val REQ_READ_IMAGES = 4013
         private const val REQ_PICK_GALLERY = 4014
+        private const val REQ_PICK_DOCUMENT = 4015
     }
 
     private var hardwareChannel: MethodChannel? = null
@@ -50,6 +53,7 @@ class MainActivity : FlutterActivity() {
     private var pendingImagesLimit: Int = 12
     private var pendingImagesResult: MethodChannel.Result? = null
     private var pendingGalleryResult: MethodChannel.Result? = null
+    private var pendingDocumentResult: MethodChannel.Result? = null
 
     private var mediaPlayer: MediaPlayer? = null
     private var currentPlaybackSpeed: Float = 1.0f
@@ -159,6 +163,12 @@ class MainActivity : FlutterActivity() {
                     "pickImageFromSystemGallery" -> {
                         handlePickImageFromSystemGallery(result)
                     }
+                    "pickDocumentFile" -> {
+                        val extensions = (call.argument<List<*>>("allowedExtensions"))
+                            ?.mapNotNull { it?.toString()?.lowercase() }
+                            ?: emptyList()
+                        handlePickDocumentFile(extensions, result)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -183,6 +193,113 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun mimeTypeForExtension(ext: String): String {
+        return when (ext.lowercase().trimStart('.')) {
+            "pdf" -> "application/pdf"
+            "doc" -> "application/msword"
+            "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            "ppt" -> "application/vnd.ms-powerpoint"
+            "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            else -> "*/*"
+        }
+    }
+
+    private fun buildFilePickerIntent(
+        action: String,
+        packageName: String?,
+        mimeTypes: List<String>,
+        initialUri: Uri
+    ): Intent {
+        return Intent(action).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            if (mimeTypes.size == 1) {
+                type = mimeTypes[0]
+            } else {
+                type = "*/*"
+                if (mimeTypes.size > 1 && !mimeTypes.contains("*/*")) {
+                    putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes.toTypedArray())
+                }
+            }
+            if (packageName != null) {
+                setPackage(packageName)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri)
+            }
+        }
+    }
+
+    private fun handlePickDocumentFile(extensions: List<String>, result: MethodChannel.Result) {
+        try {
+            pendingDocumentResult?.success(null)
+            pendingDocumentResult = result
+            val downloadUri = Uri.parse(
+                "content://com.android.externalstorage.documents/document/primary%3ADownload"
+            )
+            val mimeTypes = extensions
+                .map { mimeTypeForExtension(it) }
+                .filter { it.isNotEmpty() }
+                .distinct()
+
+            val huaweiIntent = buildFilePickerIntent(
+                Intent.ACTION_GET_CONTENT,
+                "com.huawei.filemanager",
+                mimeTypes,
+                downloadUri
+            )
+            val honorIntent = buildFilePickerIntent(
+                Intent.ACTION_GET_CONTENT,
+                "com.hihonor.filemanager",
+                mimeTypes,
+                downloadUri
+            )
+            val fallbackIntent = buildFilePickerIntent(
+                Intent.ACTION_OPEN_DOCUMENT,
+                null,
+                mimeTypes,
+                downloadUri
+            )
+
+            val chosenIntent = when {
+                huaweiIntent.resolveActivity(packageManager) != null -> huaweiIntent
+                honorIntent.resolveActivity(packageManager) != null -> honorIntent
+                else -> fallbackIntent
+            }
+            @Suppress("DEPRECATION")
+            startActivityForResult(chosenIntent, REQ_PICK_DOCUMENT)
+        } catch (_: Exception) {
+            pendingDocumentResult = null
+            result.error("PICK_DOC_FAILED", "Cannot open file picker", null)
+        }
+    }
+
+    private fun queryDocumentMeta(uri: Uri): Pair<String, Long> {
+        var name = uri.lastPathSegment?.substringAfterLast('/')?.trim()
+        var size = 0L
+        try {
+            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIdx >= 0) {
+                        val n = cursor.getString(nameIdx)
+                        if (!n.isNullOrBlank()) name = n.trim()
+                    }
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
+                        size = cursor.getLong(sizeIdx)
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        if (size <= 0L && uri.scheme == "file" && !uri.path.isNullOrBlank()) {
+            try {
+                size = File(uri.path!!).length()
+            } catch (_: Exception) {}
+        }
+        val finalName = if (name.isNullOrBlank()) "document" else name!!
+        return Pair(finalName, size.coerceAtLeast(0L))
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == REQ_PICK_GALLERY) {
@@ -197,6 +314,39 @@ class MainActivity : FlutterActivity() {
                 Thread {
                     val copied = copyContentUriToFile(uri.toString(), destPath)
                     runOnUiThread { cb.success(copied) }
+                }.start()
+            } else {
+                cb?.success(null)
+            }
+            return
+        }
+        if (requestCode == REQ_PICK_DOCUMENT) {
+            val cb = pendingDocumentResult
+            pendingDocumentResult = null
+            val uri = if (resultCode == Activity.RESULT_OK) data?.data else null
+            if (uri != null && cb != null) {
+                Thread {
+                    val (displayName, reportedSize) = queryDocumentMeta(uri)
+                    val safeName = displayName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                    val destPath = File(
+                        cacheDir,
+                        "picked_doc_${System.currentTimeMillis()}_$safeName"
+                    ).absolutePath
+                    val copied = copyContentUriToFile(uri.toString(), destPath)
+                    if (copied != null) {
+                        val finalSize = if (reportedSize > 0L) reportedSize else File(copied).length()
+                        runOnUiThread {
+                            cb.success(
+                                mapOf(
+                                    "path" to copied,
+                                    "name" to displayName,
+                                    "size" to finalSize
+                                )
+                            )
+                        }
+                    } else {
+                        runOnUiThread { cb.success(null) }
+                    }
                 }.start()
             } else {
                 cb?.success(null)

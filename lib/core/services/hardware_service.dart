@@ -16,6 +16,19 @@ class DeviceRecentImage {
   });
 }
 
+/// Kết quả chọn tài liệu từ trình quản lý tệp gốc của thiết bị (ưu tiên Huawei Tệp tin).
+class PickedDeviceFile {
+  final String path;
+  final String name;
+  final int size;
+
+  const PickedDeviceFile({
+    required this.path,
+    required this.name,
+    this.size = 0,
+  });
+}
+
 /// Cầu nối phần cứng cho Huawei MatePad 11.5"S (144Hz PaperMatte), Huawei M-Pencil 3 (NearLink)
 /// và Ghi âm / Phát lại bài giảng gốc Android (`MediaRecorder` / `MediaPlayer`).
 /// Tự động bỏ qua an toàn trên nền tảng không hỗ trợ (Web, Desktop, Unit Tests).
@@ -231,6 +244,40 @@ class HardwareService {
       return null;
     } on PlatformException {
       return null;
+    }
+  }
+
+  /// Mở trình quản lý tệp mặc định (ưu tiên Tệp tin Huawei ở thư mục Download).
+  /// Trả về `handled: true` trên Android để nếu người dùng hủy thì không mở đè picker khác.
+  Future<({bool handled, PickedDeviceFile? file})> pickDocumentFile({
+    List<String> allowedExtensions = const [],
+  }) async {
+    if (kIsWeb) return (handled: false, file: null);
+    try {
+      final raw = await _channel.invokeMethod<dynamic>(
+        'pickDocumentFile',
+        {'allowedExtensions': allowedExtensions},
+      );
+      if (raw == null) {
+        return (handled: true, file: null);
+      }
+      if (raw is Map) {
+        final path = raw['path']?.toString() ?? '';
+        final name = raw['name']?.toString() ?? 'document';
+        final rawSize = raw['size'];
+        final int size = rawSize is num ? rawSize.toInt() : 0;
+        if (path.isNotEmpty) {
+          return (
+            handled: true,
+            file: PickedDeviceFile(path: path, name: name, size: size),
+          );
+        }
+      }
+      return (handled: true, file: null);
+    } on MissingPluginException {
+      return (handled: false, file: null);
+    } on PlatformException {
+      return (handled: false, file: null);
     }
   }
 
