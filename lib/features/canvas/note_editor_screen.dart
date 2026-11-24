@@ -3533,12 +3533,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                           if (details.pointerCount == 1 &&
                               (details.scale - 1.0).abs() < 0.001 &&
                               details.focalPointDelta != Offset.zero) {
-                            // Only boost vertical scroll (3x * slider); keep horizontal pan at natural 1x
-                            final double effectiveSpeed = 3.0 *
-                                appState.scrollSpeedMultiplier.clamp(1.0, 10.0);
+                            // Preserve exact v3.4 1.0x native scroll feel; boost vertical-only from 1x up to 25x
+                            final double mult =
+                                appState.scrollSpeedMultiplier.clamp(1.0, 25.0);
                             final double extraDy =
-                                details.focalPointDelta.dy *
-                                    (effectiveSpeed - 1.0);
+                                (mult > 1.01 && details.focalPointDelta.dy != 0.0)
+                                    ? details.focalPointDelta.dy * (mult - 1.0)
+                                    : 0.0;
                             final double minTy = appState.freePaperMovement
                                 ? math.min(0.0, vpSize.height - scaledH) - 800.0
                                 : math.min(0.0, vpSize.height - scaledH) -
@@ -3556,8 +3557,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                         .clamp(vpSize.width - scaledW, 0.0)
                                         .toDouble());
 
-                            _transformController.value = m.clone()
-                              ..setTranslationRaw(nextTx, nextTy, 0.0);
+                            if ((nextTx - curTx).abs() > 0.01 ||
+                                (nextTy - curTy).abs() > 0.01) {
+                              _transformController.value = m.clone()
+                                ..setTranslationRaw(nextTx, nextTy, 0.0);
+                            }
                           } else if (details.pointerCount >= 2 &&
                               !appState.freePaperMovement) {
                             final double nextTx = scaledW <= vpSize.width

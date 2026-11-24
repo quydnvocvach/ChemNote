@@ -359,10 +359,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           ],
                         ),
                         Slider(
-                          value: state.scrollSpeedMultiplier.clamp(1.0, 10.0),
+                          value: state.scrollSpeedMultiplier.clamp(1.0, 25.0),
                           min: 1.0,
-                          max: 10.0,
-                          divisions: 18,
+                          max: 25.0,
+                          divisions: 24,
                           onChanged: (val) => state.setScrollSpeedMultiplier(val),
                         ),
                       ],

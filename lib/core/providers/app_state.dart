@@ -259,7 +259,7 @@ class AppState extends ChangeNotifier {
   }
 
   void setScrollSpeedMultiplier(double value) {
-    final clamped = value.clamp(1.0, 10.0);
+    final clamped = value.clamp(1.0, 25.0);
     if ((_scrollSpeedMultiplier - clamped).abs() < 0.01) return;
     _scrollSpeedMultiplier = clamped;
     notifyListeners();
@@ -636,7 +636,7 @@ class AppState extends ChangeNotifier {
         _scrollSpeedMultiplier =
             ((penPrefs['scrollSpeedMultiplier'] as num?)?.toDouble() ??
                     _scrollSpeedMultiplier)
-                .clamp(1.0, 10.0);
+                .clamp(1.0, 25.0);
         _foregroundSyncMinutes =
             (penPrefs['foregroundSyncMinutes'] as num?)?.toInt() ??
                 _foregroundSyncMinutes;

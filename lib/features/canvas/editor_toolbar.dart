@@ -2433,10 +2433,10 @@ class EditorSettingsDrawer extends StatelessWidget {
                     ],
                   ),
                   Slider(
-                    value: appState.scrollSpeedMultiplier.clamp(1.0, 10.0),
+                    value: appState.scrollSpeedMultiplier.clamp(1.0, 25.0),
                     min: 1.0,
-                    max: 10.0,
-                    divisions: 18,
+                    max: 25.0,
+                    divisions: 24,
                     activeColor: EditorColors.activeBlue,
                     onChanged: appState.setScrollSpeedMultiplier,
                   ),

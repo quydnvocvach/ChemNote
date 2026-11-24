@@ -160,16 +160,15 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.6.4 with APK
+      - name: Publish Release v3.6.5 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.6.4
-          name: ChemNote Pro v3.6.4 (Khóa cứng giấy khi viết bút M-Pencil 3, Zoom khi tắt Chuyển động tự do & Lướt ngang chuẩn 1×)
+          tag_name: v3.6.5
+          name: ChemNote Pro v3.6.5 (Khôi phục cảm giác lướt chuẩn 1× bản 3.4 & thanh tốc độ lướt dọc 1×–25×)
           body: |
-            ### ChemNote Pro v3.6.4 — Tinh chỉnh cảm giác viết & lướt chuẩn mực trên MatePad 11.5"S!
-            - **Khóa kép chống di chuyển giấy khi đặt bút M-Pencil 3:** Bổ sung khóa trước từ lúc bút hover gần màn hình (`_isStylusHovering`) kết hợp khóa cứng ma trận (`_lockedMatrixDuringStylus`) trên `InteractiveViewer` cuộn dọc, lật ngang và Bảng vô cực — viết bút không làm trôi trang giấy (trừ khi bật Chế độ Bút lướt).
-            - **Zoom 2 ngón mượt cả khi TẮT "Chuyển động giấy tự do":** Giữ `boundaryMargin: EdgeInsets.all(800)` cho `InteractiveViewer` (`minScale: 0.35` – `4.0`) để luôn thu phóng được 2 ngón ở mọi chế độ, trong khi vẫn giữ căn giữa và khóa biên gọn gàng khi tắt chuyển động tự do.
-            - **Chỉ tăng tốc lướt DỌC (3× gốc), giữ nguyên tốc độ lướt NGANG 1×:** Loại bỏ nhân tốc độ trên trục ngang `dx` để lướt ngang & lướt chéo tự nhiên, chuẩn xác.
+            ### ChemNote Pro v3.6.5 — Cảm giác lướt gốc chuẩn v3.4 kết hợp tùy chỉnh lướt dọc tới 25×!
+            - **Khôi phục tốc độ & cảm giác lướt chuẩn bản 3.4 (`1.0×` gốc):** Loại bỏ hệ số nhân nền `3×` để giữ đúng độ mượt, quán tính và tốc độ tự nhiên của `InteractiveViewer` khi cuộn dọc, cuộn ngang hay lướt chéo ở mức `1.0×`.
+            - **Thanh chỉnh tốc độ lướt dọc mở rộng `1.0×` → `25.0×`:** Chỉ tăng tốc độ theo chiều dọc khi kéo trên `1.0×`, giữ nguyên tốc độ lướt ngang `1×` và bảo toàn đầy đủ khả năng khóa bút M-Pencil 3 + zoom 2 ngón khi tắt Chuyển động giấy tự do.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true
