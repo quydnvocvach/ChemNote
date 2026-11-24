@@ -3786,8 +3786,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               maxScale: 4.0,
               scrollSpeedMultiplier: appState.scrollSpeedMultiplier,
               viewportSize: viewportSize,
-              contentWidth: PaperMetrics.whiteboardWidth,
-              contentHeight: PaperMetrics.whiteboardHeight,
+              contentWidth: PaperMetrics.whiteboardSize.width,
+              contentHeight: PaperMetrics.whiteboardSize.height,
               isWhiteboard: true,
               unconstrainedChild: true,
               onInteractionUpdate: () {
