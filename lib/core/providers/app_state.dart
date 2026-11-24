@@ -83,6 +83,12 @@ class AppState extends ChangeNotifier {
     0xFF7C3AED,
   ];
 
+  // Tùy chọn lướt trang & đồng bộ tiết kiệm pin (v3.5.0)
+  double _scrollSpeedMultiplier = 1.6;
+  int _foregroundSyncMinutes = 15; // 0 (thủ công), 5, 15, 45, 120
+  int _idleSyncDays = 1; // 0 (tắt), 1, 3, 5
+  bool _wifiOnlySync = true;
+
   // Chế độ Khoá lòng bàn tay (Chống tỳ tay: Bút viết, 1 ngón tay cuộn trang)
   bool _palmRejectionEnabled = true;
 
@@ -153,6 +159,10 @@ class AppState extends ChangeNotifier {
   double get lastHighlighterWidth => _lastHighlighterWidth;
   double get lastEraserRadius => _lastEraserRadius;
   List<int> get quickPenColors => List.unmodifiable(_quickPenColors);
+  double get scrollSpeedMultiplier => _scrollSpeedMultiplier;
+  int get foregroundSyncMinutes => _foregroundSyncMinutes;
+  int get idleSyncDays => _idleSyncDays;
+  bool get wifiOnlySync => _wifiOnlySync;
   bool get palmRejectionEnabled => _palmRejectionEnabled;
   bool get readOnlyMode => _readOnlyMode;
 
@@ -239,6 +249,39 @@ class AppState extends ChangeNotifier {
     }
 
     notifyListeners();
+    _persistPrefsMap();
+  }
+
+  void setScrollSpeedMultiplier(double value) {
+    final clamped = value.clamp(0.8, 3.0);
+    if ((_scrollSpeedMultiplier - clamped).abs() < 0.01) return;
+    _scrollSpeedMultiplier = clamped;
+    notifyListeners();
+    _persistPrefsMap();
+  }
+
+  void setForegroundSyncMinutes(int minutes) {
+    if (_foregroundSyncMinutes == minutes) return;
+    _foregroundSyncMinutes = minutes;
+    notifyListeners();
+    _persistPrefsMap();
+  }
+
+  void setIdleSyncDays(int days) {
+    if (_idleSyncDays == days) return;
+    _idleSyncDays = days;
+    notifyListeners();
+    _persistPrefsMap();
+  }
+
+  void setWifiOnlySync(bool value) {
+    if (_wifiOnlySync == value) return;
+    _wifiOnlySync = value;
+    notifyListeners();
+    _persistPrefsMap();
+  }
+
+  void _persistPrefsMap() {
     unawaited(
       _storage.savePenPrefs({
         'lastPenTool': _lastPenTool.name,
@@ -252,6 +295,10 @@ class AppState extends ChangeNotifier {
         'lastHighlighterWidth': _lastHighlighterWidth,
         'lastEraserRadius': _lastEraserRadius,
         'quickPenColors': _quickPenColors,
+        'scrollSpeedMultiplier': _scrollSpeedMultiplier,
+        'foregroundSyncMinutes': _foregroundSyncMinutes,
+        'idleSyncDays': _idleSyncDays,
+        'wifiOnlySync': _wifiOnlySync,
       }),
     );
   }
@@ -572,6 +619,16 @@ class AppState extends ChangeNotifier {
         if (rawColors != null && rawColors.isNotEmpty) {
           _quickPenColors = rawColors.whereType<num>().map((n) => n.toInt()).toList();
         }
+        _scrollSpeedMultiplier =
+            ((penPrefs['scrollSpeedMultiplier'] as num?)?.toDouble() ??
+                    _scrollSpeedMultiplier)
+                .clamp(0.8, 3.0);
+        _foregroundSyncMinutes =
+            (penPrefs['foregroundSyncMinutes'] as num?)?.toInt() ??
+                _foregroundSyncMinutes;
+        _idleSyncDays =
+            (penPrefs['idleSyncDays'] as num?)?.toInt() ?? _idleSyncDays;
+        _wifiOnlySync = penPrefs['wifiOnlySync'] as bool? ?? _wifiOnlySync;
       }
     } finally {
       _isLoading = false;
@@ -823,12 +880,14 @@ class AppState extends ChangeNotifier {
     String notebookId,
     SyncStatus status, {
     String? driveFileId,
+    String? drivePdfFileId,
   }) async {
     final notebook = getNotebookById(notebookId);
     if (notebook == null) return;
     final updated = notebook.copyWith(
       syncStatus: status,
       driveFileId: driveFileId ?? notebook.driveFileId,
+      drivePdfFileId: drivePdfFileId ?? notebook.drivePdfFileId,
     );
     _notebooks =
         _notebooks.map((n) => n.id == notebookId ? updated : n).toList();

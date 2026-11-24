@@ -333,6 +333,41 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     onChanged: (val) => state.setDarkMode(val),
                   ),
                   const Divider(height: 1),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.speed_outlined, size: 22),
+                            const SizedBox(width: 14),
+                            const Expanded(
+                              child: Text(
+                                'Tốc độ lướt trang',
+                                style: TextStyle(fontSize: 15),
+                              ),
+                            ),
+                            Text(
+                              '${state.scrollSpeedMultiplier.toStringAsFixed(1)}×',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: AppTheme.accentBlue,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Slider(
+                          value: state.scrollSpeedMultiplier,
+                          min: 0.8,
+                          max: 3.0,
+                          divisions: 22,
+                          onChanged: (val) => state.setScrollSpeedMultiplier(val),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 1),
                   ListTile(
                     contentPadding: const EdgeInsets.symmetric(horizontal: 4),
                     leading: const Icon(Icons.folder_open_outlined),
@@ -952,45 +987,22 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _importDocPptAsNotebook(BuildContext context) async {
     try {
-      final picked = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: const ['doc', 'docx', 'ppt', 'pptx'],
-      );
-      if (picked == null || picked.files.isEmpty || !context.mounted) return;
-      final file = picked.files.first;
-      if (file.path == null) return;
+      final result = await PdfImportService().pickAndImportDocx();
+      if (result == null || result.pages.isEmpty || !context.mounted) return;
       final appState = context.read<AppState>();
-      final savedPath = await appState.storage.saveImportedFile(
-        File(file.path!),
-        subfolder: 'attachments',
-      );
-      final ext = (file.extension ?? 'doc').toLowerCase();
-      final now = DateTime.now();
-      final page = NotePage(
-        id: const Uuid().v4(),
-        index: 0,
-        templateType: PaperTemplateType.sageRibbon,
-        attachmentElements: [
-          AttachmentElement(
-            id: const Uuid().v4(),
-            x: 80,
-            y: 120,
-            fileName: file.name,
-            filePath: savedPath,
-            fileExtension: ext,
-            fileSizeBytes: file.size,
-          ),
-        ],
-        updatedAt: now,
-      );
       final nb = await appState.createNotebook(
-        title: file.name.replaceAll(RegExp(r'\.[^.]+$'), ''),
+        title: result.suggestedTitle,
         folderId: _section == _LibrarySection.folder ? _selectedFolderId : null,
-        initialPages: [page],
+        initialPages: result.pages,
       );
       if (!context.mounted) return;
       await _openNotebook(context, nb);
-    } catch (_) {}
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Không thể nhập tài liệu Word/PPT: $e')),
+      );
+    }
   }
 
   void _showQuickAddMenu(BuildContext context) {

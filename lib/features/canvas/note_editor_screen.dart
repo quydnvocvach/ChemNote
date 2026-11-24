@@ -116,6 +116,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   bool _eyedropperActive = false;
   bool _isDrawingPointerDown = false;
   bool _isStylusDown = false;
+  bool _stylusPanMode = false;
   bool _isOverlayDragging = false;
   final Set<int> _activeTouchPointers = {};
 
@@ -409,27 +410,49 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
   }
 
+  double _totalVerticalContentHeight(Notebook notebook) {
+    double h = 18.0 + 18.0 + 44.0 + 36.0;
+    for (int i = 0; i < notebook.pages.length; i++) {
+      h += PaperMetrics.pageSize(isLandscape: notebook.pages[i].isLandscape)
+          .height;
+      if (i < notebook.pages.length - 1) h += 14.0;
+    }
+    return h;
+  }
+
+  double _pageTopOffsetY(Notebook notebook, int pageIndex) {
+    double y = 18.0;
+    final clamped = pageIndex.clamp(0, notebook.pages.length - 1);
+    for (int i = 0; i < clamped; i++) {
+      y += PaperMetrics.pageSize(isLandscape: notebook.pages[i].isLandscape)
+              .height +
+          14.0;
+    }
+    return y;
+  }
+
   void _jumpToPage(int index) {
     final appState = context.read<AppState>();
-    setState(() => _currentPageIndex = index);
+    final notebook = _getNotebook(context, listen: false);
+    if (notebook == null || notebook.pages.isEmpty) return;
+    final clampedIdx = index.clamp(0, notebook.pages.length - 1);
+    setState(() => _currentPageIndex = clampedIdx);
     if (!appState.verticalContinuousScroll &&
         _horizontalPageController.hasClients) {
       _horizontalPageController.animateToPage(
-        index,
+        clampedIdx,
         duration: const Duration(milliseconds: 240),
         curve: Curves.easeOutCubic,
       );
-    } else if (appState.verticalContinuousScroll &&
-        _verticalScrollController.hasClients) {
-      final targetOffset = index * (PaperMetrics.portraitHeight + 14.0);
-      _verticalScrollController.animateTo(
-        targetOffset.clamp(
-          0.0,
-          _verticalScrollController.position.maxScrollExtent,
-        ),
-        duration: const Duration(milliseconds: 260),
-        curve: Curves.easeOutCubic,
-      );
+    } else if (appState.verticalContinuousScroll && !notebook.isWhiteboard) {
+      final m = _transformController.value;
+      final double scale = m.getMaxScaleOnAxis().clamp(0.5, 4.0);
+      final double tx = m.getTranslation().x;
+      final double pageTopY = _pageTopOffsetY(notebook, clampedIdx);
+      final double targetTy = -(pageTopY * scale);
+      _transformController.value = Matrix4.identity()
+        ..translate(tx, targetTy)
+        ..scale(scale, scale);
     }
   }
 
@@ -526,6 +549,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         event.kind == PointerDeviceKind.invertedStylus;
     if (isStylusEvent) {
       if (!_isStylusDown) setState(() => _isStylusDown = true);
+      // When Stylus-Pan Mode is ON, M-Pencil 3 ONLY scrolls/pans and never draws!
+      if (_stylusPanMode) return;
     } else if (event.kind == PointerDeviceKind.touch) {
       _activeTouchPointers.add(event.pointer);
       if (_activeTouchPointers.length >= 2) {
@@ -594,12 +619,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         }
       });
       _persistPenPrefs();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          duration: Duration(milliseconds: 1100),
-          content: Text('Đã hút màu từ trang ghi chú'),
-        ),
-      );
       return;
     }
 
@@ -724,6 +743,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     if (_pointerDownPositions.length >= 2 ||
         context.read<AppState>().readOnlyMode ||
         _activeTool == EditorTool.panZoom) {
+      return;
+    }
+    if (_stylusPanMode &&
+        (event.kind == PointerDeviceKind.stylus ||
+            event.kind == PointerDeviceKind.invertedStylus)) {
       return;
     }
     if (!_palmFilter.shouldAccept(event)) return;
@@ -1072,13 +1096,49 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     return rawPos + (snappedVp - vpPos) / scale;
   }
 
-  /// Zero-lag 144fps swept-segment eraser: samples along [from -> to] every
-  /// `max(3.0, radius * 0.4)` px so fast swipes never miss spots, mutating only
-  /// the in-memory `_workingEraseStrokes` list and notifying CanvasPainter.
+  /// Fast AABB check for whether [stroke] could possibly intersect [box].
+  bool _strokeIntersectsBox(Stroke stroke, Rect box) {
+    if (stroke.points.isEmpty) return false;
+    double minX = stroke.points.first.x, maxX = minX;
+    double minY = stroke.points.first.y, maxY = minY;
+    for (int i = 1; i < stroke.points.length; i++) {
+      final p = stroke.points[i];
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    final pad = stroke.width * 0.5;
+    return !(maxX + pad < box.left ||
+        minX - pad > box.right ||
+        maxY + pad < box.top ||
+        minY - pad > box.bottom);
+  }
+
+  /// Zero-lag 144fps swept-segment eraser with fast AABB pre-filtering:
+  /// skips non-overlapping strokes in nanoseconds and samples along [from -> to]
+  /// every `max(3.0, radius * 0.4)` px so fast swipes never miss spots.
   void _eraseAlongSegment(NotePage page, Offset from, Offset to) {
     final working = _workingEraseStrokes ?? List<Stroke>.from(page.strokes);
     _workingEraseStrokes = working;
     final double eraserRadius = _eraserRadius.clamp(5.0, 35.0);
+    final Rect sweepBox = Rect.fromLTRB(
+      math.min(from.dx, to.dx) - eraserRadius,
+      math.min(from.dy, to.dy) - eraserRadius,
+      math.max(from.dx, to.dx) + eraserRadius,
+      math.max(from.dy, to.dy) + eraserRadius,
+    );
+
+    // Fast AABB pre-filter: if zero strokes overlap the swept box, return immediately!
+    bool anyCandidate = false;
+    for (final s in working) {
+      if (_strokeIntersectsBox(s, sweepBox)) {
+        anyCandidate = true;
+        break;
+      }
+    }
+    if (!anyCandidate) return;
+
     final double segLen = (to - from).distance;
     final double step = math.max(3.0, eraserRadius * 0.4);
     final int steps = math.max(1, (segLen / step).ceil());
@@ -1091,10 +1151,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         from.dx + (to.dx - from.dx) * t,
         from.dy + (to.dy - from.dy) * t,
       );
+      final Rect ptBox = Rect.fromCircle(center: pos, radius: eraserRadius);
       if (_eraserMode == EraserMode.stroke) {
         final beforeLen = cur.length;
         cur = cur
             .where((s) =>
+                !_strokeIntersectsBox(s, ptBox) ||
                 !StrokeEngine.hitTestStroke(s, pos, tolerance: eraserRadius))
             .toList();
         if (cur.length != beforeLen) changedAny = true;
@@ -1102,7 +1164,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         final nextStrokes = <Stroke>[];
         bool stepChanged = false;
         for (final s in cur) {
-          if (!StrokeEngine.hitTestStroke(s, pos, tolerance: eraserRadius)) {
+          if (!_strokeIntersectsBox(s, ptBox) ||
+              !StrokeEngine.hitTestStroke(s, pos, tolerance: eraserRadius)) {
             nextStrokes.add(s);
             continue;
           }
@@ -1577,11 +1640,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         await _handleImportPdf(notebook);
         break;
       case InsertMenuAction.docPpt:
-        await _pickAndInsertAttachment(
-          currentPage,
-          allowedExtensions: const ['doc', 'docx', 'ppt', 'pptx'],
-          emptyLabel: 'DOC/PPT',
-        );
+        await _handleImportDocxOrAttachment(notebook, currentPage);
         break;
     }
   }
@@ -1742,12 +1801,193 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     );
   }
 
-  Future<void> _handleImportPdf(Notebook notebook) async {
-    setState(() => _isBusyPdf = true);
+  Future<void> _handleImportDocxOrAttachment(
+    Notebook notebook,
+    NotePage currentPage,
+  ) async {
     try {
-      final result = await _pdfImportService.pickAndImportPdf(
-        startIndex: notebook.pages.length,
+      final res = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['doc', 'docx', 'ppt', 'pptx'],
       );
+      if (res == null || res.files.isEmpty || !mounted) return;
+      final picked = res.files.first;
+      final ext = (picked.extension ??
+              (picked.name.contains('.') ? picked.name.split('.').last : ''))
+          .toLowerCase();
+
+      if (ext == 'docx' && picked.path != null && File(picked.path!).existsSync()) {
+        await _runImportWithProgress(
+          title: 'Đang nhập tài liệu Word (.docx)',
+          notebook: notebook,
+          task: (onProgress) => _pdfImportService.importDocxFile(
+            File(picked.path!),
+            startIndex: notebook.pages.length,
+            onProgress: onProgress,
+          ),
+        );
+        return;
+      }
+
+      // Graceful attachment fallback for legacy binary .doc / .ppt / .pptx
+      String savedPath = picked.path ?? '';
+      if (savedPath.isNotEmpty && File(savedPath).existsSync()) {
+        savedPath = await context.read<AppState>().storage.saveImportedFile(
+              File(savedPath),
+              subfolder: 'attachments',
+            );
+      }
+      final pageSize =
+          PaperMetrics.pageSize(isLandscape: currentPage.isLandscape);
+      final attachment = AttachmentElement(
+        id: _uuid.v4(),
+        x: (pageSize.width - 260) * 0.5,
+        y: (pageSize.height - 64) * 0.35,
+        width: 260.0,
+        height: 64.0,
+        fileName: picked.name,
+        filePath: savedPath,
+        fileExtension: ext.toUpperCase(),
+        fileSizeBytes: picked.size,
+      );
+      await _commitPage(
+        currentPage.copyWith(
+          attachmentElements: [...currentPage.attachmentElements, attachment],
+        ),
+        undoSnapshot: currentPage,
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Lỗi nhập tài liệu: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _runImportWithProgress({
+    required String title,
+    required Notebook notebook,
+    required Future<PdfImportResult?> Function(PdfImportProgressCallback onProgress)
+        task,
+  }) async {
+    final progressNotifier =
+        ValueNotifier<({int current, int? total, String stage})>((
+      current: 0,
+      total: null,
+      stage: 'Đang mở tệp tài liệu...',
+    ));
+    bool dialogOpen = false;
+
+    void openDialogIfNeeded() {
+      if (dialogOpen || !mounted) return;
+      dialogOpen = true;
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogCtx) {
+          final isDark = Theme.of(dialogCtx).brightness == Brightness.dark;
+          final bg = isDark ? EditorColors.obsidianSurface : Colors.white;
+          final fg = isDark ? Colors.white : const Color(0xFF0F172A);
+          final sub = isDark ? Colors.white70 : const Color(0xFF475569);
+          return PopScope(
+            canPop: false,
+            child: AlertDialog(
+              backgroundColor: bg,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(18),
+                side: BorderSide(
+                  color: isDark ? Colors.white12 : Colors.black12,
+                ),
+              ),
+              contentPadding: const EdgeInsets.fromLTRB(22, 20, 22, 20),
+              content: ValueListenableBuilder<
+                  ({int current, int? total, String stage})>(
+                valueListenable: progressNotifier,
+                builder: (_, state, __) {
+                  final double? ratio = (state.total != null && state.total! > 0)
+                      ? (state.current / state.total!).clamp(0.0, 1.0)
+                      : null;
+                  return SizedBox(
+                    width: 300,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.description_outlined,
+                              color: EditorColors.activeBlue,
+                              size: 22,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                title,
+                                style: TextStyle(
+                                  color: fg,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            if (ratio != null)
+                              Text(
+                                '${(ratio * 100).round()}%',
+                                style: const TextStyle(
+                                  color: EditorColors.activeBlue,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 14),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: LinearProgressIndicator(
+                            value: ratio,
+                            minHeight: 7,
+                            backgroundColor: isDark
+                                ? Colors.white12
+                                : const Color(0xFFE2E8F0),
+                            valueColor: const AlwaysStoppedAnimation<Color>(
+                              EditorColors.activeBlue,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          state.stage,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: sub, fontSize: 12.5),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          );
+        },
+      );
+    }
+
+    void closeDialog() {
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+    }
+
+    try {
+      final result = await task((current, total, stage) {
+        openDialogIfNeeded();
+        progressNotifier.value = (current: current, total: total, stage: stage);
+      });
+      closeDialog();
       if (result == null || !mounted) return;
 
       final firstNewIndex = notebook.pages.length;
@@ -1768,14 +2008,27 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         );
       }
     } catch (e) {
+      closeDialog();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Lỗi nhập PDF: $e')),
+          SnackBar(content: Text('Lỗi nhập tài liệu: $e')),
         );
       }
     } finally {
-      if (mounted) setState(() => _isBusyPdf = false);
+      closeDialog();
+      progressNotifier.dispose();
     }
+  }
+
+  Future<void> _handleImportPdf(Notebook notebook) async {
+    await _runImportWithProgress(
+      title: 'Đang nhập tệp PDF',
+      notebook: notebook,
+      task: (onProgress) => _pdfImportService.pickAndImportPdf(
+        startIndex: notebook.pages.length,
+        onProgress: onProgress,
+      ),
+    );
   }
 
   Future<void> _handleExportPdf(Notebook notebook) async {
@@ -2021,12 +2274,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           _pullOverscroll = 0.0;
           _currentPageIndex = notebook.pages.length;
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            duration: Duration(milliseconds: 1200),
-            content: Text('Đã thêm trang mới'),
-          ),
-        );
       }
     } finally {
       _isAddingPullPage = false;
@@ -2596,15 +2843,22 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         ? appState.openNotebooks
         : [notebook];
     final currentIdx = _currentPageIndex.clamp(0, notebook.pages.length - 1);
-    // Unified viewport pan/zoom gating (Items 4 & 6):
-    // - Locked while dragging an overlay, while M-Pencil 3 stylus is touching, or during 1-finger drawing when palm lock is OFF
-    // - Always unlocked for 2-finger pinch-zoom & 2-finger pan, and for 1-finger scroll when palm lock is ON
+    // Unified viewport pan/zoom gating (v3.5.0):
+    // - When _stylusPanMode is ON: M-Pencil 3 ONLY scrolls/pans and never draws.
+    // - When _stylusPanMode is OFF: M-Pencil 3 NEVER scrolls/pans (strictly draws/uses active tool, including Study Tape!).
+    // - When Palm Lock is ON: 1 finger scrolls, 2 fingers zoom/pan.
+    // - When Palm Lock is OFF: 1 finger writes, 2 fingers immediately cancel stroke & zoom/pan.
     final bool allowZoomPan = !_isOverlayDragging &&
-        !_isStylusDown &&
-        (_activeTouchPointers.length >= 2 ||
-            appState.readOnlyMode ||
-            (appState.palmRejectionEnabled && !_isDrawingPointerDown) ||
-            (!_isDrawingPointerDown && _activeTool == EditorTool.panZoom));
+        (_stylusPanMode
+            ? (_isStylusDown || _activeTouchPointers.isNotEmpty)
+            : (!_isStylusDown &&
+                (_activeTouchPointers.length >= 2 ||
+                    appState.readOnlyMode ||
+                    (appState.palmRejectionEnabled &&
+                        !_isDrawingPointerDown &&
+                        _activeTouchPointers.isNotEmpty) ||
+                    (!_isDrawingPointerDown &&
+                        _activeTool == EditorTool.panZoom))));
 
     return Scaffold(
       key: _scaffoldKey,
@@ -2706,6 +2960,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             zoomWindowEnabled: _zoomWindowEnabled,
             rulerVisible: _rulerVisible,
             palmRejectionEnabled: appState.palmRejectionEnabled,
+            stylusPanMode: _stylusPanMode,
             isRecordingAudio: _isRecordingAudio,
             onUndo: () => _undo(currentPage),
             onRedo: () => _redo(currentPage),
@@ -2854,16 +3109,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             onTogglePalmRejection: () {
               appState.togglePalmRejection();
               _palmFilter.stylusOnlyMode = appState.palmRejectionEnabled;
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  duration: const Duration(milliseconds: 1400),
-                  content: Text(
-                    appState.palmRejectionEnabled
-                        ? 'Khoá lòng bàn tay: BẬT (Bút M-Pencil 3 viết · 1 ngón tay cuộn trang)'
-                        : 'Khoá lòng bàn tay: TẮT (Cả bút và ngón tay đều viết)',
-                  ),
-                ),
-              );
+            },
+            onToggleStylusPan: () {
+              setState(() => _stylusPanMode = !_stylusPanMode);
             },
             onToggleAudioRecording: () => _toggleAudioRecording(currentPage),
             onSelectColor: (c) {
@@ -2944,15 +3192,25 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 return Listener(
                   behavior: HitTestBehavior.translucent,
                   onPointerDown: (e) {
-                    if (e.kind != PointerDeviceKind.touch) return;
-                    if (_tapTouchStarts.isEmpty) {
-                      _tapTouchStartTime = DateTime.now();
-                      _tapMaxTouchCount = 0;
-                      _tapMovedTooFar = false;
+                    if (e.kind == PointerDeviceKind.touch) {
+                      final prevCount = _activeTouchPointers.length;
+                      _activeTouchPointers.add(e.pointer);
+                      if (_activeTouchPointers.length >= 2) {
+                        _cancelActiveGesture();
+                      }
+                      if (prevCount == 0 ||
+                          (_activeTouchPointers.length >= 2 && prevCount < 2)) {
+                        setState(() {});
+                      }
+                      if (_tapTouchStarts.isEmpty) {
+                        _tapTouchStartTime = DateTime.now();
+                        _tapMaxTouchCount = 0;
+                        _tapMovedTooFar = false;
+                      }
+                      _tapTouchStarts[e.pointer] = e.position;
+                      _tapMaxTouchCount =
+                          math.max(_tapMaxTouchCount, _tapTouchStarts.length);
                     }
-                    _tapTouchStarts[e.pointer] = e.position;
-                    _tapMaxTouchCount =
-                        math.max(_tapMaxTouchCount, _tapTouchStarts.length);
                   },
                   onPointerMove: (e) {
                     if (e.kind != PointerDeviceKind.touch || _tapMovedTooFar) {
@@ -2965,6 +3223,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                   },
                   onPointerUp: (e) {
                     if (e.kind != PointerDeviceKind.touch) return;
+                    _activeTouchPointers.remove(e.pointer);
+                    if (_activeTouchPointers.isEmpty) setState(() {});
                     _tapTouchStarts.remove(e.pointer);
                     if (_tapTouchStarts.isEmpty && _tapTouchStartTime != null) {
                       final elapsed = DateTime.now()
@@ -2981,30 +3241,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                           maxFingers >= 2) {
                         if (maxFingers == 2) {
                           _undo(currentPage);
-                          ScaffoldMessenger.of(context)
-                            ..hideCurrentSnackBar()
-                            ..showSnackBar(
-                              const SnackBar(
-                                duration: Duration(milliseconds: 700),
-                                content: Text('Hoàn tác'),
-                              ),
-                            );
                         } else {
                           _redo(currentPage);
-                          ScaffoldMessenger.of(context)
-                            ..hideCurrentSnackBar()
-                            ..showSnackBar(
-                              const SnackBar(
-                                duration: Duration(milliseconds: 700),
-                                content: Text('Làm lại'),
-                              ),
-                            );
                         }
                       }
                     }
                   },
                   onPointerCancel: (e) {
                     if (e.kind != PointerDeviceKind.touch) return;
+                    _activeTouchPointers.remove(e.pointer);
+                    if (_activeTouchPointers.isEmpty) setState(() {});
                     _tapTouchStarts.remove(e.pointer);
                     if (_tapTouchStarts.isEmpty) {
                       _tapTouchStartTime = null;
@@ -3032,8 +3278,30 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         boundaryMargin: const EdgeInsets.all(200),
                         panEnabled: allowZoomPan,
                         scaleEnabled: allowZoomPan,
-                        onInteractionUpdate: (_) =>
-                            _updatePullToAddProgress(notebook, vpSize),
+                        onInteractionUpdate: (details) {
+                          // Apply user's scrollSpeedMultiplier (0.8x..3.0x) to 1-finger vertical pan
+                          final mult = appState.scrollSpeedMultiplier;
+                          if (details.pointerCount == 1 &&
+                              (mult - 1.0).abs() > 0.02 &&
+                              details.focalPointDelta.dy != 0.0) {
+                            final extraDy =
+                                details.focalPointDelta.dy * (mult - 1.0);
+                            final m = _transformController.value.clone();
+                            final scale = m.getMaxScaleOnAxis().clamp(0.5, 4.0);
+                            final tx = m.getTranslation().x;
+                            final curTy = m.getTranslation().y;
+                            final totalH = _totalVerticalContentHeight(notebook);
+                            final minTy = math.min(
+                              0.0,
+                              vpSize.height - totalH * scale - 160.0,
+                            );
+                            final nextTy = (curTy + extraDy).clamp(minTy, 200.0);
+                            _transformController.value = Matrix4.identity()
+                              ..translate(tx, nextTy)
+                              ..scale(scale, scale);
+                          }
+                          _updatePullToAddProgress(notebook, vpSize);
+                        },
                         onInteractionEnd: (_) =>
                             _finishPullToAddIfReady(notebook),
                         child: _buildVerticalContinuousPages(notebook),
@@ -3216,44 +3484,112 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                             },
                             onRemovePreset: (preset) {
                               appState.toggleStarPen(preset);
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  duration: Duration(milliseconds: 1000),
-                                  content: Text(
-                                    'Đã bỏ ghim bút khỏi thanh ưa thích',
-                                  ),
-                                ),
-                              );
                             },
                           ),
                         ),
                       ),
 
-                // Subtle Floating Page Counter Badge (top-right)
-                Positioned(
-                  top: 10,
-                  right: 14,
-                  child: GestureDetector(
-                    onTap: () => _openPageGridModal(notebook),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: EditorColors.obsidianSurface.withAlpha(210),
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(color: Colors.white12),
-                      ),
-                      child: Text(
-                        '${currentIdx + 1} / ${notebook.pages.length}',
-                        style: const TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.white70,
+                // Draggable Right-Side Page Number Pill Fast-Scrollbar (tap = Page Grid, drag = scrub pages!)
+                if (!currentPage.isInfiniteWhiteboard && !notebook.isWhiteboard)
+                  () {
+                    final int pageCount = math.max(1, notebook.pages.length);
+                    final double trackTop = 14.0;
+                    final double trackHeight =
+                        math.max(80.0, vpSize.height - 64.0);
+                    final double frac = pageCount <= 1
+                        ? 0.0
+                        : (currentIdx / (pageCount - 1)).clamp(0.0, 1.0);
+                    final double thumbTop = trackTop + frac * trackHeight;
+
+                    void scrubToDy(double localDy) {
+                      if (pageCount <= 1) return;
+                      final double nextFrac =
+                          ((localDy - trackTop) / trackHeight).clamp(0.0, 1.0);
+                      final int targetPage =
+                          (nextFrac * (pageCount - 1)).round();
+                      if (appState.verticalContinuousScroll) {
+                        final m = _transformController.value;
+                        final scale = m.getMaxScaleOnAxis().clamp(0.5, 4.0);
+                        final tx = m.getTranslation().x;
+                        final maxScrollY = math.max(
+                          0.0,
+                          _totalVerticalContentHeight(notebook) -
+                              vpSize.height / scale,
+                        );
+                        final targetTy = -(nextFrac * maxScrollY * scale);
+                        _transformController.value = Matrix4.identity()
+                          ..translate(tx, targetTy)
+                          ..scale(scale, scale);
+                        if (_currentPageIndex != targetPage) {
+                          setState(() => _currentPageIndex = targetPage);
+                        }
+                      } else if (_currentPageIndex != targetPage) {
+                        _jumpToPage(targetPage);
+                      }
+                    }
+
+                    return Positioned(
+                      top: thumbTop,
+                      right: 10,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => _openPageGridModal(notebook),
+                        onVerticalDragStart: (_) =>
+                            setState(() => _isOverlayDragging = true),
+                        onVerticalDragUpdate: (d) {
+                          final box = _viewportStackKey.currentContext
+                              ?.findRenderObject() as RenderBox?;
+                          if (box != null) {
+                            final local = box.globalToLocal(d.globalPosition);
+                            scrubToDy(local.dy);
+                          }
+                        },
+                        onVerticalDragEnd: (_) =>
+                            setState(() => _isOverlayDragging = false),
+                        onVerticalDragCancel: () =>
+                            setState(() => _isOverlayDragging = false),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: EditorColors.obsidianSurface.withAlpha(225),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                              color: EditorColors.activeBlue.withAlpha(110),
+                            ),
+                            boxShadow: const [
+                              BoxShadow(
+                                color: Colors.black38,
+                                blurRadius: 6,
+                                offset: Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.unfold_more_rounded,
+                                size: 13,
+                                color: EditorColors.activeBlue,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                'Trang ${currentIdx + 1} / $pageCount',
+                                style: const TextStyle(
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                  ),
-                ),
+                    );
+                  }(),
 
                 // Pro Lasso Floating Context Menu
                 if (_lassoController.hasSelection)
@@ -3272,12 +3608,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         },
                         onCopy: () {
                           _lassoController.copySelection(currentPage);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              duration: Duration(milliseconds: 900),
-                              content: Text('Đã sao chép vùng chọn'),
-                            ),
-                          );
                         },
                         onPaste: () {
                           final updated = _lassoController.pasteClipboard(
@@ -3891,29 +4221,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                       page.copyWith(imageElements: updated),
                                       undoSnapshot: page,
                                     );
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        duration: Duration(milliseconds: 1000),
-                                        content: Text('Đã cắt hình ảnh'),
-                                      ),
-                                    );
                                   },
                                   onAddToStickers: () {
                                     context
                                         .read<AppState>()
                                         .addCustomSticker(targetImg.filePath);
-                                    if (mounted) {
-                                      ScaffoldMessenger.of(context)
-                                          .showSnackBar(
-                                        const SnackBar(
-                                          duration:
-                                              Duration(milliseconds: 1200),
-                                          content: Text(
-                                            'Đã lưu vào bộ Hình dán của bạn',
-                                          ),
-                                        ),
-                                      );
-                                    }
                                   },
                                   onDelete: () {
                                     _selectedImageId = null;
@@ -4715,301 +5027,313 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         final double w = draggingThis ? drag.w : img.width;
         final double h = draggingThis ? drag.h : img.height;
 
+        // Expand Positioned bounds by 24px on all 4 sides when selected so all 8
+        // 48x48 px stylus-friendly circular handles sit 100% INSIDE hit-test bounds!
+        final double pad = isSelected ? 24.0 : 0.0;
         return Positioned(
-          left: x,
-          top: y,
+          left: x - pad,
+          top: y - pad,
+          width: w + pad * 2,
+          height: h + pad * 2,
           child: IgnorePointer(
             ignoring: !interactive,
             child: Transform.rotate(
               angle: img.rotation,
-              child: GestureDetector(
-                onTap: () => setState(() {
-                  _selectedImageId = img.id;
-                  _croppingImageId = null;
-                  _cropDraftNotifier.value = null;
-                  _selectedTextId = null;
-                  _selectedStencilId = null;
-                }),
-                onPanStart: (_) => beginDrag(),
-                onPanUpdate: (d) => updateDrag(
-                  (c) => (
-                    id: c.id,
-                    x: c.x + d.delta.dx,
-                    y: c.y + d.delta.dy,
-                    w: c.w,
-                    h: c.h,
-                  ),
-                ),
-                onPanEnd: (_) => endDrag(),
-                onPanCancel: endDrag,
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    // Selected image renders ONLY here (CanvasPainter hides hiddenImageId -> ZERO double ghosting!)
-                    RepaintBoundary(
-                      child: Container(
-                        width: w,
-                        height: h,
-                        decoration: BoxDecoration(
-                          border: isSelected
-                              ? Border.all(
-                                  color: EditorColors.activeBlue,
-                                  width: 2,
-                                )
-                              : null,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  // Image body drag area (placed BELOW the 8 resize handles in Stack!)
+                  Positioned(
+                    left: pad,
+                    top: pad,
+                    width: w,
+                    height: h,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => setState(() {
+                        _selectedImageId = img.id;
+                        _croppingImageId = null;
+                        _cropDraftNotifier.value = null;
+                        _selectedTextId = null;
+                        _selectedStencilId = null;
+                      }),
+                      onPanStart: (_) => beginDrag(),
+                      onPanUpdate: (d) => updateDrag(
+                        (c) => (
+                          id: c.id,
+                          x: c.x + d.delta.dx,
+                          y: c.y + d.delta.dy,
+                          w: c.w,
+                          h: c.h,
                         ),
-                        child: isSelected
-                            ? (cachedUiImg != null
-                                ? CustomPaint(
-                                    painter: _SelectedImagePainter(
-                                      image: cachedUiImg,
-                                      cropLeft: img.cropLeft,
-                                      cropTop: img.cropTop,
-                                      cropRight: img.cropRight,
-                                      cropBottom: img.cropBottom,
-                                      freehandClipPath: img.freehandClipPath,
-                                    ),
+                      ),
+                      onPanEnd: (_) => endDrag(),
+                      onPanCancel: endDrag,
+                      child: RepaintBoundary(
+                        child: Container(
+                          width: w,
+                          height: h,
+                          decoration: BoxDecoration(
+                            border: isSelected
+                                ? Border.all(
+                                    color: EditorColors.activeBlue,
+                                    width: 2,
                                   )
-                                : (file.existsSync()
-                                    ? Image.file(
-                                        file,
-                                        fit: BoxFit.contain,
-                                        filterQuality: FilterQuality.medium,
-                                        gaplessPlayback: true,
-                                      )
-                                    : Container(
-                                        color: Colors.grey.shade200,
-                                        alignment: Alignment.center,
-                                        child: const Icon(
-                                          Icons.broken_image_outlined,
-                                          size: 32,
-                                        ),
-                                      )))
-                            : (cachedUiImg != null
-                                ? const SizedBox.expand()
-                                : (file.existsSync()
-                                    ? Image.file(
-                                        file,
-                                        fit: BoxFit.contain,
-                                        filterQuality: FilterQuality.medium,
-                                        gaplessPlayback: true,
-                                      )
-                                    : const SizedBox.expand())),
+                                : null,
+                          ),
+                          child: isSelected
+                              ? (cachedUiImg != null
+                                  ? CustomPaint(
+                                      painter: _SelectedImagePainter(
+                                        image: cachedUiImg,
+                                        cropLeft: img.cropLeft,
+                                        cropTop: img.cropTop,
+                                        cropRight: img.cropRight,
+                                        cropBottom: img.cropBottom,
+                                        freehandClipPath: img.freehandClipPath,
+                                      ),
+                                    )
+                                  : (file.existsSync()
+                                      ? Image.file(
+                                          file,
+                                          fit: BoxFit.contain,
+                                          filterQuality: FilterQuality.medium,
+                                          gaplessPlayback: true,
+                                        )
+                                      : Container(
+                                          color: Colors.grey.shade200,
+                                          alignment: Alignment.center,
+                                          child: const Icon(
+                                            Icons.broken_image_outlined,
+                                            size: 32,
+                                          ),
+                                        )))
+                              : (cachedUiImg != null
+                                  ? const SizedBox.expand()
+                                  : (file.existsSync()
+                                      ? Image.file(
+                                          file,
+                                          fit: BoxFit.contain,
+                                          filterQuality: FilterQuality.medium,
+                                          gaplessPlayback: true,
+                                        )
+                                      : const SizedBox.expand())),
+                        ),
                       ),
                     ),
-                    if (isSelected) ...[
-                      // Rotate handle (40x40 opaque hitbox centered at bottom stem)
-                      Positioned(
-                        left: w * 0.5 - 20,
-                        bottom: -42,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: () {
-                            final updated = page.imageElements
-                                .map((e) => e.id == img.id
-                                    ? e.copyWith(
-                                        rotation: e.rotation + math.pi / 12,
-                                      )
-                                    : e)
-                                .toList();
-                            _commitPage(
-                              page.copyWith(imageElements: updated),
-                              undoSnapshot: page,
-                            );
-                          },
-                          child: SizedBox(
-                            width: 40,
-                            height: 40,
-                            child: Center(
-                              child: Container(
-                                width: 24,
-                                height: 24,
-                                decoration: const BoxDecoration(
-                                  color: EditorColors.activeBlue,
-                                  shape: BoxShape.circle,
-                                ),
-                                child: const Icon(
-                                  Icons.rotate_right_rounded,
-                                  size: 14,
-                                  color: Colors.white,
-                                ),
+                  ),
+                  if (isSelected) ...[
+                    // Rotate handle (bottom-center stem)
+                    Positioned(
+                      left: pad + w * 0.5 - 24,
+                      bottom: -26,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          final updated = page.imageElements
+                              .map((e) => e.id == img.id
+                                  ? e.copyWith(
+                                      rotation: e.rotation + math.pi / 12,
+                                    )
+                                  : e)
+                              .toList();
+                          _commitPage(
+                            page.copyWith(imageElements: updated),
+                            undoSnapshot: page,
+                          );
+                        },
+                        child: SizedBox(
+                          width: 48,
+                          height: 48,
+                          child: Center(
+                            child: Container(
+                              width: 24,
+                              height: 24,
+                              decoration: const BoxDecoration(
+                                color: EditorColors.activeBlue,
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.rotate_right_rounded,
+                                size: 14,
+                                color: Colors.white,
                               ),
                             ),
                           ),
                         ),
                       ),
-                      // 8 Resize Handles with 40x40 px stylus-friendly opaque hitboxes!
-                      // Top-Left
-                      Positioned(
-                        left: -20,
-                        top: -20,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onPanStart: (_) => beginDrag(),
-                          onPanUpdate: (d) => updateDrag((c) {
-                            final nw = math.max(32.0, c.w - d.delta.dx);
-                            final nh = math.max(32.0, c.h - d.delta.dy);
-                            return (
-                              id: c.id,
-                              x: c.x + (c.w - nw),
-                              y: c.y + (c.h - nh),
-                              w: nw,
-                              h: nh,
-                            );
-                          }),
-                          onPanEnd: (_) => endDrag(),
-                          onPanCancel: endDrag,
-                          child: _buildResizeHandle(),
-                        ),
+                    ),
+                    // 8 Resize Handles — 100% INSIDE the 24px-padded bounds, ABOVE body drag!
+                    // Top-Left
+                    Positioned(
+                      left: 0,
+                      top: 0,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) => beginDrag(),
+                        onPanUpdate: (d) => updateDrag((c) {
+                          final nw = math.max(32.0, c.w - d.delta.dx);
+                          final nh = math.max(32.0, c.h - d.delta.dy);
+                          return (
+                            id: c.id,
+                            x: c.x + (c.w - nw),
+                            y: c.y + (c.h - nh),
+                            w: nw,
+                            h: nh,
+                          );
+                        }),
+                        onPanEnd: (_) => endDrag(),
+                        onPanCancel: endDrag,
+                        child: _buildResizeHandle(),
                       ),
-                      // Top-Center
-                      Positioned(
-                        left: w * 0.5 - 20,
-                        top: -20,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onPanStart: (_) => beginDrag(),
-                          onPanUpdate: (d) => updateDrag((c) {
-                            final nh = math.max(32.0, c.h - d.delta.dy);
-                            return (
+                    ),
+                    // Top-Center
+                    Positioned(
+                      left: pad + w * 0.5 - 24,
+                      top: 0,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) => beginDrag(),
+                        onPanUpdate: (d) => updateDrag((c) {
+                          final nh = math.max(32.0, c.h - d.delta.dy);
+                          return (
+                            id: c.id,
+                            x: c.x,
+                            y: c.y + (c.h - nh),
+                            w: c.w,
+                            h: nh,
+                          );
+                        }),
+                        onPanEnd: (_) => endDrag(),
+                        onPanCancel: endDrag,
+                        child: _buildResizeHandle(),
+                      ),
+                    ),
+                    // Top-Right
+                    Positioned(
+                      right: 0,
+                      top: 0,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) => beginDrag(),
+                        onPanUpdate: (d) => updateDrag((c) {
+                          final nh = math.max(32.0, c.h - d.delta.dy);
+                          return (
+                            id: c.id,
+                            x: c.x,
+                            y: c.y + (c.h - nh),
+                            w: math.max(32.0, c.w + d.delta.dx),
+                            h: nh,
+                          );
+                        }),
+                        onPanEnd: (_) => endDrag(),
+                        onPanCancel: endDrag,
+                        child: _buildResizeHandle(),
+                      ),
+                    ),
+                    // Middle-Left
+                    Positioned(
+                      left: 0,
+                      top: pad + h * 0.5 - 24,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) => beginDrag(),
+                        onPanUpdate: (d) => updateDrag((c) {
+                          final nw = math.max(32.0, c.w - d.delta.dx);
+                          return (
+                            id: c.id,
+                            x: c.x + (c.w - nw),
+                            y: c.y,
+                            w: nw,
+                            h: c.h,
+                          );
+                        }),
+                        onPanEnd: (_) => endDrag(),
+                        onPanCancel: endDrag,
+                        child: _buildResizeHandle(),
+                      ),
+                    ),
+                    // Middle-Right
+                    Positioned(
+                      right: 0,
+                      top: pad + h * 0.5 - 24,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) => beginDrag(),
+                        onPanUpdate: (d) => updateDrag((c) => (
                               id: c.id,
                               x: c.x,
-                              y: c.y + (c.h - nh),
-                              w: c.w,
-                              h: nh,
-                            );
-                          }),
-                          onPanEnd: (_) => endDrag(),
-                          onPanCancel: endDrag,
-                          child: _buildResizeHandle(),
-                        ),
-                      ),
-                      // Top-Right
-                      Positioned(
-                        right: -20,
-                        top: -20,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onPanStart: (_) => beginDrag(),
-                          onPanUpdate: (d) => updateDrag((c) {
-                            final nh = math.max(32.0, c.h - d.delta.dy);
-                            return (
-                              id: c.id,
-                              x: c.x,
-                              y: c.y + (c.h - nh),
+                              y: c.y,
                               w: math.max(32.0, c.w + d.delta.dx),
-                              h: nh,
-                            );
-                          }),
-                          onPanEnd: (_) => endDrag(),
-                          onPanCancel: endDrag,
-                          child: _buildResizeHandle(),
-                        ),
-                      ),
-                      // Middle-Left
-                      Positioned(
-                        left: -20,
-                        top: h * 0.5 - 20,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onPanStart: (_) => beginDrag(),
-                          onPanUpdate: (d) => updateDrag((c) {
-                            final nw = math.max(32.0, c.w - d.delta.dx);
-                            return (
-                              id: c.id,
-                              x: c.x + (c.w - nw),
-                              y: c.y,
-                              w: nw,
                               h: c.h,
-                            );
-                          }),
-                          onPanEnd: (_) => endDrag(),
-                          onPanCancel: endDrag,
-                          child: _buildResizeHandle(),
-                        ),
+                            )),
+                        onPanEnd: (_) => endDrag(),
+                        onPanCancel: endDrag,
+                        child: _buildResizeHandle(),
                       ),
-                      // Middle-Right
-                      Positioned(
-                        right: -20,
-                        top: h * 0.5 - 20,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onPanStart: (_) => beginDrag(),
-                          onPanUpdate: (d) => updateDrag((c) => (
-                                id: c.id,
-                                x: c.x,
-                                y: c.y,
-                                w: math.max(32.0, c.w + d.delta.dx),
-                                h: c.h,
-                              )),
-                          onPanEnd: (_) => endDrag(),
-                          onPanCancel: endDrag,
-                          child: _buildResizeHandle(),
-                        ),
+                    ),
+                    // Bottom-Left
+                    Positioned(
+                      left: 0,
+                      bottom: 0,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) => beginDrag(),
+                        onPanUpdate: (d) => updateDrag((c) {
+                          final nw = math.max(32.0, c.w - d.delta.dx);
+                          return (
+                            id: c.id,
+                            x: c.x + (c.w - nw),
+                            y: c.y,
+                            w: nw,
+                            h: math.max(32.0, c.h + d.delta.dy),
+                          );
+                        }),
+                        onPanEnd: (_) => endDrag(),
+                        onPanCancel: endDrag,
+                        child: _buildResizeHandle(),
                       ),
-                      // Bottom-Left
-                      Positioned(
-                        left: -20,
-                        bottom: -20,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onPanStart: (_) => beginDrag(),
-                          onPanUpdate: (d) => updateDrag((c) {
-                            final nw = math.max(32.0, c.w - d.delta.dx);
-                            return (
+                    ),
+                    // Bottom-Center
+                    Positioned(
+                      left: pad + w * 0.5 - 24,
+                      bottom: 0,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) => beginDrag(),
+                        onPanUpdate: (d) => updateDrag((c) => (
                               id: c.id,
-                              x: c.x + (c.w - nw),
+                              x: c.x,
                               y: c.y,
-                              w: nw,
+                              w: c.w,
                               h: math.max(32.0, c.h + d.delta.dy),
-                            );
-                          }),
-                          onPanEnd: (_) => endDrag(),
-                          onPanCancel: endDrag,
-                          child: _buildResizeHandle(),
-                        ),
+                            )),
+                        onPanEnd: (_) => endDrag(),
+                        onPanCancel: endDrag,
+                        child: _buildResizeHandle(),
                       ),
-                      // Bottom-Center
-                      Positioned(
-                        left: w * 0.5 - 20,
-                        bottom: -20,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onPanStart: (_) => beginDrag(),
-                          onPanUpdate: (d) => updateDrag((c) => (
-                                id: c.id,
-                                x: c.x,
-                                y: c.y,
-                                w: c.w,
-                                h: math.max(32.0, c.h + d.delta.dy),
-                              )),
-                          onPanEnd: (_) => endDrag(),
-                          onPanCancel: endDrag,
-                          child: _buildResizeHandle(),
-                        ),
+                    ),
+                    // Bottom-Right
+                    Positioned(
+                      right: 0,
+                      bottom: 0,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) => beginDrag(),
+                        onPanUpdate: (d) => updateDrag((c) => (
+                              id: c.id,
+                              x: c.x,
+                              y: c.y,
+                              w: math.max(32.0, c.w + d.delta.dx),
+                              h: math.max(32.0, c.h + d.delta.dy),
+                            )),
+                        onPanEnd: (_) => endDrag(),
+                        onPanCancel: endDrag,
+                        child: _buildResizeHandle(),
                       ),
-                      // Bottom-Right
-                      Positioned(
-                        right: -20,
-                        bottom: -20,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onPanStart: (_) => beginDrag(),
-                          onPanUpdate: (d) => updateDrag((c) => (
-                                id: c.id,
-                                x: c.x,
-                                y: c.y,
-                                w: math.max(32.0, c.w + d.delta.dx),
-                                h: math.max(32.0, c.h + d.delta.dy),
-                              )),
-                          onPanEnd: (_) => endDrag(),
-                          onPanCancel: endDrag,
-                          child: _buildResizeHandle(),
-                        ),
-                      ),
-                    ],
+                    ),
                   ],
-                ),
+                ],
               ),
             ),
           ),
@@ -5385,9 +5709,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
     final collapsedLabel = note.text.trim().isNotEmpty
         ? note.text.trim().split('\n').first
-        : (note.strokes.isNotEmpty
-            ? 'Giấy nhớ (${note.strokes.length} nét)'
-            : 'Giấy nhớ dán');
+        : 'Ghi chú';
 
     return ValueListenableBuilder<
         ({String id, double x, double y, double w, double h})?>(
@@ -5406,12 +5728,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             width: note.isCollapsed ? math.min(w, 210.0) : w,
             height: note.isCollapsed ? 40.0 : h,
             decoration: BoxDecoration(
-              color: bgColor,
+              color: note.isTransparent ? bgColor.withAlpha(89) : bgColor,
               borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: Colors.black.withAlpha(28)),
+              border: Border.all(
+                color: Colors.black.withAlpha(note.isTransparent ? 45 : 28),
+              ),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withAlpha(42),
+                  color: Colors.black.withAlpha(note.isTransparent ? 20 : 42),
                   blurRadius: 10,
                   offset: const Offset(0, 4),
                 ),
@@ -5496,6 +5820,30 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                   ),
                                 ),
                               const Spacer(),
+                              if (!readOnly)
+                                Tooltip(
+                                  message: note.isTransparent
+                                      ? 'Tắt nền trong suốt'
+                                      : 'Nền trong suốt',
+                                  child: InkWell(
+                                    onTap: () => commitSticky(
+                                      (s) => s.copyWith(
+                                        isTransparent: !s.isTransparent,
+                                        updatedAt: DateTime.now(),
+                                      ),
+                                    ),
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(3.5),
+                                      child: Icon(
+                                        Icons.opacity_outlined,
+                                        size: 15,
+                                        color: note.isTransparent
+                                            ? EditorColors.activeBlue
+                                            : const Color(0xFF334155),
+                                      ),
+                                    ),
+                                  ),
+                                ),
                               if (!readOnly)
                                 Tooltip(
                                   message: 'Tiêu đề',
@@ -5792,11 +6140,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     );
   }
 
-  /// Sleek 14x14 visual resize dot centered inside a 40x40 stylus-friendly hitbox.
+  /// Sleek 14x14 visual resize dot centered inside a 48x48 stylus-friendly hitbox.
   Widget _buildResizeHandle() {
     return SizedBox(
-      width: 40,
-      height: 40,
+      width: 48,
+      height: 48,
       child: Center(
         child: Container(
           width: 14,

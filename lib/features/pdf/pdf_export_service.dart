@@ -1218,32 +1218,32 @@ class PdfExportService {
     final top = (note.y - originY) * scaleY;
 
     if (note.isCollapsed) {
-      final fallbackLabel = note.strokes.isNotEmpty
-          ? 'Ghi chú viết tay (${note.strokes.length} nét)'
-          : 'Ghi chú dán';
       final firstLine = note.text
           .trim()
           .split('\n')
-          .firstWhere((l) => l.trim().isNotEmpty, orElse: () => fallbackLabel);
+          .firstWhere((l) => l.trim().isNotEmpty, orElse: () => 'Ghi chú');
       final pillW = math.max(96.0, note.width * scaleX);
       return pw.Positioned(
         left: left,
         top: top,
-        child: pw.Container(
-          width: pillW,
-          padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-          decoration: pw.BoxDecoration(
-            color: baseColor,
-            borderRadius: const pw.BorderRadius.all(pw.Radius.circular(8)),
-            border: pw.Border.all(color: borderColor, width: 0.8),
-          ),
-          child: pw.Text(
-            firstLine,
-            maxLines: 1,
-            style: pw.TextStyle(
-              fontSize: 8,
-              fontWeight: pw.FontWeight.bold,
-              color: inkColor,
+        child: pw.Opacity(
+          opacity: note.isTransparent ? 0.45 : 1.0,
+          child: pw.Container(
+            width: pillW,
+            padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+            decoration: pw.BoxDecoration(
+              color: baseColor,
+              borderRadius: const pw.BorderRadius.all(pw.Radius.circular(8)),
+              border: pw.Border.all(color: borderColor, width: 0.8),
+            ),
+            child: pw.Text(
+              firstLine,
+              maxLines: 1,
+              style: pw.TextStyle(
+                fontSize: 8,
+                fontWeight: pw.FontWeight.bold,
+                color: inkColor,
+              ),
             ),
           ),
         ),
@@ -1262,75 +1262,78 @@ class PdfExportService {
     return pw.Positioned(
       left: left,
       top: top,
-      child: pw.Container(
-        width: cardW,
-        height: cardH,
-        decoration: pw.BoxDecoration(
-          color: baseColor,
-          borderRadius: const pw.BorderRadius.all(pw.Radius.circular(6)),
-          border: pw.Border.all(color: borderColor, width: 0.8),
-        ),
-        child: pw.Column(
-          crossAxisAlignment: pw.CrossAxisAlignment.stretch,
-          children: [
-            pw.Container(
-              height: headerH,
-              padding: const pw.EdgeInsets.symmetric(horizontal: 6),
-              alignment: pw.Alignment.centerLeft,
-              decoration: pw.BoxDecoration(
-                color: headerColor,
-                borderRadius: const pw.BorderRadius.only(
-                  topLeft: pw.Radius.circular(5.5),
-                  topRight: pw.Radius.circular(5.5),
+      child: pw.Opacity(
+        opacity: note.isTransparent ? 0.42 : 1.0,
+        child: pw.Container(
+          width: cardW,
+          height: cardH,
+          decoration: pw.BoxDecoration(
+            color: baseColor,
+            borderRadius: const pw.BorderRadius.all(pw.Radius.circular(6)),
+            border: pw.Border.all(color: borderColor, width: 0.8),
+          ),
+          child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+            children: [
+              pw.Container(
+                height: headerH,
+                padding: const pw.EdgeInsets.symmetric(horizontal: 6),
+                alignment: pw.Alignment.centerLeft,
+                decoration: pw.BoxDecoration(
+                  color: headerColor,
+                  borderRadius: const pw.BorderRadius.only(
+                    topLeft: pw.Radius.circular(5.5),
+                    topRight: pw.Radius.circular(5.5),
+                  ),
+                ),
+                child: pw.Text(
+                  'Ghi chú',
+                  style: pw.TextStyle(
+                    fontSize: 6.5,
+                    fontWeight: pw.FontWeight.bold,
+                    color: inkColor,
+                  ),
                 ),
               ),
-              child: pw.Text(
-                'Ghi chú',
-                style: pw.TextStyle(
-                  fontSize: 6.5,
-                  fontWeight: pw.FontWeight.bold,
-                  color: inkColor,
-                ),
-              ),
-            ),
-            pw.Expanded(
-              child: pw.ClipRect(
-                child: pw.Stack(
-                  children: [
-                    if (note.text.trim().isNotEmpty)
-                      pw.Padding(
-                        padding: const pw.EdgeInsets.all(6),
-                        child: pw.Text(
-                          note.text,
-                          style: pw.TextStyle(
-                            fontSize: bodyFontSize,
-                            color: inkColor,
-                            lineSpacing: 1.8,
+              pw.Expanded(
+                child: pw.ClipRect(
+                  child: pw.Stack(
+                    children: [
+                      if (note.text.trim().isNotEmpty)
+                        pw.Padding(
+                          padding: const pw.EdgeInsets.all(6),
+                          child: pw.Text(
+                            note.text,
+                            style: pw.TextStyle(
+                              fontSize: bodyFontSize,
+                              color: inkColor,
+                              lineSpacing: 1.8,
+                            ),
                           ),
                         ),
-                      ),
-                    if (note.strokes.isNotEmpty)
-                      pw.Positioned.fill(
-                        child: pw.CustomPaint(
-                          size: PdfPoint(bodyW, bodyH),
-                          painter: (PdfGraphics canvas, PdfPoint size) {
-                            for (final stroke in note.strokes) {
-                              _paintStroke(
-                                canvas,
-                                size,
-                                stroke,
-                                localScaleX,
-                                localScaleY,
-                              );
-                            }
-                          },
+                      if (note.strokes.isNotEmpty)
+                        pw.Positioned.fill(
+                          child: pw.CustomPaint(
+                            size: PdfPoint(bodyW, bodyH),
+                            painter: (PdfGraphics canvas, PdfPoint size) {
+                              for (final stroke in note.strokes) {
+                                _paintStroke(
+                                  canvas,
+                                  size,
+                                  stroke,
+                                  localScaleX,
+                                  localScaleY,
+                                );
+                              }
+                            },
+                          ),
                         ),
-                      ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

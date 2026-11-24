@@ -526,5 +526,38 @@ void main() {
       expect(Stroke.fromJson({'id': 'legacy-s'}).zIndex, 0);
       expect(ImageElement.fromJson({'id': 'legacy-i', 'x': 0, 'y': 0}).zIndex, 0);
     });
+
+    test('v3.5.0 StickyNoteElement.isTransparent and Notebook.drivePdfFileId round-trip', () {
+      final now = DateTime.utc(2026, 8, 1, 10, 0);
+      final sticky = StickyNoteElement(
+        id: 'st-trans',
+        x: 50,
+        y: 60,
+        text: 'Transparent sticky note',
+        isTransparent: true,
+        updatedAt: now,
+      );
+      final decodedSticky = StickyNoteElement.fromJson(
+        jsonDecode(jsonEncode(sticky.toJson())) as Map<String, dynamic>,
+      );
+      expect(decodedSticky.isTransparent, isTrue);
+      expect(StickyNoteElement.fromJson({'id': 'st-def', 'x': 0, 'y': 0}).isTransparent, isFalse);
+
+      final nb = Notebook(
+        id: 'nb-pdf-sync',
+        title: 'Hóa Hữu Cơ Drive PDF',
+        createdAt: now,
+        updatedAt: now,
+        driveFileId: 'drive-json-123',
+        drivePdfFileId: 'drive-pdf-456',
+      );
+      final decodedNb = Notebook.fromJson(
+        jsonDecode(jsonEncode(nb.toJson())) as Map<String, dynamic>,
+      );
+      expect(decodedNb.driveFileId, 'drive-json-123');
+      expect(decodedNb.drivePdfFileId, 'drive-pdf-456');
+      expect(decodedNb.copyWith(clearDrivePdfFileId: true).drivePdfFileId, isNull);
+      expect(Notebook.fromJson({'id': 'nb-leg', 'title': 'Legacy'}).drivePdfFileId, isNull);
+    });
   });
 }

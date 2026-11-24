@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../core/models/notebook.dart';
 import '../../core/providers/app_state.dart';
+import '../pdf/pdf_export_service.dart';
 import 'google_auth_service.dart';
 import 'google_drive_service.dart';
 
@@ -44,19 +45,22 @@ class ConflictResolutionResult {
 }
 
 /// Trình quản lý đồng bộ ngoại tuyến ưu tiên cục bộ (offline-first) với Google Drive.
-/// Tự động lắng nghe kết nối mạng, gom nhóm (debounce) chỉnh sửa, xếp hàng tải lên khi mất mạng
-/// và xử lý xung đột theo mốc `updatedAt` (ưu tiên bản mới hơn + giữ bản sao xung đột).
+/// - Sao lưu kép vào 2 thư mục trên Drive: `ChemNote_Backups/JSON/` và `ChemNote_Backups/PDF/` (PDF vector nhẹ).
+/// - Lịch đồng bộ tiết kiệm pin: chu kỳ khi đang mở app (`foregroundSyncMinutes`),
+///   nhắc đồng bộ dài hạn (`idleSyncDays`), và tùy chọn chỉ đồng bộ qua Wi-Fi (`wifiOnlySync`).
 class SyncManager extends ChangeNotifier {
   SyncManager({
     AppState? appState,
     GoogleAuthService? authService,
     GoogleDriveService? driveService,
+    PdfExportService? pdfExportService,
     Connectivity? connectivity,
     Uuid? uuid,
     this.debounceDuration = const Duration(seconds: 3),
     bool attachConnectivityListener = true,
   })  : _appState = appState,
         _authService = authService ?? GoogleAuthService(),
+        _pdfExportService = pdfExportService ?? PdfExportService(),
         _connectivity = connectivity ?? Connectivity(),
         _uuid = uuid ?? const Uuid(),
         _attachConnectivityListener = attachConnectivityListener {
@@ -70,6 +74,7 @@ class SyncManager extends ChangeNotifier {
   AppState? _appState;
   final GoogleAuthService _authService;
   late final GoogleDriveService _driveService;
+  final PdfExportService _pdfExportService;
   final Connectivity _connectivity;
   final Uuid _uuid;
   final Duration debounceDuration;
@@ -77,12 +82,19 @@ class SyncManager extends ChangeNotifier {
 
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   Timer? _debounceTimer;
+  Timer? _foregroundTimer;
 
   bool _autoSyncEnabled = true;
   bool _isSyncing = false;
   bool _isOnline = true;
+  bool _isOnWifi = true;
   DateTime? _lastSyncedAt;
   String _statusMessage = 'Chưa kết nối Google Drive';
+
+  // Giá trị dự phòng khi chạy độc lập không gắn AppState (ví dụ trong unit test).
+  int _fallbackForegroundSyncMinutes = 15;
+  int _fallbackIdleSyncDays = 1;
+  bool _fallbackWifiOnlySync = true;
 
   final Set<String> _pendingUploadIds = <String>{};
   final Map<String, Notebook> _pendingSnapshots = <String, Notebook>{};
@@ -97,12 +109,27 @@ class SyncManager extends ChangeNotifier {
   bool get autoSyncEnabled => _autoSyncEnabled;
   bool get isSyncing => _isSyncing;
   bool get isOnline => _isOnline;
+  bool get isOnWifi => _isOnWifi;
   DateTime? get lastSyncedAt => _lastSyncedAt;
   String get statusMessage => _statusMessage;
   List<SyncLogEntry> get syncLogs => List.unmodifiable(_syncLogs);
   Set<String> get pendingUploadIds => Set.unmodifiable(_pendingUploadIds);
   Set<String> get pendingDeleteDriveIds =>
       Set.unmodifiable(_pendingDeleteDriveIds);
+
+  /// Chu kỳ đồng bộ khi đang mở app (phút): `0` (thủ công), `5`, `15`, `45`, `120`.
+  int get foregroundSyncMinutes =>
+      _appState?.foregroundSyncMinutes ?? _fallbackForegroundSyncMinutes;
+
+  /// Chu kỳ nhắc đồng bộ dài hạn khi quay lại app (ngày): `0` (tắt), `1`, `3`, `5`.
+  int get idleSyncDays => _appState?.idleSyncDays ?? _fallbackIdleSyncDays;
+
+  /// Chỉ tự động đồng bộ qua Wi-Fi để tiết kiệm pin & dữ liệu di động.
+  bool get wifiOnlySync => _appState?.wifiOnlySync ?? _fallbackWifiOnlySync;
+
+  /// Kiểm tra điều kiện mạng hiện tại có cho phép tự động đồng bộ hay không.
+  bool get canAutoSyncOnCurrentNetwork =>
+      isDemoMode || (_isOnline && (!wifiOnlySync || _isOnWifi));
 
   /// Gắn `AppState` để tự động nhận sự kiện sửa/xóa sổ tay.
   void attachAppState(AppState appState) {
@@ -115,7 +142,7 @@ class SyncManager extends ChangeNotifier {
     };
   }
 
-  /// Khởi tạo phiên đăng nhập đã lưu và bắt đầu theo dõi trạng thái mạng.
+  /// Khởi tạo phiên đăng nhập đã lưu, bắt đầu theo dõi mạng và lịch đồng bộ tiết kiệm pin.
   Future<void> initialize() async {
     await _authService.loadSavedSession();
     if (_authService.isSignedIn) {
@@ -128,12 +155,13 @@ class SyncManager extends ChangeNotifier {
     if (_attachConnectivityListener) {
       try {
         final results = await _connectivity.checkConnectivity();
-        _isOnline = _hasConnection(results);
+        _updateNetworkState(results);
         _connectivitySub = _connectivity.onConnectivityChanged.listen(
           _onConnectivityChanged,
         );
       } catch (_) {
         _isOnline = true;
+        _isOnWifi = true;
       }
     }
 
@@ -146,28 +174,63 @@ class SyncManager extends ChangeNotifier {
       }
     }
 
+    _rescheduleForegroundTimer();
     notifyListeners();
 
-    if (_autoSyncEnabled && isSignedIn && _isOnline && _pendingUploadIds.isNotEmpty) {
+    await onAppResumed();
+  }
+
+  /// Gọi khi khởi động hoặc quay lại ứng dụng: nếu quá hạn `idleSyncDays` ngày (hoặc còn hàng đợi),
+  /// thực hiện một lần đồng bộ bù nhẹ nhàng (tôn trọng `wifiOnlySync`).
+  Future<void> onAppResumed() async {
+    if (!_autoSyncEnabled || !isSignedIn || _isSyncing) return;
+    if (!canAutoSyncOnCurrentNetwork) return;
+
+    final hasPending = _hasPendingChanges();
+    final isIdleStale = idleSyncDays > 0 &&
+        (_lastSyncedAt == null ||
+            DateTime.now().difference(_lastSyncedAt!).inDays >= idleSyncDays);
+
+    if (hasPending || isIdleStale) {
+      if (isIdleStale && !hasPending) {
+        _addLog('Kiểm tra đồng bộ định kỳ sau $idleSyncDays ngày.');
+      }
       unawaited(syncNow());
     }
   }
 
-  bool _hasConnection(List<ConnectivityResult> results) {
-    if (results.isEmpty) return false;
-    return results.any((r) => r != ConnectivityResult.none);
+  bool _hasPendingChanges() {
+    if (_pendingUploadIds.isNotEmpty || _pendingDeleteDriveIds.isNotEmpty) {
+      return true;
+    }
+    final notebooks = _appState?.notebooks;
+    if (notebooks == null) return false;
+    return notebooks.any((n) => n.syncStatus == SyncStatus.pendingUpload);
+  }
+
+  void _updateNetworkState(List<ConnectivityResult> results) {
+    _isOnline = results.isNotEmpty &&
+        results.any((r) => r != ConnectivityResult.none);
+    _isOnWifi = results.contains(ConnectivityResult.wifi) ||
+        results.contains(ConnectivityResult.ethernet);
   }
 
   void _onConnectivityChanged(List<ConnectivityResult> results) {
-    final nowOnline = _hasConnection(results);
-    if (nowOnline == _isOnline) return;
-    _isOnline = nowOnline;
+    final prevOnline = _isOnline;
+    final prevWifi = _isOnWifi;
+    _updateNetworkState(results);
+    if (_isOnline == prevOnline && _isOnWifi == prevWifi) return;
 
     if (_isOnline) {
-      _addLog('Đã kết nối lại Internet.');
+      _addLog(
+        _isOnWifi
+            ? 'Đã kết nối Wi-Fi.'
+            : 'Đã kết nối mạng di động${wifiOnlySync ? ' (tạm hoãn tự đồng bộ do bật Chỉ Wi-Fi)' : ''}.',
+      );
       if (_autoSyncEnabled &&
           isSignedIn &&
-          (_pendingUploadIds.isNotEmpty || _pendingDeleteDriveIds.isNotEmpty)) {
+          canAutoSyncOnCurrentNetwork &&
+          _hasPendingChanges()) {
         unawaited(syncNow());
       }
     } else {
@@ -181,16 +244,91 @@ class SyncManager extends ChangeNotifier {
   void setAutoSyncEnabled(bool enabled) {
     if (_autoSyncEnabled == enabled) return;
     _autoSyncEnabled = enabled;
+    _rescheduleForegroundTimer();
     _addLog(enabled ? 'Đã bật tự động đồng bộ.' : 'Đã tắt tự động đồng bộ.');
     notifyListeners();
-    if (enabled && isSignedIn && _isOnline && _pendingUploadIds.isNotEmpty) {
+    if (enabled &&
+        isSignedIn &&
+        canAutoSyncOnCurrentNetwork &&
+        _hasPendingChanges()) {
       unawaited(syncNow());
     }
   }
 
+  /// Cập nhật chu kỳ đồng bộ khi đang mở app (phút: 0, 5, 15, 45, 120).
+  void setForegroundSyncMinutes(int minutes) {
+    _fallbackForegroundSyncMinutes = minutes;
+    _appState?.setForegroundSyncMinutes(minutes);
+    _rescheduleForegroundTimer();
+    _addLog(
+      minutes == 0
+          ? 'Chế độ đồng bộ khi mở app: Thủ công.'
+          : 'Chu kỳ đồng bộ khi mở app: mỗi $minutes phút.',
+    );
+    notifyListeners();
+  }
+
+  /// Cập nhật chu kỳ nhắc đồng bộ dài hạn (ngày: 0, 1, 3, 5).
+  void setIdleSyncDays(int days) {
+    _fallbackIdleSyncDays = days;
+    _appState?.setIdleSyncDays(days);
+    _addLog(
+      days == 0
+          ? 'Đã tắt chu kỳ nhắc đồng bộ dài hạn.'
+          : 'Chu kỳ nhắc đồng bộ dài hạn: mỗi $days ngày.',
+    );
+    notifyListeners();
+  }
+
+  /// Cập nhật tùy chọn chỉ đồng bộ qua Wi-Fi.
+  void setWifiOnlySync(bool wifiOnly) {
+    _fallbackWifiOnlySync = wifiOnly;
+    _appState?.setWifiOnlySync(wifiOnly);
+    _addLog(
+      wifiOnly
+          ? 'Đã bật: Chỉ đồng bộ qua Wi-Fi (tiết kiệm pin & data).'
+          : 'Đã cho phép đồng bộ qua cả Wi-Fi và mạng di động.',
+    );
+    notifyListeners();
+    if (!wifiOnly &&
+        _autoSyncEnabled &&
+        isSignedIn &&
+        _isOnline &&
+        _hasPendingChanges()) {
+      unawaited(syncNow());
+    }
+  }
+
+  void _rescheduleForegroundTimer() {
+    _foregroundTimer?.cancel();
+    _foregroundTimer = null;
+
+    if (!_autoSyncEnabled || foregroundSyncMinutes <= 0) {
+      return;
+    }
+
+    _foregroundTimer = Timer.periodic(
+      Duration(minutes: foregroundSyncMinutes),
+      (_) => _runScheduledForegroundSync(),
+    );
+  }
+
+  void _runScheduledForegroundSync() {
+    if (!_autoSyncEnabled || !isSignedIn || _isSyncing) return;
+    if (!canAutoSyncOnCurrentNetwork) return;
+    // Chỉ chạy khi thực sự có sổ tay đang chờ tải lên để tiết kiệm pin tuyệt đối.
+    if (!_hasPendingChanges()) return;
+    unawaited(syncNow());
+  }
+
   /// Cập nhật trạng thái mạng thủ công (hữu ích cho kiểm thử đơn vị).
-  void setOnlineStatusForTesting(bool online) {
+  void setOnlineStatusForTesting(bool online, {bool? isWifi}) {
     _isOnline = online;
+    if (isWifi != null) {
+      _isOnWifi = isWifi;
+    } else {
+      _isOnWifi = online;
+    }
     notifyListeners();
   }
 
@@ -204,9 +342,10 @@ class SyncManager extends ChangeNotifier {
       _driveService.resetSessionCache();
       _statusMessage = 'Đã đăng nhập: ${user.email}';
       _addLog('Đăng nhập Google thành công (${user.email}).');
+      _rescheduleForegroundTimer();
       notifyListeners();
 
-      if (_autoSyncEnabled && _isOnline) {
+      if (_autoSyncEnabled && canAutoSyncOnCurrentNetwork) {
         unawaited(syncNow());
       }
       return user;
@@ -224,6 +363,7 @@ class SyncManager extends ChangeNotifier {
     _driveService.resetSessionCache();
     _statusMessage = 'Đã bật Chế độ Demo (${user.email})';
     _addLog('Đã kích hoạt Chế độ Demo Google Drive.');
+    _rescheduleForegroundTimer();
     notifyListeners();
     return user;
   }
@@ -231,6 +371,7 @@ class SyncManager extends ChangeNotifier {
   /// Đăng xuất tài khoản Google Drive.
   Future<void> signOut() async {
     _debounceTimer?.cancel();
+    _foregroundTimer?.cancel();
     await _authService.signOut();
     _driveService.resetSessionCache();
     _statusMessage = 'Đã đăng xuất khỏi Google Drive';
@@ -255,36 +396,60 @@ class SyncManager extends ChangeNotifier {
       return;
     }
 
+    if (wifiOnlySync && !_isOnWifi && !isDemoMode) {
+      _statusMessage =
+          'Đang chờ Wi-Fi — đã xếp hàng ${_pendingUploadIds.length} sổ tay';
+      notifyListeners();
+      return;
+    }
+
+    // Nếu người dùng chọn chu kỳ thủ công (0), không tự động kích hoạt ngay sau khi sửa.
+    if (foregroundSyncMinutes == 0) {
+      notifyListeners();
+      return;
+    }
+
     _debounceTimer?.cancel();
     _debounceTimer = Timer(debounceDuration, () {
-      unawaited(syncNow());
+      if (canAutoSyncOnCurrentNetwork) {
+        unawaited(syncNow());
+      }
     });
     notifyListeners();
   }
 
-  /// Xếp hàng xóa tệp sổ tay trên Google Drive nếu đã từng đồng bộ.
-  void queueNotebookDelete(String notebookId, {String? driveFileId}) {
+  /// Xếp hàng xóa tệp sổ tay (cả JSON và PDF) trên Google Drive nếu đã từng đồng bộ.
+  void queueNotebookDelete(
+    String notebookId, {
+    String? driveFileId,
+    String? drivePdfFileId,
+  }) {
     _pendingUploadIds.remove(notebookId);
     final removed = _pendingSnapshots.remove(notebookId);
-    final targetDriveId = driveFileId ?? removed?.driveFileId;
-    if (targetDriveId != null && targetDriveId.isNotEmpty) {
-      _pendingDeleteDriveIds.add(targetDriveId);
+    final targetJsonId = driveFileId ?? removed?.driveFileId;
+    final targetPdfId = drivePdfFileId ?? removed?.drivePdfFileId;
+    if (targetJsonId != null && targetJsonId.isNotEmpty) {
+      _pendingDeleteDriveIds.add(targetJsonId);
+    }
+    if (targetPdfId != null && targetPdfId.isNotEmpty) {
+      _pendingDeleteDriveIds.add(targetPdfId);
     }
 
-    if (_autoSyncEnabled && isSignedIn && (_isOnline || isDemoMode)) {
+    if (_autoSyncEnabled &&
+        isSignedIn &&
+        canAutoSyncOnCurrentNetwork &&
+        foregroundSyncMinutes > 0) {
       _debounceTimer?.cancel();
       _debounceTimer = Timer(debounceDuration, () {
-        unawaited(syncNow());
+        if (canAutoSyncOnCurrentNetwork) {
+          unawaited(syncNow());
+        }
       });
     }
     notifyListeners();
   }
 
   /// Giải quyết xung đột giữa bản cục bộ và bản trên Google Drive theo `updatedAt`.
-  /// - Nếu bản cục bộ mới hơn -> chọn cục bộ.
-  /// - Nếu bản Drive mới hơn -> chọn Drive.
-  /// - Nếu CẢ HAI cùng sửa sau `lastSyncedAt` (hoặc đều có thay đổi khác mốc thời gian đáng kể),
-  ///   tạo thêm một bản sao dự phòng cho bản thua để không bao giờ mất bài ghi chép.
   ConflictResolutionResult resolveConflict({
     required Notebook local,
     required Notebook remote,
@@ -297,6 +462,7 @@ class SyncManager extends ChangeNotifier {
         winner: ConflictWinner.equal,
         resolvedNotebook: local.copyWith(
           driveFileId: remote.driveFileId ?? local.driveFileId,
+          drivePdfFileId: remote.drivePdfFileId ?? local.drivePdfFileId,
           syncStatus: SyncStatus.synced,
         ),
       );
@@ -316,6 +482,7 @@ class SyncManager extends ChangeNotifier {
           id: _uuid.v4(),
           title: '${remote.title} (Bản sao xung đột)',
           clearDriveFileId: true,
+          clearDrivePdfFileId: true,
           syncStatus: SyncStatus.pendingUpload,
           isTrashed: false,
           clearTrashedAt: true,
@@ -326,6 +493,7 @@ class SyncManager extends ChangeNotifier {
         winner: ConflictWinner.local,
         resolvedNotebook: local.copyWith(
           driveFileId: remote.driveFileId ?? local.driveFileId,
+          drivePdfFileId: remote.drivePdfFileId ?? local.drivePdfFileId,
         ),
         conflictBackupCopy: backup,
       );
@@ -336,6 +504,7 @@ class SyncManager extends ChangeNotifier {
           id: _uuid.v4(),
           title: '${local.title} (Bản sao xung đột)',
           clearDriveFileId: true,
+          clearDrivePdfFileId: true,
           syncStatus: SyncStatus.pendingUpload,
           isTrashed: false,
           clearTrashedAt: true,
@@ -346,6 +515,7 @@ class SyncManager extends ChangeNotifier {
         winner: ConflictWinner.remote,
         resolvedNotebook: remote.copyWith(
           driveFileId: remote.driveFileId ?? local.driveFileId,
+          drivePdfFileId: remote.drivePdfFileId ?? local.drivePdfFileId,
           syncStatus: SyncStatus.synced,
         ),
         conflictBackupCopy: backup,
@@ -353,7 +523,7 @@ class SyncManager extends ChangeNotifier {
     }
   }
 
-  /// Đồng bộ hai chiều ngay lập tức giữa máy và Google Drive.
+  /// Đồng bộ hai chiều ngay lập tức giữa máy và Google Drive (`JSON/` + `PDF/`).
   Future<void> syncNow() async {
     if (_isSyncing) return;
 
@@ -372,11 +542,13 @@ class SyncManager extends ChangeNotifier {
     }
 
     _isSyncing = true;
-    _statusMessage = 'Đang đồng bộ với Google Drive...';
+    _statusMessage = 'Đang đồng bộ JSON & PDF với Google Drive...';
     notifyListeners();
 
     try {
       await _driveService.ensureAppFolder();
+      await _driveService.ensureJsonFolder();
+      await _driveService.ensurePdfFolder();
 
       // 1. Xử lý các yêu cầu xóa tệp trên Drive
       for (final driveId in List<String>.from(_pendingDeleteDriveIds)) {
@@ -385,7 +557,7 @@ class SyncManager extends ChangeNotifier {
         _addLog('Đã xóa tệp sao lưu cũ trên Drive ($driveId).');
       }
 
-      // 2. Lấy danh sách siêu dữ liệu hiện có trên Google Drive
+      // 2. Lấy danh sách siêu dữ liệu hiện có trong ChemNote_Backups/JSON/
       final remoteMetaList = await _driveService.listRemoteNotebooks();
       final remoteByNotebookId = <String, DriveNotebookMeta>{};
       for (final meta in remoteMetaList) {
@@ -408,7 +580,8 @@ class SyncManager extends ChangeNotifier {
         final needsUpload = _pendingUploadIds.contains(local.id) ||
             local.syncStatus == SyncStatus.pendingUpload ||
             local.syncStatus == SyncStatus.localOnly ||
-            local.driveFileId == null;
+            local.driveFileId == null ||
+            local.drivePdfFileId == null;
 
         if (remoteMeta == null) {
           if (needsUpload) {
@@ -454,13 +627,21 @@ class SyncManager extends ChangeNotifier {
           _pendingSnapshots.remove(local.id);
           downloadedCount++;
         } else {
-          await _appState?.updateNotebookSyncStatus(
-            local.id,
-            SyncStatus.synced,
-            driveFileId: remoteMeta.driveFileId,
-          );
-          _pendingUploadIds.remove(local.id);
-          _pendingSnapshots.remove(local.id);
+          // Nếu bản cục bộ chưa có PDF trên Drive, tải bù PDF vector một lần.
+          if (local.drivePdfFileId == null) {
+            await _uploadSingleNotebook(resolution.resolvedNotebook);
+            uploadedCount++;
+          } else {
+            await _appState?.updateNotebookSyncStatus(
+              local.id,
+              SyncStatus.synced,
+              driveFileId: remoteMeta.driveFileId,
+              drivePdfFileId:
+                  resolution.resolvedNotebook.drivePdfFileId ?? local.drivePdfFileId,
+            );
+            _pendingUploadIds.remove(local.id);
+            _pendingSnapshots.remove(local.id);
+          }
         }
       }
 
@@ -474,7 +655,7 @@ class SyncManager extends ChangeNotifier {
 
       _lastSyncedAt = DateTime.now();
       _statusMessage =
-          'Đồng bộ xong: ↑$uploadedCount tải lên, ↓$downloadedCount tải về'
+          'Đồng bộ xong: ↑$uploadedCount tải lên (JSON + PDF), ↓$downloadedCount tải về'
           '${conflictCopies > 0 ? ', $conflictCopies bản sao xung đột' : ''}';
       _addLog(_statusMessage);
     } catch (e) {
@@ -489,11 +670,31 @@ class SyncManager extends ChangeNotifier {
   Future<void> _uploadSingleNotebook(Notebook notebook) async {
     await _appState?.updateNotebookSyncStatus(notebook.id, SyncStatus.syncing);
     try {
-      final driveFileId = await _driveService.uploadNotebook(notebook);
+      // 1. Tạo & tải lên PDF vector gọn nhẹ vào ChemNote_Backups/PDF/
+      String? drivePdfFileId = notebook.drivePdfFileId;
+      try {
+        final pdfBytes =
+            await _pdfExportService.buildNotebookPdfBytes(notebook);
+        drivePdfFileId =
+            await _driveService.uploadNotebookPdf(notebook, pdfBytes);
+      } catch (pdfErr) {
+        _addLog(
+          'Cảnh báo: Chưa xuất được PDF cho "${notebook.title}" ($pdfErr); vẫn tiếp tục sao lưu JSON.',
+          isError: true,
+        );
+      }
+
+      // 2. Tải lên tệp JSON đầy đủ (kèm drivePdfFileId mới nhất) vào ChemNote_Backups/JSON/
+      final notebookWithPdfId = notebook.copyWith(
+        drivePdfFileId: drivePdfFileId,
+      );
+      final driveFileId = await _driveService.uploadNotebook(notebookWithPdfId);
+
       await _appState?.updateNotebookSyncStatus(
         notebook.id,
         SyncStatus.synced,
         driveFileId: driveFileId,
+        drivePdfFileId: drivePdfFileId,
       );
       _pendingUploadIds.remove(notebook.id);
       _pendingSnapshots.remove(notebook.id);
@@ -503,7 +704,7 @@ class SyncManager extends ChangeNotifier {
     }
   }
 
-  /// Khôi phục toàn bộ sổ tay từ thư mục `ChemNote_Backups` trên Google Drive về máy.
+  /// Khôi phục toàn bộ sổ tay từ thư mục `ChemNote_Backups/JSON/` trên Google Drive về máy.
   /// Trả về số lượng sổ tay đã khôi phục.
   Future<int> restoreFromDrive() async {
     if (_isSyncing) return 0;
@@ -528,6 +729,7 @@ class SyncManager extends ChangeNotifier {
     var restoredCount = 0;
     try {
       await _driveService.ensureAppFolder();
+      await _driveService.ensureJsonFolder();
       final remoteList = await _driveService.listRemoteNotebooks();
 
       for (final meta in remoteList) {
@@ -572,6 +774,7 @@ class SyncManager extends ChangeNotifier {
   @override
   void dispose() {
     _debounceTimer?.cancel();
+    _foregroundTimer?.cancel();
     _connectivitySub?.cancel();
     super.dispose();
   }

@@ -34,6 +34,7 @@ class Notebook {
   final DateTime updatedAt;
   final SyncStatus syncStatus;
   final String? driveFileId;
+  final String? drivePdfFileId;
   final bool isFavorite;
   final bool isLocked;
   final String? pinCode;
@@ -57,6 +58,7 @@ class Notebook {
     required this.updatedAt,
     this.syncStatus = SyncStatus.localOnly,
     this.driveFileId,
+    this.drivePdfFileId,
     this.isFavorite = false,
     this.isLocked = false,
     this.pinCode,
@@ -83,6 +85,8 @@ class Notebook {
     SyncStatus? syncStatus,
     String? driveFileId,
     bool clearDriveFileId = false,
+    String? drivePdfFileId,
+    bool clearDrivePdfFileId = false,
     bool? isFavorite,
     bool? isLocked,
     String? pinCode,
@@ -110,6 +114,9 @@ class Notebook {
       updatedAt: updatedAt ?? this.updatedAt,
       syncStatus: syncStatus ?? this.syncStatus,
       driveFileId: clearDriveFileId ? null : (driveFileId ?? this.driveFileId),
+      drivePdfFileId: clearDrivePdfFileId
+          ? null
+          : (drivePdfFileId ?? this.drivePdfFileId),
       isFavorite: isFavorite ?? this.isFavorite,
       isLocked: isLocked ?? this.isLocked,
       pinCode: clearPinCode ? null : (pinCode ?? this.pinCode),
@@ -138,6 +145,7 @@ class Notebook {
       'updatedAt': updatedAt.toIso8601String(),
       'syncStatus': syncStatus.name,
       'driveFileId': driveFileId,
+      'drivePdfFileId': drivePdfFileId,
       'isFavorite': isFavorite,
       'isLocked': isLocked,
       'pinCode': pinCode,
@@ -173,6 +181,7 @@ class Notebook {
           : now,
       syncStatus: _syncStatusFromJson(json['syncStatus']),
       driveFileId: json['driveFileId'] as String?,
+      drivePdfFileId: json['drivePdfFileId'] as String?,
       isFavorite: json['isFavorite'] as bool? ?? false,
       isLocked: json['isLocked'] as bool? ?? false,
       pinCode: json['pinCode'] as String?,

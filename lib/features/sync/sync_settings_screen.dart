@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import '../../core/models/notebook.dart';
 import '../../core/providers/app_state.dart';
 import 'google_auth_service.dart';
+import 'google_oauth_config.dart';
 import 'sync_manager.dart';
 
 /// Màn hình cài đặt đồng bộ Google Drive (GMS-free cho Android & Huawei HarmonyOS).
@@ -17,7 +18,6 @@ class SyncSettingsScreen extends StatefulWidget {
 
 class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
   String _configuredClientId = '';
-  String _configuredClientSecret = '';
   bool _loadingClientId = true;
 
   @override
@@ -29,11 +29,9 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
   Future<void> _loadClientId() async {
     final syncManager = context.read<SyncManager>();
     final id = await syncManager.authService.config.loadClientId();
-    final secret = await syncManager.authService.config.loadClientSecret();
     if (!mounted) return;
     setState(() {
       _configuredClientId = id;
-      _configuredClientSecret = secret;
       _loadingClientId = false;
     });
   }
@@ -41,131 +39,95 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
   Future<void> _showClientIdDialog() async {
     final syncManager = context.read<SyncManager>();
     final idController = TextEditingController(text: _configuredClientId);
-    final secretController =
-        TextEditingController(text: _configuredClientSecret);
-    var obscureSecret = true;
 
     final saved = await showDialog<bool>(
       context: context,
       builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setDialogState) {
-            return AlertDialog(
-              title: const Text('Cấu hình Google OAuth (Desktop app)'),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Trên Google Cloud Console -> Create OAuth client ID -> chọn loại Desktop app (Ứng dụng dành cho máy tính), rồi dán cả Client ID và Client Secret vào đây (chạy chuẩn trên Huawei HarmonyOS không cần GMS & không lỗi 401).',
-                      style: TextStyle(fontSize: 13),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: idController,
-                      decoration: const InputDecoration(
-                        labelText: 'Client ID',
-                        hintText: '1234567890-xxxx.apps.googleusercontent.com',
-                        border: OutlineInputBorder(),
-                      ),
-                      maxLines: 2,
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: secretController,
-                      obscureText: obscureSecret,
-                      decoration: InputDecoration(
-                        labelText: 'Client Secret (cho Desktop app)',
-                        hintText: 'GOCSPX-xxxxxxxxxxxxxxxx',
-                        border: const OutlineInputBorder(),
-                        suffixIcon: IconButton(
-                          tooltip: obscureSecret ? 'Hiện' : 'Ẩn',
-                          icon: Icon(
-                            obscureSecret
-                                ? Icons.visibility_outlined
-                                : Icons.visibility_off_outlined,
-                          ),
-                          onPressed: () {
-                            setDialogState(() {
-                              obscureSecret = !obscureSecret;
-                            });
-                          },
+        return AlertDialog(
+          title: const Text('Cấu hình Google OAuth Client ID'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Nhập Android OAuth 2.0 Client ID từ Google Cloud Console (bật Custom URI Scheme cho gói com.chemnote.app) để đồng bộ Google Drive không cần GMS trên Android & Huawei HarmonyOS:',
+                  style: TextStyle(fontSize: 13),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: idController,
+                  decoration: const InputDecoration(
+                    labelText: 'Android OAuth Client ID',
+                    hintText: '1234567890-xxxx.apps.googleusercontent.com',
+                    border: OutlineInputBorder(),
+                  ),
+                  maxLines: 2,
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Custom URI Scheme Redirect:',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 12,
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 12),
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color:
-                            Theme.of(ctx).colorScheme.surfaceContainerHighest,
-                        borderRadius: BorderRadius.circular(8),
+                      SizedBox(height: 4),
+                      SelectableText(
+                        GoogleOAuthConfig.redirectUri,
+                        style: TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                        ),
                       ),
-                      child: const Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Cơ chế xác thực RFC 8252 Loopback:',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w600,
-                              fontSize: 12,
-                            ),
-                          ),
-                          SizedBox(height: 4),
-                          SelectableText(
-                            'http://127.0.0.1:<port>/oauth2redirect',
-                            style: TextStyle(
-                              fontFamily: 'monospace',
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              actions: [
-                if (_configuredClientId.isNotEmpty ||
-                    _configuredClientSecret.isNotEmpty)
-                  TextButton(
-                    onPressed: () async {
-                      await syncManager.authService.config.clearClientId();
-                      await syncManager.authService.config.clearClientSecret();
-                      if (ctx.mounted) Navigator.of(ctx).pop(true);
-                    },
-                    child: const Text('Xóa cấu hình'),
+                    ],
                   ),
-                TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(false),
-                  child: const Text('Hủy'),
-                ),
-                FilledButton(
-                  onPressed: () async {
-                    await syncManager.authService.config
-                        .saveClientId(idController.text);
-                    await syncManager.authService.config
-                        .saveClientSecret(secretController.text);
-                    if (ctx.mounted) Navigator.of(ctx).pop(true);
-                  },
-                  child: const Text('Lưu'),
                 ),
               ],
-            );
-          },
+            ),
+          ),
+          actions: [
+            if (_configuredClientId.isNotEmpty)
+              TextButton(
+                onPressed: () async {
+                  await syncManager.authService.config.clearClientId();
+                  if (ctx.mounted) Navigator.of(ctx).pop(true);
+                },
+                child: const Text('Xóa ID'),
+              ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Hủy'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                await syncManager.authService.config
+                    .saveClientId(idController.text);
+                if (ctx.mounted) Navigator.of(ctx).pop(true);
+              },
+              child: const Text('Lưu'),
+            ),
+          ],
         );
       },
     );
 
     idController.dispose();
-    secretController.dispose();
     if (saved == true) {
       await _loadClientId();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Đã cập nhật cấu hình Google OAuth.'),
+          content: Text('Đã cập nhật cấu hình OAuth Client ID.'),
         ),
       );
     }
@@ -352,6 +314,10 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
               ],
             ),
           ),
+          const SizedBox(height: 16),
+
+          // 2b. Lịch đồng bộ tiết kiệm pin & 2 thư mục Drive (JSON + PDF)
+          _buildSyncScheduleCard(context, syncManager),
           const SizedBox(height: 16),
 
           // 3. Danh sách trạng thái đồng bộ từng sổ tay
@@ -543,9 +509,8 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
               if (!_loadingClientId)
                 Text(
                   _configuredClientId.isEmpty
-                      ? 'Trạng thái OAuth: Chưa cấu hình (có thể dùng Chế độ Demo ngay)'
-                      : 'Client ID: ${_maskClientId(_configuredClientId)}'
-                          '${_configuredClientSecret.isNotEmpty ? ' • Đã có Client Secret' : ' • Chưa nhập Client Secret'}',
+                      ? 'Trạng thái Client ID: Chưa cấu hình (có thể dùng Chế độ Demo ngay)'
+                      : 'Client ID đã cấu hình: ${_maskClientId(_configuredClientId)}',
                   style: theme.textTheme.labelMedium?.copyWith(
                     color: _configuredClientId.isEmpty
                         ? colorScheme.tertiary
@@ -565,7 +530,7 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
                   OutlinedButton.icon(
                     onPressed: _showClientIdDialog,
                     icon: const Icon(Icons.settings_outlined),
-                    label: const Text('Cấu hình OAuth'),
+                    label: const Text('Nhập Client ID'),
                   ),
                   TextButton.icon(
                     onPressed: _handleDemoSignIn,
@@ -688,6 +653,159 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildSyncScheduleCard(
+    BuildContext context,
+    SyncManager syncManager,
+  ) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+
+    const foregroundOptions = <(int, String)>[
+      (0, 'Thủ công'),
+      (5, '5p'),
+      (15, '15p'),
+      (45, '45p'),
+      (120, '120p'),
+    ];
+    const idleOptions = <(int, String)>[
+      (0, 'Tắt'),
+      (1, '1 ngày'),
+      (3, '3 ngày'),
+      (5, '5 ngày'),
+    ];
+
+    return Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.battery_saver_outlined,
+                  size: 18,
+                  color: colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Lịch đồng bộ tiết kiệm pin',
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Khi đang mở app (chỉ tải lên sổ tay có thay đổi)',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  children: [
+                    for (final (minutes, label) in foregroundOptions)
+                      ChoiceChip(
+                        label: Text(label),
+                        selected: syncManager.foregroundSyncMinutes == minutes,
+                        onSelected: syncManager.autoSyncEnabled
+                            ? (_) =>
+                                syncManager.setForegroundSyncMinutes(minutes)
+                            : null,
+                        visualDensity: VisualDensity.compact,
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  'Chu kỳ nhắc đồng bộ dài hạn (khi mở lại ứng dụng)',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  children: [
+                    for (final (days, label) in idleOptions)
+                      ChoiceChip(
+                        label: Text(label),
+                        selected: syncManager.idleSyncDays == days,
+                        onSelected: syncManager.autoSyncEnabled
+                            ? (_) => syncManager.setIdleSyncDays(days)
+                            : null,
+                        visualDensity: VisualDensity.compact,
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          SwitchListTile(
+            secondary: Icon(
+              Icons.wifi_lock_outlined,
+              color: colorScheme.primary,
+            ),
+            title: const Text('Chỉ đồng bộ qua Wi-Fi'),
+            subtitle: const Text(
+              'Tiết kiệm pin và dung lượng 4G/5G khi tải lên JSON & PDF.',
+            ),
+            value: syncManager.wifiOnlySync,
+            onChanged: syncManager.setWifiOnlySync,
+          ),
+          const Divider(height: 1),
+          Padding(
+            padding: const EdgeInsets.all(14),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.folder_copy_outlined,
+                  size: 18,
+                  color: colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Cấu trúc sao lưu kép trên Google Drive:',
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '• ChemNote_Backups/JSON — bản sao lưu đầy đủ để khôi phục & chỉnh sửa.\n'
+                        '• ChemNote_Backups/PDF — bản PDF vector nhẹ đặt tên theo tiêu đề ghi chú để xem nhanh trên mọi thiết bị.',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                          height: 1.4,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

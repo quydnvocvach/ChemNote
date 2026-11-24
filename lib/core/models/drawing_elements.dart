@@ -261,6 +261,7 @@ class StickyNoteElement {
   final String text;
   final int colorValue;
   final bool isCollapsed;
+  final bool isTransparent;
   final List<Stroke> strokes;
   final int zIndex;
   final DateTime updatedAt;
@@ -274,6 +275,7 @@ class StickyNoteElement {
     this.text = '',
     this.colorValue = 0xFFFEF08A,
     this.isCollapsed = false,
+    this.isTransparent = false,
     this.strokes = const [],
     this.zIndex = 0,
     DateTime? updatedAt,
@@ -288,6 +290,7 @@ class StickyNoteElement {
     String? text,
     int? colorValue,
     bool? isCollapsed,
+    bool? isTransparent,
     List<Stroke>? strokes,
     int? zIndex,
     DateTime? updatedAt,
@@ -301,6 +304,7 @@ class StickyNoteElement {
       text: text ?? this.text,
       colorValue: colorValue ?? this.colorValue,
       isCollapsed: isCollapsed ?? this.isCollapsed,
+      isTransparent: isTransparent ?? this.isTransparent,
       strokes: strokes ?? this.strokes,
       zIndex: zIndex ?? this.zIndex,
       updatedAt: updatedAt ?? this.updatedAt,
@@ -317,6 +321,7 @@ class StickyNoteElement {
       'text': text,
       'colorValue': colorValue,
       'isCollapsed': isCollapsed,
+      'isTransparent': isTransparent,
       'strokes': strokes.map((s) => s.toJson()).toList(),
       'zIndex': zIndex,
       'updatedAt': updatedAt.toIso8601String(),
@@ -334,6 +339,7 @@ class StickyNoteElement {
       text: json['text'] as String? ?? '',
       colorValue: (json['colorValue'] as num?)?.toInt() ?? 0xFFFEF08A,
       isCollapsed: json['isCollapsed'] as bool? ?? false,
+      isTransparent: json['isTransparent'] as bool? ?? false,
       strokes: rawStrokes
           .map((e) => Stroke.fromJson(e as Map<String, dynamic>))
           .toList(),

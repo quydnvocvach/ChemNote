@@ -452,6 +452,7 @@ class EditorToolBar extends StatelessWidget {
   final bool zoomWindowEnabled;
   final bool rulerVisible;
   final bool palmRejectionEnabled;
+  final bool stylusPanMode;
   final bool isRecordingAudio;
   final VoidCallback onUndo;
   final VoidCallback onRedo;
@@ -464,6 +465,7 @@ class EditorToolBar extends StatelessWidget {
   final VoidCallback onToggleZoomWindow;
   final VoidCallback onToggleRuler;
   final VoidCallback onTogglePalmRejection;
+  final VoidCallback? onToggleStylusPan;
   final VoidCallback onToggleAudioRecording;
   final ValueChanged<Color> onSelectColor;
   final VoidCallback onOpenColorPalette;
@@ -478,6 +480,7 @@ class EditorToolBar extends StatelessWidget {
     required this.zoomWindowEnabled,
     required this.rulerVisible,
     required this.palmRejectionEnabled,
+    this.stylusPanMode = false,
     required this.isRecordingAudio,
     required this.onUndo,
     required this.onRedo,
@@ -490,6 +493,7 @@ class EditorToolBar extends StatelessWidget {
     required this.onToggleZoomWindow,
     required this.onToggleRuler,
     required this.onTogglePalmRejection,
+    this.onToggleStylusPan,
     required this.onToggleAudioRecording,
     required this.onSelectColor,
     required this.onOpenColorPalette,
@@ -653,11 +657,21 @@ class EditorToolBar extends StatelessWidget {
               icon: Icons.do_not_touch_outlined,
               tooltip: palmRejectionEnabled
                   ? 'Khoá lòng bàn tay: ĐANG BẬT (Bút viết · 1 ngón tay cuộn trang)'
-                  : 'Khoá lòng bàn tay: ĐANG TẮT (Cả bút và ngón tay đều viết)',
+                  : 'Khoá lòng bàn tay: ĐANG TẮT (1 ngón viết · 2 ngón thu phóng/cuộn)',
               color: fg,
               isActive: palmRejectionEnabled,
               onTap: onTogglePalmRejection,
             ),
+            if (onToggleStylusPan != null)
+              _ChromeIconBtn(
+                icon: Icons.pan_tool_alt_outlined,
+                tooltip: stylusPanMode
+                    ? 'Chế độ Bút cuộn trang: ĐANG BẬT (Bút chỉ cuộn & nhấn nút, không viết)'
+                    : 'Chế độ Bút cuộn trang: ĐANG TẮT (Bút chỉ dùng để viết/công cụ)',
+                color: fg,
+                isActive: stylusPanMode,
+                onTap: onToggleStylusPan!,
+              ),
             _ChromeIconBtn(
               icon: Icons.visibility_off_outlined,
               tooltip: 'Băng che học thuộc (Study Tape)',
@@ -1356,6 +1370,7 @@ Future<void> showPenSettingsSheet({
   bool scribble = appState.scribbleToErase;
   bool holdShape = appState.holdToSnapShape;
   bool showFavBar = appState.showFavoritesBar;
+  bool showHsvPicker = false;
 
   final bool isHighlighter = tool == EditorTool.highlighter;
   final swatches = isHighlighter
@@ -1369,6 +1384,29 @@ Future<void> showPenSettingsSheet({
     builder: (ctx) {
       return StatefulBuilder(
         builder: (ctx, setModalState) {
+          if (showHsvPicker) {
+            return Padding(
+              padding: EdgeInsets.fromLTRB(
+                20,
+                4,
+                20,
+                20 + MediaQuery.of(ctx).viewInsets.bottom,
+              ),
+              child: _HuaweiHsvColorPicker(
+                initialColor: color,
+                onBack: () => setModalState(() => showHsvPicker = false),
+                onColorChanged: (c) {
+                  setModalState(() => color = c);
+                  onSelectColor(c);
+                },
+                onPickEyedropper: () {
+                  Navigator.pop(ctx);
+                  onPickEyedropper();
+                },
+              ),
+            );
+          }
+
           final bool isStarred = appState.isPenStarred(
             tool.toStrokeToolType(),
             // ignore: deprecated_member_use
@@ -1616,10 +1654,7 @@ Future<void> showPenSettingsSheet({
                       },
                     ),
                     GestureDetector(
-                      onTap: () {
-                        Navigator.pop(ctx);
-                        onOpenColorWheel();
-                      },
+                      onTap: () => setModalState(() => showHsvPicker = true),
                       child: Container(
                         width: 28,
                         height: 28,
@@ -1674,6 +1709,14 @@ Future<void> showPenSettingsSheet({
                         ),
                       ),
                   ],
+                ),
+                const SizedBox(height: 10),
+                _CuratedColorGrid(
+                  selectedColor: color,
+                  onSelect: (c) {
+                    setModalState(() => color = c);
+                    onSelectColor(c);
+                  },
                 ),
 
                 const Divider(height: 20),
@@ -1758,12 +1801,13 @@ Future<void> showEraserSettingsSheet({
   double eraserRadius = 18.0,
   ValueChanged<double>? onEraserRadiusChanged,
 }) {
+  // Keep local state OUTSIDE modal builder so parent rebuilds NEVER reset the slider!
+  EraserMode localMode = currentMode;
+  double localRadius = eraserRadius.clamp(5.0, 35.0);
   return showModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
     builder: (ctx) {
-      EraserMode localMode = currentMode;
-      double localRadius = eraserRadius.clamp(5.0, 35.0);
       return StatefulBuilder(
         builder: (sheetCtx, setSheetState) => SafeArea(
           child: Padding(
@@ -1928,54 +1972,50 @@ Future<void> showColorPaletteSheet({
   required bool isHighlighter,
   required Color currentColor,
   required ValueChanged<Color> onSelectColor,
+  VoidCallback? onPickEyedropper,
 }) {
-  final swatches = isHighlighter
-      ? EditorColors.highlighterSwatches
-      : EditorColors.penSwatches;
+  Color localColor = currentColor;
   return showModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
-    builder: (ctx) => Padding(
-      padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            isHighlighter ? 'Chọn màu bút dạ quang' : 'Chọn màu mực',
-            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
-          ),
-          const SizedBox(height: 14),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              for (final c in swatches)
-                GestureDetector(
-                  onTap: () {
-                    onSelectColor(c);
-                    Navigator.pop(ctx);
-                  },
-                  child: Container(
-                    width: 38,
-                    height: 38,
-                    decoration: BoxDecoration(
-                      color: c,
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        // ignore: deprecated_member_use
-                        color: currentColor.value == c.value
-                            ? EditorColors.activeBlue
-                            : Colors.black26,
-                        // ignore: deprecated_member_use
-                        width: currentColor.value == c.value ? 3 : 1.2,
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ],
+    isScrollControlled: true,
+    builder: (ctx) => StatefulBuilder(
+      builder: (sheetCtx, setSheetState) => Padding(
+        padding: EdgeInsets.fromLTRB(
+          20,
+          4,
+          20,
+          24 + MediaQuery.of(sheetCtx).viewInsets.bottom,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _HuaweiHsvColorPicker(
+              initialColor: localColor,
+              title: isHighlighter ? 'Màu bút dạ quang' : 'Bảng màu tùy chỉnh',
+              onBack: () => Navigator.pop(ctx),
+              onColorChanged: (c) {
+                setSheetState(() => localColor = c);
+                onSelectColor(c);
+              },
+              onPickEyedropper: onPickEyedropper == null
+                  ? null
+                  : () {
+                      Navigator.pop(ctx);
+                      onPickEyedropper();
+                    },
+            ),
+            const SizedBox(height: 14),
+            _CuratedColorGrid(
+              selectedColor: localColor,
+              onSelect: (c) {
+                setSheetState(() => localColor = c);
+                onSelectColor(c);
+              },
+            ),
+          ],
+        ),
       ),
     ),
   );
@@ -2364,6 +2404,43 @@ class EditorSettingsDrawer extends StatelessWidget {
               value: appState.isDarkMode,
               onChanged: appState.setDarkMode,
             ),
+            const SizedBox(height: 6),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Text(
+                        'Tốc độ lướt trang',
+                        style: TextStyle(
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        '${appState.scrollSpeedMultiplier.toStringAsFixed(1)}×',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: EditorColors.activeBlue,
+                        ),
+                      ),
+                    ],
+                  ),
+                  Slider(
+                    value: appState.scrollSpeedMultiplier.clamp(0.8, 3.0),
+                    min: 0.8,
+                    max: 3.0,
+                    divisions: 22,
+                    activeColor: EditorColors.activeBlue,
+                    onChanged: appState.setScrollSpeedMultiplier,
+                  ),
+                ],
+              ),
+            ),
             const Divider(height: 24),
             _drawerTile(
               icon: Icons.system_update_alt_rounded,
@@ -2532,6 +2609,402 @@ class AudioReplayBar extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Curated 5x6 Harmonized Study Color Palette Grid (30 colors, 1-tap selection).
+class _CuratedColorGrid extends StatelessWidget {
+  final Color selectedColor;
+  final ValueChanged<Color> onSelect;
+
+  const _CuratedColorGrid({
+    required this.selectedColor,
+    required this.onSelect,
+  });
+
+  static const List<Color> _palette30 = [
+    // Row 1: Blacks & Grays
+    Color(0xFF0F172A),
+    Color(0xFF334155),
+    Color(0xFF64748B),
+    Color(0xFF94A3B8),
+    Color(0xFFCBD5E1),
+    Color(0xFFFFFFFF),
+    // Row 2: Blues & Indigos
+    Color(0xFF1E3A8A),
+    Color(0xFF1D4ED8),
+    Color(0xFF2563EB),
+    Color(0xFF3B82F6),
+    Color(0xFF0EA5E9),
+    Color(0xFF4F46E5),
+    // Row 3: Greens & Teals
+    Color(0xFF064E3B),
+    Color(0xFF047857),
+    Color(0xFF10B981),
+    Color(0xFF16A34A),
+    Color(0xFF0D9488),
+    Color(0xFF84CC16),
+    // Row 4: Reds, Pinks & Oranges
+    Color(0xFF991B1B),
+    Color(0xFFDC2626),
+    Color(0xFFEF4444),
+    Color(0xFFEC4899),
+    Color(0xFFF97316),
+    Color(0xFFEA580C),
+    // Row 5: Yellows, Purples & Browns
+    Color(0xFFEAB308),
+    Color(0xFFFACC15),
+    Color(0xFF9333EA),
+    Color(0xFF7C3AED),
+    Color(0xFF92400E),
+    Color(0xFF78350F),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (int row = 0; row < 5; row++)
+          Padding(
+            padding: EdgeInsets.only(bottom: row < 4 ? 6 : 0),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                for (int col = 0; col < 6; col++)
+                  () {
+                    final c = _palette30[row * 6 + col];
+                    // ignore: deprecated_member_use
+                    final isSel = selectedColor.value == c.value;
+                    return GestureDetector(
+                      onTap: () => onSelect(c),
+                      child: Container(
+                        width: 28,
+                        height: 22,
+                        decoration: BoxDecoration(
+                          color: c,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: isSel
+                                ? EditorColors.activeBlue
+                                : Colors.black26,
+                            width: isSel ? 2.4 : 1.0,
+                          ),
+                        ),
+                      ),
+                    );
+                  }(),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Huawei Notes-style 2D HSV Color Picker:
+/// - Top `<` back button + title
+/// - Left: 2D Saturation × Value gradient square with draggable white ring selector
+/// - Right: Vertical Rainbow Hue spectrum bar with draggable white ring selector
+/// - Bottom: `[Live color rectangle] | [Editable #HEX box] | [Eyedropper button]`
+class _HuaweiHsvColorPicker extends StatefulWidget {
+  final Color initialColor;
+  final String title;
+  final VoidCallback onBack;
+  final ValueChanged<Color> onColorChanged;
+  final VoidCallback? onPickEyedropper;
+
+  const _HuaweiHsvColorPicker({
+    required this.initialColor,
+    this.title = 'Chọn màu tùy chỉnh',
+    required this.onBack,
+    required this.onColorChanged,
+    this.onPickEyedropper,
+  });
+
+  @override
+  State<_HuaweiHsvColorPicker> createState() => _HuaweiHsvColorPickerState();
+}
+
+class _HuaweiHsvColorPickerState extends State<_HuaweiHsvColorPicker> {
+  late HSVColor _hsv;
+  late final TextEditingController _hexController;
+
+  @override
+  void initState() {
+    super.initState();
+    _hsv = HSVColor.fromColor(widget.initialColor);
+    _hexController = TextEditingController(text: _formatHex(widget.initialColor));
+  }
+
+  @override
+  void dispose() {
+    _hexController.dispose();
+    super.dispose();
+  }
+
+  String _formatHex(Color c) {
+    // ignore: deprecated_member_use
+    final hex = (c.value & 0xFFFFFF).toRadixString(16).toUpperCase().padLeft(6, '0');
+    return '#$hex';
+  }
+
+  void _updateHsv(HSVColor next) {
+    final c = next.toColor();
+    setState(() {
+      _hsv = next;
+      final formatted = _formatHex(c);
+      if (_hexController.text.toUpperCase() != formatted) {
+        _hexController.text = formatted;
+      }
+    });
+    widget.onColorChanged(c);
+  }
+
+  void _onHexSubmitted(String raw) {
+    final cleaned = raw.trim().replaceFirst('#', '');
+    if (cleaned.length == 6) {
+      final parsed = int.tryParse('FF$cleaned', radix: 16);
+      if (parsed != null) {
+        final c = Color(parsed);
+        _updateHsv(HSVColor.fromColor(c));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final Color currentColor = _hsv.toColor();
+    final Color pureHueColor = HSVColor.fromAHSV(1.0, _hsv.hue, 1.0, 1.0).toColor();
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Top header with `<` back button
+        Row(
+          children: [
+            IconButton(
+              icon: const Icon(Icons.chevron_left_rounded, size: 26),
+              tooltip: 'Quay lại',
+              onPressed: widget.onBack,
+              visualDensity: VisualDensity.compact,
+            ),
+            Expanded(
+              child: Text(
+                widget.title,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            const SizedBox(width: 40),
+          ],
+        ),
+        const SizedBox(height: 10),
+        // Main 2D SV Square (left) + Vertical Rainbow Hue Bar (right)
+        SizedBox(
+          height: 196,
+          child: Row(
+            children: [
+              // 2D Saturation × Value Square
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (ctx, box) {
+                    void handleSv(Offset local) {
+                      final s = (local.dx / box.maxWidth).clamp(0.0, 1.0);
+                      final v = 1.0 - (local.dy / box.maxHeight).clamp(0.0, 1.0);
+                      _updateHsv(_hsv.withSaturation(s).withValue(v));
+                    }
+
+                    return GestureDetector(
+                      onPanDown: (d) => handleSv(d.localPosition),
+                      onPanUpdate: (d) => handleSv(d.localPosition),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            // Horizontal white -> pure hue
+                            DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  colors: [Colors.white, pureHueColor],
+                                ),
+                              ),
+                            ),
+                            // Vertical transparent -> black
+                            const DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [Colors.transparent, Colors.black],
+                                ),
+                              ),
+                            ),
+                            // White ring selector
+                            Positioned(
+                              left: (_hsv.saturation * box.maxWidth - 10)
+                                  .clamp(0.0, math.max(0.0, box.maxWidth - 20)),
+                              top: ((1.0 - _hsv.value) * box.maxHeight - 10)
+                                  .clamp(0.0, math.max(0.0, box.maxHeight - 20)),
+                              child: IgnorePointer(
+                                child: Container(
+                                  width: 20,
+                                  height: 20,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: currentColor,
+                                    border: Border.all(
+                                      color: Colors.white,
+                                      width: 2.5,
+                                    ),
+                                    boxShadow: const [
+                                      BoxShadow(
+                                        color: Colors.black45,
+                                        blurRadius: 4,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(width: 14),
+              // Vertical Rainbow Hue Bar
+              SizedBox(
+                width: 28,
+                child: LayoutBuilder(
+                  builder: (ctx, box) {
+                    void handleHue(Offset local) {
+                      // Top = Red (360/0) -> Magenta (300) -> Blue (240) -> Cyan (180) -> Green (120) -> Yellow (60) -> Red (0)
+                      final t = (local.dy / box.maxHeight).clamp(0.0, 1.0);
+                      final hue = ((1.0 - t) * 360.0).clamp(0.0, 359.9);
+                      _updateHsv(_hsv.withHue(hue));
+                    }
+
+                    final double hueT = (1.0 - (_hsv.hue / 360.0)).clamp(0.0, 1.0);
+                    return GestureDetector(
+                      onPanDown: (d) => handleHue(d.localPosition),
+                      onPanUpdate: (d) => handleHue(d.localPosition),
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        alignment: Alignment.center,
+                        children: [
+                          Positioned.fill(
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(14),
+                              child: const DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                    colors: [
+                                      Color(0xFFFF0000), // Red
+                                      Color(0xFFFF00FF), // Magenta
+                                      Color(0xFF0000FF), // Blue
+                                      Color(0xFF00FFFF), // Cyan
+                                      Color(0xFF00FF00), // Green
+                                      Color(0xFFFFFF00), // Yellow
+                                      Color(0xFFFF0000), // Red
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            top: (hueT * box.maxHeight - 10)
+                                .clamp(0.0, math.max(0.0, box.maxHeight - 20)),
+                            child: IgnorePointer(
+                              child: Container(
+                                width: 22,
+                                height: 22,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: pureHueColor,
+                                  border: Border.all(
+                                    color: Colors.white,
+                                    width: 2.5,
+                                  ),
+                                  boxShadow: const [
+                                    BoxShadow(
+                                      color: Colors.black45,
+                                      blurRadius: 4,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        // Bottom row: [Live color rectangle] | [Editable #HEX box] | [Eyedropper]
+        Row(
+          children: [
+            Container(
+              width: 56,
+              height: 38,
+              decoration: BoxDecoration(
+                color: currentColor,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.black26, width: 1.2),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: SizedBox(
+                height: 38,
+                child: TextField(
+                  controller: _hexController,
+                  onSubmitted: _onHexSubmitted,
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.6,
+                  ),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 9,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    hintText: '#2F46B8',
+                  ),
+                ),
+              ),
+            ),
+            if (widget.onPickEyedropper != null) ...[
+              const SizedBox(width: 8),
+              IconButton(
+                tooltip: 'Ống nhỏ giọt hút màu trên trang',
+                onPressed: widget.onPickEyedropper,
+                icon: const Icon(Icons.colorize_rounded, size: 22),
+              ),
+            ],
+          ],
+        ),
+      ],
     );
   }
 }
