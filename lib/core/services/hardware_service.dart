@@ -222,6 +222,18 @@ class HardwareService {
     }
   }
 
+  /// Mở trực tiếp ứng dụng Bộ sưu tập (Gallery) gốc của Huawei/Android (sắp xếp ảnh mới nhất trước).
+  Future<String?> pickImageFromSystemGallery() async {
+    if (kIsWeb) return null;
+    try {
+      return await _channel.invokeMethod<String>('pickImageFromSystemGallery');
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
+
   /// Kích hoạt sự kiện gõ đúp bút giả lập phục vụ kiểm thử đơn vị.
   @visibleForTesting
   void emitStylusDoubleTapForTesting() {

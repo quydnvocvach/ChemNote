@@ -160,16 +160,18 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.3.1 with APK
+      - name: Publish Release v3.4.0 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.3.1
-          name: ChemNote Pro v3.3.1 (Huawei MatePad 11.5"S & Android)
+          tag_name: v3.4.0
+          name: ChemNote Pro v3.4.0 (Huawei MatePad 11.5"S & Android)
           body: |
-            ### ChemNote Pro v3.3.1 — Bút máy mượt chuẩn Huawei Notes, Lưu trạng thái bút & Cử chỉ 2/3 ngón!
-            - **Loại bỏ hoàn toàn gai nhọn đầu/cuối nét bút:** Chuyển sang công nghệ vẽ đường cong bậc hai (Quadratic Midpoint) tròn đầu chống răng cưa chuẩn bút máy Huawei Notes, tự nhiên theo lực nhấn & vận tốc M-Pencil 3.
-            - **Tự động ghi nhớ bút, màu sắc, cỡ nét, độ mờ & cỡ tẩy:** Mở lại sổ hoặc khởi động lại ứng dụng luôn giữ đúng cây bút đang dùng (không bị reset về bút đen mặc định).
-            - **Khôi phục cử chỉ chạm 2 ngón Hoàn tác (Undo) / chạm 3 ngón Làm lại (Redo)** mượt mà, không xung đột với phóng to/thu nhỏ 2 ngón.
+            ### ChemNote Pro v3.4.0 — Bản hoàn thiện đỉnh cao cho Huawei MatePad 11.5"S + M-Pencil 3!
+            - **Cắt ảnh trực tiếp trên trang giấy (In-Place Crop):** 8 tay nắm góc chữ L với vùng chạm rộng `40×40 px`, loại bỏ hoàn toàn bóng mờ lặp ảnh khi phóng to/kéo.
+            - **Bộ sưu tập gốc Huawei (`pickImageFromSystemGallery`):** Mở thẳng ứng dụng Bộ sưu tập sắp xếp ảnh mới nhất trước.
+            - **Nắn nét chữ tự nhiên không co chữ + Nắn nét 0% = nét nguyên bản 1:1**, mực bút máy tròn đầu không gai nhọn, tự động lưu trạng thái bút/màu/cỡ tẩy & chạm 2/3 ngón Hoàn tác/Làm lại.
+            - **Nhận diện Hình học chính xác + Kẻ thẳng Bút dạ quang (Hold-to-Snap):** Đóng băng nét ngay khi nắn, không còn móc 90° cuối đoạn thẳng hay nét dây cung cắt hình; giữ bút dạ quang tự kẻ thẳng ngang `±12°`.
+            - **Kéo thả Lasso mượt 144Hz**, **Tẩy quét liên tục `5 -> 35 px` không bỏ sót**, **Băng che học tập đục 100% kèm nút `×` xóa**, và **Hộp văn bản kéo thả mượt không lag**.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

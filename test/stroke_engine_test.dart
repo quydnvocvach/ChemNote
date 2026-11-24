@@ -69,6 +69,25 @@ void main() {
       expect(accepted!.x, greaterThan(50.0));
       expect(accepted.x, lessThan(65.0));
     });
+
+    test('0% smoothing completely bypasses smoothing and preserves 1:1 raw points', () {
+      const raw = [
+        StrokePoint(x: 10, y: 20, pressure: 0.5, timestamp: 1000),
+        StrokePoint(x: 15, y: 25, pressure: 0.6, timestamp: 1010),
+        StrokePoint(x: 20, y: 18, pressure: 0.7, timestamp: 1020),
+        StrokePoint(x: 26, y: 24, pressure: 0.55, timestamp: 1030),
+      ];
+      final untouched = StrokeEngine.smoothAndNeatenStroke(
+        raw,
+        stabilization: 0.0,
+        autoNeaten: false,
+      );
+      expect(untouched.length, raw.length);
+      for (int i = 0; i < raw.length; i++) {
+        expect(untouched[i].x, raw[i].x);
+        expect(untouched[i].y, raw[i].y);
+      }
+    });
   });
 
   group('StrokeEngine Auto Shape Recognition', () {

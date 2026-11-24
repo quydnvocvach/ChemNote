@@ -1763,7 +1763,7 @@ Future<void> showEraserSettingsSheet({
     showDragHandle: true,
     builder: (ctx) {
       EraserMode localMode = currentMode;
-      double localRadius = eraserRadius.clamp(8.0, 48.0);
+      double localRadius = eraserRadius.clamp(5.0, 35.0);
       return StatefulBuilder(
         builder: (sheetCtx, setSheetState) => SafeArea(
           child: Padding(
@@ -1831,9 +1831,9 @@ Future<void> showEraserSettingsSheet({
                       ),
                       Slider(
                         value: localRadius,
-                        min: 8.0,
-                        max: 48.0,
-                        divisions: 40,
+                        min: 5.0,
+                        max: 35.0,
+                        divisions: 30,
                         activeColor: EditorColors.activeBlue,
                         onChanged: (val) {
                           setSheetState(() => localRadius = val);
@@ -1843,9 +1843,9 @@ Future<void> showEraserSettingsSheet({
                       Row(
                         children: [
                           for (final preset in const [
-                            ('Nhỏ', 12.0),
-                            ('Vừa', 22.0),
-                            ('Lớn', 36.0),
+                            ('Nhỏ', 8.0),
+                            ('Vừa', 16.0),
+                            ('Lớn', 28.0),
                           ])
                             Expanded(
                               child: Padding(

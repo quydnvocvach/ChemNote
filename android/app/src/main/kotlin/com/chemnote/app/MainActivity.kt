@@ -1,7 +1,9 @@
 package com.chemnote.app
 
 import android.Manifest
+import android.app.Activity
 import android.content.ContentUris
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -30,6 +32,7 @@ class MainActivity : FlutterActivity() {
         private const val STYLUS_BUTTON_DEBOUNCE_MS = 250L
         private const val REQ_RECORD_AUDIO = 4012
         private const val REQ_READ_IMAGES = 4013
+        private const val REQ_PICK_GALLERY = 4014
     }
 
     private var hardwareChannel: MethodChannel? = null
@@ -43,6 +46,7 @@ class MainActivity : FlutterActivity() {
 
     private var pendingImagesLimit: Int = 12
     private var pendingImagesResult: MethodChannel.Result? = null
+    private var pendingGalleryResult: MethodChannel.Result? = null
 
     private var mediaPlayer: MediaPlayer? = null
     private var currentPlaybackSpeed: Float = 1.0f
@@ -149,10 +153,54 @@ class MainActivity : FlutterActivity() {
                             }.start()
                         }
                     }
+                    "pickImageFromSystemGallery" -> {
+                        handlePickImageFromSystemGallery(result)
+                    }
                     else -> result.notImplemented()
                 }
             }
         }
+    }
+
+    private fun handlePickImageFromSystemGallery(result: MethodChannel.Result) {
+        try {
+            pendingGalleryResult?.success(null)
+            pendingGalleryResult = result
+            val intent = Intent(
+                Intent.ACTION_PICK,
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            ).apply {
+                type = "image/*"
+            }
+            @Suppress("DEPRECATION")
+            startActivityForResult(intent, REQ_PICK_GALLERY)
+        } catch (_: Exception) {
+            pendingGalleryResult = null
+            result.success(null)
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == REQ_PICK_GALLERY) {
+            val cb = pendingGalleryResult
+            pendingGalleryResult = null
+            val uri = if (resultCode == Activity.RESULT_OK) data?.data else null
+            if (uri != null && cb != null) {
+                val destPath = File(
+                    cacheDir,
+                    "picked_gallery_${System.currentTimeMillis()}.jpg"
+                ).absolutePath
+                Thread {
+                    val copied = copyContentUriToFile(uri.toString(), destPath)
+                    runOnUiThread { cb.success(copied) }
+                }.start()
+            } else {
+                cb?.success(null)
+            }
+            return
+        }
+        super.onActivityResult(requestCode, resultCode, data)
     }
 
     private fun requiredImagesPermission(): String {

@@ -60,6 +60,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       _stickyDragNotifier = ValueNotifier(null);
   final ValueNotifier<Stroke?> _activeStickyStrokeNotifier = ValueNotifier(null);
   String? _activeStickyStrokeNoteId;
+  final ValueNotifier<Offset> _lassoDragOffsetNotifier = ValueNotifier(Offset.zero);
+  final ValueNotifier<({String pageId, List<Stroke> strokes})?>
+      _erasingStrokesNotifier = ValueNotifier(null);
+  List<Stroke>? _workingEraseStrokes;
+  Offset? _lastEraserPoint;
+  final ValueNotifier<({String id, double left, double top, double right, double bottom})?>
+      _cropDraftNotifier = ValueNotifier(null);
+  String? _croppingImageId;
+  bool _shapeSnappedLive = false;
   final ValueNotifier<double> _pullAddProgressNotifier = ValueNotifier(0.0);
   final GlobalKey _viewportStackKey = GlobalKey();
   final Map<String, TextEditingController> _stickyControllers = {};
@@ -190,6 +199,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         return EditorTool.brushPen;
       case ToolType.highlighter:
         return EditorTool.highlighter;
+      default:
+        return EditorTool.fountainPen;
     }
   }
 
@@ -231,7 +242,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _smoothingStrength = appState.lastSmoothingStrength;
     _highlighterColor = Color(appState.lastHighlighterColorValue);
     _highlighterWidth = appState.lastHighlighterWidth;
-    _eraserRadius = appState.lastEraserRadius;
+    _eraserRadius = appState.lastEraserRadius.clamp(5.0, 35.0);
     _palmFilter.stylusOnlyMode = appState.palmRejectionEnabled;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -287,6 +298,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _imageDragNotifier.dispose();
     _stickyDragNotifier.dispose();
     _activeStickyStrokeNotifier.dispose();
+    _lassoDragOffsetNotifier.dispose();
+    _erasingStrokesNotifier.dispose();
+    _cropDraftNotifier.dispose();
     _pullAddProgressNotifier.dispose();
     _activeTextController?.dispose();
     _activeTextFocusNode?.dispose();
@@ -661,8 +675,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     if (_activeTool == EditorTool.eraser) {
       _pageBeforeGesture = page;
       _eraserChangedPage = false;
+      _workingEraseStrokes = List<Stroke>.from(page.strokes);
+      _lastEraserPoint = rawPos;
       _eraserCursorNotifier.value = rawPos;
-      _applyEraserAt(page, rawPos);
+      _eraseAlongSegment(page, rawPos, rawPos);
       return;
     }
 
@@ -678,6 +694,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       final effectiveInkColor = _effectiveColor.withAlpha(
         (_effectiveOpacity.clamp(0.1, 1.0) * 255).round(),
       );
+      _shapeSnappedLive = false;
       _activeStrokeNotifier.value = Stroke(
         id: _uuid.v4(),
         toolType: _activeTool.toStrokeToolType(),
@@ -730,8 +747,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       if (_isDraggingLassoSelection && _lastLassoDragPos != null) {
         final delta = rawPos - _lastLassoDragPos!;
         _lastLassoDragPos = rawPos;
-        final movedPage = _lassoController.moveSelection(page, delta);
-        context.read<AppState>().updatePage(_activeNotebookId, movedPage);
+        _lassoDragOffsetNotifier.value = _lassoDragOffsetNotifier.value + delta;
       } else if (_lassoController.isDrawingLasso) {
         _lassoController.updateLasso(rawPos);
       }
@@ -740,12 +756,43 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
     if (_activeTool == EditorTool.eraser) {
       _eraserCursorNotifier.value = rawPos;
-      _applyEraserAt(page, rawPos);
+      _eraseAlongSegment(page, _lastEraserPoint ?? rawPos, rawPos);
+      _lastEraserPoint = rawPos;
       return;
     }
 
     final current = _activeStrokeNotifier.value;
     if (current != null && _activeTool.isDrawingTool) {
+      // Once hold-to-snap triggers:
+      // - For ShapeType.line: smoothly aim/stretch ONLY the 2nd endpoint (NEVER append a 3rd point -> ZERO 90° hook!)
+      // - For other snapped shapes (circle/rect/triangle): freeze points completely!
+      if (_shapeSnappedLive || current.shapeType != ShapeType.none) {
+        if (current.shapeType == ShapeType.line && current.points.length >= 2) {
+          final startPt = current.points.first;
+          double endX = pos.dx;
+          double endY = pos.dy;
+          if (current.toolType == ToolType.highlighter) {
+            final dx = (endX - startPt.x).abs();
+            final dy = (endY - startPt.y).abs();
+            // Snap within ±12° of horizontal to dead-level textbook highlighting
+            if (dx > 8.0 && dy <= dx * 0.2126) {
+              endY = startPt.y;
+            }
+          }
+          _activeStrokeNotifier.value = current.copyWith(
+            points: [
+              startPt,
+              StrokePoint(
+                x: endX,
+                y: endY,
+                pressure: startPt.pressure,
+                timestamp: DateTime.now().millisecondsSinceEpoch,
+              ),
+            ],
+          );
+        }
+        return;
+      }
       final prev = current.points.isNotEmpty ? current.points.last : null;
       final incoming = StrokeEngine.pointFromEvent(
         event,
@@ -822,12 +869,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
     if (_activeTool == EditorTool.lasso) {
       if (_isDraggingLassoSelection) {
+        final totalDelta = _lassoDragOffsetNotifier.value;
+        _lassoDragOffsetNotifier.value = Offset.zero;
         _isDraggingLassoSelection = false;
         _lastLassoDragPos = null;
-        if (_pageBeforeGesture != null) {
-          _pushUndo(_pageBeforeGesture!);
-          _pageBeforeGesture = null;
+        if (totalDelta != Offset.zero) {
+          final movedPage = _lassoController.moveSelection(page, totalDelta);
+          _commitPage(
+            movedPage,
+            undoSnapshot: _pageBeforeGesture ?? page,
+          );
         }
+        _pageBeforeGesture = null;
       } else if (_lassoController.isDrawingLasso) {
         _lassoController.finishLasso(page);
       }
@@ -836,8 +889,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
     if (_activeTool == EditorTool.eraser) {
       _eraserCursorNotifier.value = null;
-      if (_eraserChangedPage && _pageBeforeGesture != null) {
-        _pushUndo(_pageBeforeGesture!);
+      final finalStrokes = _workingEraseStrokes;
+      _workingEraseStrokes = null;
+      _lastEraserPoint = null;
+      _erasingStrokesNotifier.value = null;
+      if (_eraserChangedPage && finalStrokes != null) {
+        _commitPage(
+          page.copyWith(strokes: finalStrokes, updatedAt: DateTime.now()),
+          undoSnapshot: _pageBeforeGesture ?? page,
+        );
       }
       _pageBeforeGesture = null;
       _eraserChangedPage = false;
@@ -845,6 +905,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
 
     final live = _activeStrokeNotifier.value;
+    _shapeSnappedLive = false;
     if (live != null) {
       _activeStrokeNotifier.value = null;
       final appState = context.read<AppState>();
@@ -877,7 +938,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             isSmoothed: true,
           );
         }
-      } else if (finalized.shapeType == ShapeType.none && _autoNeatenEnabled) {
+      } else if (finalized.shapeType == ShapeType.none &&
+          _autoNeatenEnabled &&
+          _smoothingStrength > 0.01) {
         final smoothed = StrokeEngine.smoothAndNeatenStroke(
           finalized.points,
           stabilization: _smoothingStrength,
@@ -885,6 +948,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           toolType: finalized.toolType,
         );
         finalized = finalized.copyWith(points: smoothed, isSmoothed: true);
+      }
+
+      if (finalized.shapeType == ShapeType.line &&
+          finalized.points.length >= 2) {
+        // Keep exact clean 2-point straight line (ZERO 90° end hook!)
+        finalized = finalized.copyWith(
+          points: [finalized.points.first, finalized.points.last],
+          isSmoothed: true,
+        );
       }
 
       _commitPage(
@@ -896,9 +968,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   void _cancelActiveGesture() {
     _shapeHoldTimer?.cancel();
+    _shapeSnappedLive = false;
     _activeStrokeNotifier.value = null;
     _eraserCursorNotifier.value = null;
     _tapeDraftNotifier.value = null;
+    _lassoDragOffsetNotifier.value = Offset.zero;
     _tapeDragStart = null;
     if (_isDrawingPointerDown) {
       setState(() => _isDrawingPointerDown = false);
@@ -907,17 +981,54 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   void _scheduleShapeHoldTimer() {
     _shapeHoldTimer?.cancel();
+    if (_shapeSnappedLive) return;
     final appState = context.read<AppState>();
     if (!appState.holdToSnapShape && _activeTool != EditorTool.shape) return;
-    if (_activeTool == EditorTool.highlighter) return;
 
-    _shapeHoldTimer = Timer(const Duration(milliseconds: 460), () {
+    _shapeHoldTimer = Timer(const Duration(milliseconds: 450), () {
       final live = _activeStrokeNotifier.value;
-      if (!mounted || live == null || live.points.length < 6) return;
+      if (!mounted || live == null || live.points.length < 4) return;
+
+      // Highlighter hold-to-snap: snap directly to dead-straight 2-point line
+      // (auto-level to horizontal if within ±12°!)
+      if (live.toolType == ToolType.highlighter) {
+        final startPt = live.points.first;
+        final lastPt = live.points.last;
+        final dx = lastPt.x - startPt.x;
+        final dy = lastPt.y - startPt.y;
+        final dist = math.sqrt(dx * dx + dy * dy);
+        if (dist < 24.0) return;
+        final double snappedY =
+            (dx.abs() > 8.0 && dy.abs() <= dx.abs() * 0.2126)
+                ? startPt.y
+                : lastPt.y;
+        _shapeSnappedLive = true;
+        _activeStrokeNotifier.value = live.copyWith(
+          points: [
+            startPt,
+            StrokePoint(
+              x: lastPt.x,
+              y: snappedY,
+              pressure: lastPt.pressure,
+              timestamp: lastPt.timestamp,
+            ),
+          ],
+          shapeType: ShapeType.line,
+          isSmoothed: true,
+        );
+        return;
+      }
+
+      if (live.points.length < 6) return;
       final res = StrokeEngine.recognizeShape(live.points);
       if (res.recognized) {
+        _shapeSnappedLive = true;
+        final snappedPts = res.shapeType == ShapeType.line &&
+                res.snappedPoints.length >= 2
+            ? [res.snappedPoints.first, res.snappedPoints.last]
+            : res.snappedPoints;
         _activeStrokeNotifier.value = live.copyWith(
-          points: res.snappedPoints,
+          points: snappedPts,
           shapeType: res.shapeType,
           isSmoothed: true,
         );
@@ -961,43 +1072,60 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     return rawPos + (snappedVp - vpPos) / scale;
   }
 
-  void _applyEraserAt(NotePage page, Offset pos) {
-    final double eraserRadius = _eraserRadius;
-    if (_eraserMode == EraserMode.stroke) {
-      final remaining = page.strokes
-          .where((s) => !StrokeEngine.hitTestStroke(s, pos, tolerance: eraserRadius))
-          .toList();
-      if (remaining.length != page.strokes.length) {
-        _eraserChangedPage = true;
-        context.read<AppState>().updatePage(
-              _activeNotebookId,
-              page.copyWith(strokes: remaining, updatedAt: DateTime.now()),
-            );
-      }
-    } else {
-      final newStrokes = <Stroke>[];
-      bool changed = false;
-      for (final s in page.strokes) {
-        if (!StrokeEngine.hitTestStroke(s, pos, tolerance: eraserRadius)) {
-          newStrokes.add(s);
-          continue;
+  /// Zero-lag 144fps swept-segment eraser: samples along [from -> to] every
+  /// `max(3.0, radius * 0.4)` px so fast swipes never miss spots, mutating only
+  /// the in-memory `_workingEraseStrokes` list and notifying CanvasPainter.
+  void _eraseAlongSegment(NotePage page, Offset from, Offset to) {
+    final working = _workingEraseStrokes ?? List<Stroke>.from(page.strokes);
+    _workingEraseStrokes = working;
+    final double eraserRadius = _eraserRadius.clamp(5.0, 35.0);
+    final double segLen = (to - from).distance;
+    final double step = math.max(3.0, eraserRadius * 0.4);
+    final int steps = math.max(1, (segLen / step).ceil());
+
+    bool changedAny = false;
+    List<Stroke> cur = working;
+    for (int sIdx = 0; sIdx <= steps; sIdx++) {
+      final double t = steps == 0 ? 1.0 : sIdx / steps;
+      final Offset pos = Offset(
+        from.dx + (to.dx - from.dx) * t,
+        from.dy + (to.dy - from.dy) * t,
+      );
+      if (_eraserMode == EraserMode.stroke) {
+        final beforeLen = cur.length;
+        cur = cur
+            .where((s) =>
+                !StrokeEngine.hitTestStroke(s, pos, tolerance: eraserRadius))
+            .toList();
+        if (cur.length != beforeLen) changedAny = true;
+      } else {
+        final nextStrokes = <Stroke>[];
+        bool stepChanged = false;
+        for (final s in cur) {
+          if (!StrokeEngine.hitTestStroke(s, pos, tolerance: eraserRadius)) {
+            nextStrokes.add(s);
+            continue;
+          }
+          final split = StrokeEngine.precisionEraseStroke(
+            s,
+            pos,
+            eraserRadius,
+            idGenerator: _uuid.v4,
+          );
+          if (split.length != 1 || split.first.id != s.id) stepChanged = true;
+          nextStrokes.addAll(split);
         }
-        final split = StrokeEngine.precisionEraseStroke(
-          s,
-          pos,
-          eraserRadius,
-          idGenerator: _uuid.v4,
-        );
-        if (split.length != 1 || split.first.id != s.id) changed = true;
-        newStrokes.addAll(split);
+        if (stepChanged) {
+          cur = nextStrokes;
+          changedAny = true;
+        }
       }
-      if (changed) {
-        _eraserChangedPage = true;
-        context.read<AppState>().updatePage(
-              _activeNotebookId,
-              page.copyWith(strokes: newStrokes, updatedAt: DateTime.now()),
-            );
-      }
+    }
+
+    if (changedAny) {
+      _workingEraseStrokes = cur;
+      _eraserChangedPage = true;
+      _erasingStrokesNotifier.value = (pageId: page.id, strokes: cur);
     }
   }
 
@@ -1367,11 +1495,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         selected == 'camera' ? ImageSource.camera : ImageSource.gallery;
     try {
       // Never downscale on import: keep full original resolution for crisp cropping!
-      final picked = await _imagePicker.pickImage(source: source);
-      if (picked == null || !mounted) return;
+      String? pickedPath;
+      if (source == ImageSource.gallery) {
+        pickedPath = await HardwareService.instance.pickImageFromSystemGallery();
+      }
+      if (pickedPath == null) {
+        final picked = await _imagePicker.pickImage(source: source);
+        pickedPath = picked?.path;
+      }
+      if (pickedPath == null || !mounted) return;
 
       final savedPath = await appState.storage.saveImportedFile(
-        File(picked.path),
+        File(pickedPath),
         subfolder: 'images',
       );
       await _insertSavedImagePath(page, savedPath);
@@ -2674,6 +2809,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                   if (autoNeaten != null) _autoNeatenEnabled = autoNeaten;
                   if (smoothingStrength != null) {
                     _smoothingStrength = smoothingStrength;
+                    _autoNeatenEnabled = smoothingStrength > 0.01;
                   }
                 });
                 _persistPenPrefs();
@@ -3532,6 +3668,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         lassoSelectionBounds: isLassoOwner
                             ? _lassoController.selectionBounds
                             : null,
+                        lassoDragOffset:
+                            isLassoOwner ? _lassoDragOffsetNotifier : null,
+                        erasingStrokesNotifier: _erasingStrokesNotifier,
+                        hiddenImageId: _selectedImageId,
                         playingAudioId: _playingAudioId,
                         playingAudioTimeMs: _playingAudioId != null
                             ? _audioPositionMs
@@ -3539,6 +3679,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         repaintVersion: _repaintVersion,
                         drawBackground: true,
                         drawOverlays: !hasStickies,
+                        drawTapes: false,
                         maxZInclusive: baseMaxZ,
                       ),
                     ),
@@ -3610,6 +3751,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                               lassoSelectionBounds: isLassoOwner
                                   ? _lassoController.selectionBounds
                                   : null,
+                              lassoDragOffset: isLassoOwner
+                                  ? _lassoDragOffsetNotifier
+                                  : null,
+                              erasingStrokesNotifier: _erasingStrokesNotifier,
+                              hiddenImageId: _selectedImageId,
                               playingAudioId: _playingAudioId,
                               playingAudioTimeMs: _playingAudioId != null
                                   ? _audioPositionMs
@@ -3617,6 +3763,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                               repaintVersion: _repaintVersion,
                               drawBackground: false,
                               drawOverlays: si == sortedStickies.length - 1,
+                              drawTapes: false,
                               minZExclusive: sortedStickies[si].zIndex,
                               maxZInclusive: si + 1 < sortedStickies.length
                                   ? sortedStickies[si + 1].zIndex
@@ -3641,8 +3788,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             for (final st in page.stencilElements)
               _buildStencilOverlay(page, st),
 
-            // Interactive Text Overlays
+            // Interactive Text Overlays (zero-lag local controller + 144fps drag)
             for (final txt in page.textElements) _buildTextOverlay(page, txt),
+
+            // 100% Opaque & Deletable Study Tape Overlays (ABOVE all strokes!)
+            for (final tape in page.tapeElements)
+              _buildStudyTapeOverlay(
+                page,
+                tape,
+                context.read<AppState>().readOnlyMode,
+              ),
 
             // 6-Button Floating Image Action Pill (Direct sibling in outer Stack so hit-testing works 100%!)
             if ((_activeTool == EditorTool.image ||
@@ -3677,79 +3832,102 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         8.0,
                         math.max(8.0, pageSize.height - 56.0),
                       );
+                      final bool isCroppingThis =
+                          _croppingImageId == targetImg.id;
                       return Positioned(
                         left: pillLeft,
                         top: pillTop,
                         child: GestureDetector(
                           behavior: HitTestBehavior.opaque,
                           onTap: () {},
-                          child: ImageActionPill(
-                            onCropRect: () => _openImageCrop(
-                              page,
-                              targetImg,
-                              ImageCropMode.rectangle,
-                            ),
-                            onCropFreehand: () => _openImageCrop(
-                              page,
-                              targetImg,
-                              ImageCropMode.freehand,
-                            ),
-                            onCopy: () {
-                              final dup = targetImg.copyWith(
-                                id: _uuid.v4(),
-                                x: targetImg.x + 24,
-                                y: targetImg.y + 24,
-                              );
-                              _commitPage(
-                                page.copyWith(
-                                  imageElements: [...page.imageElements, dup],
-                                ),
-                                undoSnapshot: page,
-                              );
-                              setState(() => _selectedImageId = dup.id);
-                            },
-                            onCut: () {
-                              _lassoController.clear();
-                              _selectedImageId = null;
-                              final updated = page.imageElements
-                                  .where((e) => e.id != targetImg.id)
-                                  .toList();
-                              _commitPage(
-                                page.copyWith(imageElements: updated),
-                                undoSnapshot: page,
-                              );
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  duration: Duration(milliseconds: 1000),
-                                  content: Text('Đã cắt hình ảnh'),
-                                ),
-                              );
-                            },
-                            onAddToStickers: () {
-                              context
-                                  .read<AppState>()
-                                  .addCustomSticker(targetImg.filePath);
-                              if (mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    duration: Duration(milliseconds: 1200),
-                                    content: Text(
-                                        'Đã lưu vào bộ Hình dán của bạn'),
+                          child: isCroppingThis
+                              ? _buildInlineCropPill(page, targetImg)
+                              : ImageActionPill(
+                                  onCropRect: () {
+                                    setState(() {
+                                      _croppingImageId = targetImg.id;
+                                    });
+                                    _cropDraftNotifier.value = (
+                                      id: targetImg.id,
+                                      left: targetImg.cropLeft,
+                                      top: targetImg.cropTop,
+                                      right: targetImg.cropRight,
+                                      bottom: targetImg.cropBottom,
+                                    );
+                                  },
+                                  onCropFreehand: () => _openImageCrop(
+                                    page,
+                                    targetImg,
+                                    ImageCropMode.freehand,
                                   ),
-                                );
-                              }
-                            },
-                            onDelete: () {
-                              _selectedImageId = null;
-                              final updated = page.imageElements
-                                  .where((e) => e.id != targetImg.id)
-                                  .toList();
-                              _commitPage(
-                                page.copyWith(imageElements: updated),
-                                undoSnapshot: page,
-                              );
-                            },
-                          ),
+                                  onCopy: () {
+                                    final dup = targetImg.copyWith(
+                                      id: _uuid.v4(),
+                                      x: targetImg.x + 24,
+                                      y: targetImg.y + 24,
+                                      zIndex:
+                                          DateTime.now().millisecondsSinceEpoch,
+                                    );
+                                    _commitPage(
+                                      page.copyWith(
+                                        imageElements: [
+                                          ...page.imageElements,
+                                          dup
+                                        ],
+                                      ),
+                                      undoSnapshot: page,
+                                    );
+                                    setState(() => _selectedImageId = dup.id);
+                                  },
+                                  onCut: () {
+                                    _lassoController.clear();
+                                    _selectedImageId = null;
+                                    _croppingImageId = null;
+                                    _cropDraftNotifier.value = null;
+                                    final updated = page.imageElements
+                                        .where((e) => e.id != targetImg.id)
+                                        .toList();
+                                    _commitPage(
+                                      page.copyWith(imageElements: updated),
+                                      undoSnapshot: page,
+                                    );
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        duration: Duration(milliseconds: 1000),
+                                        content: Text('Đã cắt hình ảnh'),
+                                      ),
+                                    );
+                                  },
+                                  onAddToStickers: () {
+                                    context
+                                        .read<AppState>()
+                                        .addCustomSticker(targetImg.filePath);
+                                    if (mounted) {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        const SnackBar(
+                                          duration:
+                                              Duration(milliseconds: 1200),
+                                          content: Text(
+                                            'Đã lưu vào bộ Hình dán của bạn',
+                                          ),
+                                        ),
+                                      );
+                                    }
+                                  },
+                                  onDelete: () {
+                                    _selectedImageId = null;
+                                    _croppingImageId = null;
+                                    _cropDraftNotifier.value = null;
+                                    final updated = page.imageElements
+                                        .where((e) => e.id != targetImg.id)
+                                        .toList();
+                                    _commitPage(
+                                      page.copyWith(imageElements: updated),
+                                      undoSnapshot: page,
+                                    );
+                                  },
+                                ),
                         ),
                       );
                     },
@@ -3872,223 +4050,301 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   // INTERACTIVE ELEMENT OVERLAYS (TEXT, IMAGE, STENCIL)
   // ===========================================================================
 
-  Widget _buildTextOverlay(NotePage page, TextElement element) {
-    final bool isSelected = _selectedTextId == element.id;
-    final bool isEditing = _editingTextId == element.id;
-    final bool interactive = _activeTool == EditorTool.panZoom ||
-        _activeTool == EditorTool.textBox ||
-        isSelected ||
-        isEditing;
-
+  Widget _buildStudyTapeOverlay(
+    NotePage page,
+    TapeElement tape,
+    bool readOnly,
+  ) {
+    final baseColor = Color(tape.colorValue);
     return Positioned(
-      left: element.x,
-      top: element.y,
-      child: IgnorePointer(
-        ignoring: !interactive,
-        child: GestureDetector(
-          onTap: () {
-            if (!isSelected) {
-              setState(() {
-                _selectedTextId = element.id;
-                _selectedImageId = null;
-                _selectedStencilId = null;
-              });
-            } else if (!isEditing) {
-              _startEditingText(element);
-            }
-          },
-          onDoubleTap: () => _startEditingText(element),
-          onPanStart: isEditing
-              ? null
-              : (_) => setState(() => _isOverlayDragging = true),
-          onPanUpdate: isEditing
-              ? null
-              : (details) {
-                  final updatedList = page.textElements
-                      .map((t) => t.id == element.id
-                          ? t.copyWith(
-                              x: t.x + details.delta.dx,
-                              y: t.y + details.delta.dy,
-                            )
-                          : t)
-                      .toList();
-                  context.read<AppState>().updatePage(
-                        _activeNotebookId,
-                        page.copyWith(textElements: updatedList),
-                      );
-                },
-          onPanEnd: isEditing
-              ? null
-              : (_) => setState(() => _isOverlayDragging = false),
-          onPanCancel: () {
-            if (_isOverlayDragging) setState(() => _isOverlayDragging = false);
-          },
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              Container(
-                width: element.width,
-                constraints: BoxConstraints(minHeight: element.height),
-                padding: const EdgeInsets.all(6),
-                decoration: BoxDecoration(
-                  color: isEditing
-                      ? Colors.white.withAlpha(225)
-                      : Colors.transparent,
-                  border: (isSelected || isEditing)
-                      ? Border.all(color: EditorColors.activeBlue, width: 1.5)
-                      : null,
-                  borderRadius: BorderRadius.circular(6),
+      left: tape.x,
+      top: tape.y,
+      width: tape.width,
+      height: tape.height,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          final updated = page.tapeElements
+              .map((t) => t.id == tape.id
+                  ? t.copyWith(isRevealed: !t.isRevealed)
+                  : t)
+              .toList();
+          _commitPage(
+            page.copyWith(tapeElements: updated),
+            undoSnapshot: page,
+          );
+        },
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            // 100% solid opaque fill when unrevealed (0% ink bleed-through!)
+            Container(
+              decoration: BoxDecoration(
+                color: tape.isRevealed
+                    ? baseColor.withAlpha(24)
+                    : baseColor.withAlpha(255),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(
+                  color: tape.isRevealed
+                      ? baseColor.withAlpha(170)
+                      : Colors.black.withAlpha(35),
+                  width: 1.4,
                 ),
-                child: isEditing
-                    ? TextField(
-                        controller: _activeTextController,
-                        focusNode: _activeTextFocusNode,
-                        maxLines: null,
-                        style: TextStyle(
-                          fontSize: element.fontSize,
-                          color: Color(element.colorValue),
-                          fontWeight: element.isBold
-                              ? FontWeight.bold
-                              : FontWeight.normal,
-                          fontStyle: element.isItalic
-                              ? FontStyle.italic
-                              : FontStyle.normal,
-                        ),
-                        decoration: const InputDecoration(
-                          isDense: true,
-                          border: InputBorder.none,
-                          hintText: 'Nhập văn bản / PTHH...',
-                        ),
-                      )
-                    : Text(
-                        element.text.isEmpty
-                            ? 'Nhấn đúp để nhập'
-                            : element.text,
-                        style: TextStyle(
-                          fontSize: element.fontSize,
-                          color: element.text.isEmpty
-                              ? Colors.grey
-                              : Color(element.colorValue),
-                          fontWeight: element.isBold
-                              ? FontWeight.bold
-                              : FontWeight.normal,
-                          fontStyle: element.isItalic
-                              ? FontStyle.italic
-                              : FontStyle.normal,
+              ),
+              alignment: Alignment.center,
+              child: tape.isRevealed
+                  ? null
+                  : Text(
+                      'Chạm để hiện',
+                      style: TextStyle(
+                        color: Colors.white.withAlpha(220),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+            ),
+            // Crisp 32x32 Delete (`×`) button on the right edge
+            if (!readOnly)
+              Positioned(
+                right: 0,
+                top: 0,
+                bottom: 0,
+                child: Center(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      final updated = page.tapeElements
+                          .where((t) => t.id != tape.id)
+                          .toList();
+                      _commitPage(
+                        page.copyWith(tapeElements: updated),
+                        undoSnapshot: page,
+                      );
+                    },
+                    child: SizedBox(
+                      width: 32,
+                      height: 32,
+                      child: Center(
+                        child: Container(
+                          width: 20,
+                          height: 20,
+                          decoration: BoxDecoration(
+                            color: Colors.black.withAlpha(110),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                            Icons.close_rounded,
+                            size: 13,
+                            color: Colors.white,
+                          ),
                         ),
                       ),
-              ),
-              if (isSelected || isEditing)
-                Positioned(
-                  top: -32,
-                  left: 0,
-                  child: Material(
-                    elevation: 4,
-                    color: EditorColors.obsidianSurface,
-                    borderRadius: BorderRadius.circular(16),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          icon: Icon(
-                            Icons.format_bold_rounded,
-                            size: 16,
-                            color: element.isBold
-                                ? EditorColors.activeBlue
-                                : Colors.white,
-                          ),
-                          visualDensity: VisualDensity.compact,
-                          padding: EdgeInsets.zero,
-                          constraints:
-                              const BoxConstraints(minWidth: 28, minHeight: 28),
-                          onPressed: () {
-                            final updated = page.textElements
-                                .map((t) => t.id == element.id
-                                    ? t.copyWith(isBold: !t.isBold)
-                                    : t)
-                                .toList();
-                            _commitPage(page.copyWith(textElements: updated));
-                          },
-                        ),
-                        IconButton(
-                          icon: Icon(
-                            Icons.format_italic_rounded,
-                            size: 16,
-                            color: element.isItalic
-                                ? EditorColors.activeBlue
-                                : Colors.white,
-                          ),
-                          visualDensity: VisualDensity.compact,
-                          padding: EdgeInsets.zero,
-                          constraints:
-                              const BoxConstraints(minWidth: 28, minHeight: 28),
-                          onPressed: () {
-                            final updated = page.textElements
-                                .map((t) => t.id == element.id
-                                    ? t.copyWith(isItalic: !t.isItalic)
-                                    : t)
-                                .toList();
-                            _commitPage(page.copyWith(textElements: updated));
-                          },
-                        ),
-                        if (isEditing)
-                          IconButton(
-                            icon: const Icon(Icons.check_rounded,
-                                size: 16, color: Color(0xFF34D399)),
-                            visualDensity: VisualDensity.compact,
-                            padding: EdgeInsets.zero,
-                            constraints: const BoxConstraints(
-                                minWidth: 28, minHeight: 28),
-                            onPressed: () {
-                              _commitActiveTextEdit();
-                              setState(() {});
-                            },
-                          ),
-                        IconButton(
-                          icon: const Icon(Icons.delete_outline_rounded,
-                              size: 16, color: Color(0xFFEF4444)),
-                          visualDensity: VisualDensity.compact,
-                          padding: EdgeInsets.zero,
-                          constraints:
-                              const BoxConstraints(minWidth: 28, minHeight: 28),
-                          onPressed: () {
-                            _editingTextId = null;
-                            _selectedTextId = null;
-                            final updated = page.textElements
-                                .where((t) => t.id != element.id)
-                                .toList();
-                            _commitPage(
-                              page.copyWith(textElements: updated),
-                              undoSnapshot: page,
-                            );
-                          },
-                        ),
-                      ],
                     ),
                   ),
                 ),
-              if (isSelected)
-                Positioned(
-                  right: -8,
-                  bottom: -8,
-                  child: GestureDetector(
-                    onPanUpdate: (d) {
-                      final updated = page.textElements
-                          .map((t) => t.id == element.id
-                              ? t.copyWith(
-                                  width: math.max(80.0, t.width + d.delta.dx),
-                                  height: math.max(36.0, t.height + d.delta.dy),
-                                )
-                              : t)
-                          .toList();
-                      context.read<AppState>().updatePage(
-                            _activeNotebookId,
-                            page.copyWith(textElements: updated),
-                          );
-                    },
-                    child: _buildResizeHandle(),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTextOverlay(NotePage page, TextElement element) {
+    final bool isSelected = _selectedTextId == element.id;
+    final bool readOnly = context.read<AppState>().readOnlyMode;
+    final bool interactive = !readOnly &&
+        (_activeTool == EditorTool.panZoom ||
+            _activeTool == EditorTool.textBox ||
+            isSelected);
+
+    return _DraggableTextBoxOverlay(
+      key: ValueKey('txt_${element.id}'),
+      element: element,
+      interactive: interactive,
+      isSelected: isSelected,
+      onSelect: () {
+        if (_selectedTextId != element.id) {
+          setState(() {
+            _selectedTextId = element.id;
+            _selectedImageId = null;
+            _selectedStencilId = null;
+          });
+        }
+      },
+      onDragStart: () => setState(() => _isOverlayDragging = true),
+      onDragEnd: () => setState(() => _isOverlayDragging = false),
+      onCommit: (updatedEl) {
+        final updated = page.textElements
+            .map((t) => t.id == element.id ? updatedEl : t)
+            .toList();
+        _commitPage(
+          page.copyWith(textElements: updated),
+          undoSnapshot: page,
+        );
+      },
+      onDelete: () {
+        _editingTextId = null;
+        _selectedTextId = null;
+        final updated =
+            page.textElements.where((t) => t.id != element.id).toList();
+        _commitPage(
+          page.copyWith(textElements: updated),
+          undoSnapshot: page,
+        );
+      },
+      resizeHandle: _buildResizeHandle(),
+    );
+  }
+
+  Widget _buildInlineCropPill(NotePage page, ImageElement img) {
+    return Material(
+      elevation: 8,
+      borderRadius: BorderRadius.circular(22),
+      color: EditorColors.obsidianSurface.withAlpha(242),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: EditorColors.activeBlue.withAlpha(140)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            InkWell(
+              onTap: () {
+                final draft = _cropDraftNotifier.value;
+                if (draft != null && draft.id == img.id) {
+                  // Compute new on-page bounds matching the trimmed region
+                  final oldSpanX = math.max(0.01, img.cropRight - img.cropLeft);
+                  final oldSpanY = math.max(0.01, img.cropBottom - img.cropTop);
+                  final fullW = img.width / oldSpanX;
+                  final fullH = img.height / oldSpanY;
+                  final fullX = img.x - img.cropLeft * fullW;
+                  final fullY = img.y - img.cropTop * fullH;
+
+                  final newW = math.max(8.0, (draft.right - draft.left) * fullW);
+                  final newH = math.max(8.0, (draft.bottom - draft.top) * fullH);
+                  final newX = fullX + draft.left * fullW;
+                  final newY = fullY + draft.top * fullH;
+
+                  final updated = page.imageElements
+                      .map((e) => e.id == img.id
+                          ? e.copyWith(
+                              x: newX,
+                              y: newY,
+                              width: newW,
+                              height: newH,
+                              cropLeft: draft.left,
+                              cropTop: draft.top,
+                              cropRight: draft.right,
+                              cropBottom: draft.bottom,
+                              clipPolygon: const [],
+                            )
+                          : e)
+                      .toList();
+                  _commitPage(
+                    page.copyWith(imageElements: updated),
+                    undoSnapshot: page,
+                  );
+                }
+                _cropDraftNotifier.value = null;
+                setState(() => _croppingImageId = null);
+              },
+              borderRadius: BorderRadius.circular(16),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: EditorColors.activeBlue,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.check_rounded, size: 15, color: Colors.white),
+                    SizedBox(width: 4),
+                    Text(
+                      'Xong',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            InkWell(
+              onTap: () {
+                _cropDraftNotifier.value = (
+                  id: img.id,
+                  left: 0.0,
+                  top: 0.0,
+                  right: 1.0,
+                  bottom: 1.0,
+                );
+              },
+              borderRadius: BorderRadius.circular(14),
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                child: Text(
+                  'Đặt lại',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
+              ),
+            ),
+            const SizedBox(width: 4),
+            InkWell(
+              onTap: () {
+                _cropDraftNotifier.value = null;
+                setState(() => _croppingImageId = null);
+              },
+              borderRadius: BorderRadius.circular(14),
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.close_rounded, size: 15, color: Colors.white70),
+                    SizedBox(width: 3),
+                    Text(
+                      'Hủy',
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCropBracketHandle() {
+    return SizedBox(
+      width: 40,
+      height: 40,
+      child: Center(
+        child: Container(
+          width: 14,
+          height: 14,
+          decoration: BoxDecoration(
+            color: EditorColors.activeBlue,
+            borderRadius: BorderRadius.circular(3),
+            border: Border.all(color: Colors.white, width: 2),
+            boxShadow: const [
+              BoxShadow(color: Colors.black38, blurRadius: 3),
             ],
           ),
         ),
@@ -4100,8 +4356,306 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     final bool interactive =
         _activeTool == EditorTool.image || _activeTool == EditorTool.lasso;
     final bool isSelected = interactive && _selectedImageId == img.id;
-    final bool hasHighRes = _elementImageCache.containsKey(img.filePath);
+    final bool isCropping = isSelected && _croppingImageId == img.id;
+    final ui.Image? cachedUiImg = _elementImageCache[img.filePath];
     final file = File(img.filePath);
+
+    // IN-PLACE ON-CANVAS RECTANGULAR CROP MODE (144fps ValueNotifier, ZERO modal!)
+    if (isCropping) {
+      final oldSpanX = math.max(0.01, img.cropRight - img.cropLeft);
+      final oldSpanY = math.max(0.01, img.cropBottom - img.cropTop);
+      final fullW = img.width / oldSpanX;
+      final fullH = img.height / oldSpanY;
+      final fullX = img.x - img.cropLeft * fullW;
+      final fullY = img.y - img.cropTop * fullH;
+      final minNormX = (8.0 / fullW).clamp(0.01, 0.45);
+      final minNormY = (8.0 / fullH).clamp(0.01, 0.45);
+
+      void updateCrop(
+        ({String id, double left, double top, double right, double bottom})
+                Function(
+          ({String id, double left, double top, double right, double bottom}) c,
+        )
+            fn,
+      ) {
+        final cur = _cropDraftNotifier.value ??
+            (
+              id: img.id,
+              left: img.cropLeft,
+              top: img.cropTop,
+              right: img.cropRight,
+              bottom: img.cropBottom,
+            );
+        _cropDraftNotifier.value = fn(cur);
+      }
+
+      return ValueListenableBuilder<
+          ({String id, double left, double top, double right, double bottom})?>(
+        valueListenable: _cropDraftNotifier,
+        builder: (_, draft, __) {
+          final double cl =
+              (draft != null && draft.id == img.id) ? draft.left : img.cropLeft;
+          final double ct =
+              (draft != null && draft.id == img.id) ? draft.top : img.cropTop;
+          final double cr = (draft != null && draft.id == img.id)
+              ? draft.right
+              : img.cropRight;
+          final double cb = (draft != null && draft.id == img.id)
+              ? draft.bottom
+              : img.cropBottom;
+
+          final cropRect = Rect.fromLTRB(
+            cl * fullW,
+            ct * fullH,
+            cr * fullW,
+            cb * fullH,
+          );
+
+          return Positioned(
+            left: fullX,
+            top: fullY,
+            child: Transform.rotate(
+              angle: img.rotation,
+              child: SizedBox(
+                width: fullW,
+                height: fullH,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    // Full uncropped image with dimmed veil outside live cropRect
+                    Positioned.fill(
+                      child: RepaintBoundary(
+                        child: cachedUiImg != null
+                            ? CustomPaint(
+                                painter: _SelectedImagePainter(
+                                  image: cachedUiImg,
+                                  cropLeft: 0.0,
+                                  cropTop: 0.0,
+                                  cropRight: 1.0,
+                                  cropBottom: 1.0,
+                                  dimOutsideRect: cropRect,
+                                ),
+                              )
+                            : (file.existsSync()
+                                ? Image.file(
+                                    file,
+                                    fit: BoxFit.fill,
+                                    gaplessPlayback: true,
+                                  )
+                                : const SizedBox.expand()),
+                      ),
+                    ),
+                    // Crisp blue live crop border
+                    Positioned.fromRect(
+                      rect: cropRect,
+                      child: IgnorePointer(
+                        child: Container(
+                          decoration: BoxDecoration(
+                            border: Border.all(
+                              color: EditorColors.activeBlue,
+                              width: 2.2,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    // 8 In-Place Crop Handles (40x40 px stylus-friendly opaque hitboxes!)
+                    // Top-Left
+                    Positioned(
+                      left: cropRect.left - 20,
+                      top: cropRect.top - 20,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) =>
+                            setState(() => _isOverlayDragging = true),
+                        onPanUpdate: (d) => updateCrop((c) => (
+                              id: c.id,
+                              left: (c.left + d.delta.dx / fullW)
+                                  .clamp(0.0, c.right - minNormX),
+                              top: (c.top + d.delta.dy / fullH)
+                                  .clamp(0.0, c.bottom - minNormY),
+                              right: c.right,
+                              bottom: c.bottom,
+                            )),
+                        onPanEnd: (_) =>
+                            setState(() => _isOverlayDragging = false),
+                        onPanCancel: () =>
+                            setState(() => _isOverlayDragging = false),
+                        child: _buildCropBracketHandle(),
+                      ),
+                    ),
+                    // Top-Center
+                    Positioned(
+                      left: (cropRect.left + cropRect.right) * 0.5 - 20,
+                      top: cropRect.top - 20,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) =>
+                            setState(() => _isOverlayDragging = true),
+                        onPanUpdate: (d) => updateCrop((c) => (
+                              id: c.id,
+                              left: c.left,
+                              top: (c.top + d.delta.dy / fullH)
+                                  .clamp(0.0, c.bottom - minNormY),
+                              right: c.right,
+                              bottom: c.bottom,
+                            )),
+                        onPanEnd: (_) =>
+                            setState(() => _isOverlayDragging = false),
+                        onPanCancel: () =>
+                            setState(() => _isOverlayDragging = false),
+                        child: _buildCropBracketHandle(),
+                      ),
+                    ),
+                    // Top-Right
+                    Positioned(
+                      left: cropRect.right - 20,
+                      top: cropRect.top - 20,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) =>
+                            setState(() => _isOverlayDragging = true),
+                        onPanUpdate: (d) => updateCrop((c) => (
+                              id: c.id,
+                              left: c.left,
+                              top: (c.top + d.delta.dy / fullH)
+                                  .clamp(0.0, c.bottom - minNormY),
+                              right: (c.right + d.delta.dx / fullW)
+                                  .clamp(c.left + minNormX, 1.0),
+                              bottom: c.bottom,
+                            )),
+                        onPanEnd: (_) =>
+                            setState(() => _isOverlayDragging = false),
+                        onPanCancel: () =>
+                            setState(() => _isOverlayDragging = false),
+                        child: _buildCropBracketHandle(),
+                      ),
+                    ),
+                    // Middle-Left
+                    Positioned(
+                      left: cropRect.left - 20,
+                      top: (cropRect.top + cropRect.bottom) * 0.5 - 20,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) =>
+                            setState(() => _isOverlayDragging = true),
+                        onPanUpdate: (d) => updateCrop((c) => (
+                              id: c.id,
+                              left: (c.left + d.delta.dx / fullW)
+                                  .clamp(0.0, c.right - minNormX),
+                              top: c.top,
+                              right: c.right,
+                              bottom: c.bottom,
+                            )),
+                        onPanEnd: (_) =>
+                            setState(() => _isOverlayDragging = false),
+                        onPanCancel: () =>
+                            setState(() => _isOverlayDragging = false),
+                        child: _buildCropBracketHandle(),
+                      ),
+                    ),
+                    // Middle-Right
+                    Positioned(
+                      left: cropRect.right - 20,
+                      top: (cropRect.top + cropRect.bottom) * 0.5 - 20,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) =>
+                            setState(() => _isOverlayDragging = true),
+                        onPanUpdate: (d) => updateCrop((c) => (
+                              id: c.id,
+                              left: c.left,
+                              top: c.top,
+                              right: (c.right + d.delta.dx / fullW)
+                                  .clamp(c.left + minNormX, 1.0),
+                              bottom: c.bottom,
+                            )),
+                        onPanEnd: (_) =>
+                            setState(() => _isOverlayDragging = false),
+                        onPanCancel: () =>
+                            setState(() => _isOverlayDragging = false),
+                        child: _buildCropBracketHandle(),
+                      ),
+                    ),
+                    // Bottom-Left
+                    Positioned(
+                      left: cropRect.left - 20,
+                      top: cropRect.bottom - 20,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) =>
+                            setState(() => _isOverlayDragging = true),
+                        onPanUpdate: (d) => updateCrop((c) => (
+                              id: c.id,
+                              left: (c.left + d.delta.dx / fullW)
+                                  .clamp(0.0, c.right - minNormX),
+                              top: c.top,
+                              right: c.right,
+                              bottom: (c.bottom + d.delta.dy / fullH)
+                                  .clamp(c.top + minNormY, 1.0),
+                            )),
+                        onPanEnd: (_) =>
+                            setState(() => _isOverlayDragging = false),
+                        onPanCancel: () =>
+                            setState(() => _isOverlayDragging = false),
+                        child: _buildCropBracketHandle(),
+                      ),
+                    ),
+                    // Bottom-Center
+                    Positioned(
+                      left: (cropRect.left + cropRect.right) * 0.5 - 20,
+                      top: cropRect.bottom - 20,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) =>
+                            setState(() => _isOverlayDragging = true),
+                        onPanUpdate: (d) => updateCrop((c) => (
+                              id: c.id,
+                              left: c.left,
+                              top: c.top,
+                              right: c.right,
+                              bottom: (c.bottom + d.delta.dy / fullH)
+                                  .clamp(c.top + minNormY, 1.0),
+                            )),
+                        onPanEnd: (_) =>
+                            setState(() => _isOverlayDragging = false),
+                        onPanCancel: () =>
+                            setState(() => _isOverlayDragging = false),
+                        child: _buildCropBracketHandle(),
+                      ),
+                    ),
+                    // Bottom-Right
+                    Positioned(
+                      left: cropRect.right - 20,
+                      top: cropRect.bottom - 20,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) =>
+                            setState(() => _isOverlayDragging = true),
+                        onPanUpdate: (d) => updateCrop((c) => (
+                              id: c.id,
+                              left: c.left,
+                              top: c.top,
+                              right: (c.right + d.delta.dx / fullW)
+                                  .clamp(c.left + minNormX, 1.0),
+                              bottom: (c.bottom + d.delta.dy / fullH)
+                                  .clamp(c.top + minNormY, 1.0),
+                            )),
+                        onPanEnd: (_) =>
+                            setState(() => _isOverlayDragging = false),
+                        onPanCancel: () =>
+                            setState(() => _isOverlayDragging = false),
+                        child: _buildCropBracketHandle(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      );
+    }
 
     void beginDrag() {
       _imageDragNotifier.value = (
@@ -4171,6 +4725,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               child: GestureDetector(
                 onTap: () => setState(() {
                   _selectedImageId = img.id;
+                  _croppingImageId = null;
+                  _cropDraftNotifier.value = null;
                   _selectedTextId = null;
                   _selectedStencilId = null;
                 }),
@@ -4189,7 +4745,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 child: Stack(
                   clipBehavior: Clip.none,
                   children: [
-                    // Live preview box during drag/resize, or crisp border box when idle
+                    // Selected image renders ONLY here (CanvasPainter hides hiddenImageId -> ZERO double ghosting!)
                     RepaintBoundary(
                       child: Container(
                         width: w,
@@ -4201,37 +4757,53 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                   width: 2,
                                 )
                               : null,
-                          color: draggingThis
-                              ? EditorColors.activeBlue.withAlpha(20)
-                              : null,
                         ),
-                        child: hasHighRes && !draggingThis
-                            ? const SizedBox.expand()
-                            : (file.existsSync()
-                                ? Image.file(
-                                    file,
-                                    fit: BoxFit.contain,
-                                    filterQuality: FilterQuality.medium,
-                                    gaplessPlayback: true,
-                                  )
-                                : Container(
-                                    color: Colors.grey.shade200,
-                                    alignment: Alignment.center,
-                                    child: const Icon(
-                                      Icons.broken_image_outlined,
-                                      size: 32,
+                        child: isSelected
+                            ? (cachedUiImg != null
+                                ? CustomPaint(
+                                    painter: _SelectedImagePainter(
+                                      image: cachedUiImg,
+                                      cropLeft: img.cropLeft,
+                                      cropTop: img.cropTop,
+                                      cropRight: img.cropRight,
+                                      cropBottom: img.cropBottom,
+                                      clipPolygon: img.clipPolygon,
                                     ),
-                                  )),
+                                  )
+                                : (file.existsSync()
+                                    ? Image.file(
+                                        file,
+                                        fit: BoxFit.contain,
+                                        filterQuality: FilterQuality.medium,
+                                        gaplessPlayback: true,
+                                      )
+                                    : Container(
+                                        color: Colors.grey.shade200,
+                                        alignment: Alignment.center,
+                                        child: const Icon(
+                                          Icons.broken_image_outlined,
+                                          size: 32,
+                                        ),
+                                      )))
+                            : (cachedUiImg != null
+                                ? const SizedBox.expand()
+                                : (file.existsSync()
+                                    ? Image.file(
+                                        file,
+                                        fit: BoxFit.contain,
+                                        filterQuality: FilterQuality.medium,
+                                        gaplessPlayback: true,
+                                      )
+                                    : const SizedBox.expand())),
                       ),
                     ),
                     if (isSelected) ...[
-                      // Rotate handle (bottom-center stem)
+                      // Rotate handle (40x40 opaque hitbox centered at bottom stem)
                       Positioned(
-                        left: w * 0.5 - 12,
-                        bottom: -34,
-                        child: _buildMiniCircleButton(
-                          icon: Icons.rotate_right_rounded,
-                          color: EditorColors.activeBlue,
+                        left: w * 0.5 - 20,
+                        bottom: -42,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
                           onTap: () {
                             final updated = page.imageElements
                                 .map((e) => e.id == img.id
@@ -4245,14 +4817,34 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                               undoSnapshot: page,
                             );
                           },
+                          child: SizedBox(
+                            width: 40,
+                            height: 40,
+                            child: Center(
+                              child: Container(
+                                width: 24,
+                                height: 24,
+                                decoration: const BoxDecoration(
+                                  color: EditorColors.activeBlue,
+                                  shape: BoxShape.circle,
+                                ),
+                                child: const Icon(
+                                  Icons.rotate_right_rounded,
+                                  size: 14,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ),
+                          ),
                         ),
                       ),
-                      // 8 Resize Handles: 4 corners + 4 edge midpoints (zero-rebuild ValueNotifier drag)
+                      // 8 Resize Handles with 40x40 px stylus-friendly opaque hitboxes!
                       // Top-Left
                       Positioned(
-                        left: -8,
-                        top: -8,
+                        left: -20,
+                        top: -20,
                         child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
                           onPanStart: (_) => beginDrag(),
                           onPanUpdate: (d) => updateDrag((c) {
                             final nw = math.max(32.0, c.w - d.delta.dx);
@@ -4272,9 +4864,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       ),
                       // Top-Center
                       Positioned(
-                        left: w * 0.5 - 8,
-                        top: -8,
+                        left: w * 0.5 - 20,
+                        top: -20,
                         child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
                           onPanStart: (_) => beginDrag(),
                           onPanUpdate: (d) => updateDrag((c) {
                             final nh = math.max(32.0, c.h - d.delta.dy);
@@ -4293,9 +4886,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       ),
                       // Top-Right
                       Positioned(
-                        right: -8,
-                        top: -8,
+                        right: -20,
+                        top: -20,
                         child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
                           onPanStart: (_) => beginDrag(),
                           onPanUpdate: (d) => updateDrag((c) {
                             final nh = math.max(32.0, c.h - d.delta.dy);
@@ -4314,9 +4908,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       ),
                       // Middle-Left
                       Positioned(
-                        left: -8,
-                        top: h * 0.5 - 8,
+                        left: -20,
+                        top: h * 0.5 - 20,
                         child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
                           onPanStart: (_) => beginDrag(),
                           onPanUpdate: (d) => updateDrag((c) {
                             final nw = math.max(32.0, c.w - d.delta.dx);
@@ -4335,9 +4930,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       ),
                       // Middle-Right
                       Positioned(
-                        right: -8,
-                        top: h * 0.5 - 8,
+                        right: -20,
+                        top: h * 0.5 - 20,
                         child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
                           onPanStart: (_) => beginDrag(),
                           onPanUpdate: (d) => updateDrag((c) => (
                                 id: c.id,
@@ -4353,9 +4949,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       ),
                       // Bottom-Left
                       Positioned(
-                        left: -8,
-                        bottom: -8,
+                        left: -20,
+                        bottom: -20,
                         child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
                           onPanStart: (_) => beginDrag(),
                           onPanUpdate: (d) => updateDrag((c) {
                             final nw = math.max(32.0, c.w - d.delta.dx);
@@ -4374,9 +4971,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       ),
                       // Bottom-Center
                       Positioned(
-                        left: w * 0.5 - 8,
-                        bottom: -8,
+                        left: w * 0.5 - 20,
+                        bottom: -20,
                         child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
                           onPanStart: (_) => beginDrag(),
                           onPanUpdate: (d) => updateDrag((c) => (
                                 id: c.id,
@@ -4392,9 +4990,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       ),
                       // Bottom-Right
                       Positioned(
-                        right: -8,
-                        bottom: -8,
+                        right: -20,
+                        bottom: -20,
                         child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
                           onPanStart: (_) => beginDrag(),
                           onPanUpdate: (d) => updateDrag((c) => (
                                 id: c.id,
@@ -5154,12 +5753,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       ),
                   ],
                 ),
-                // Bottom-Right Resize Handle (zero-rebuild ValueNotifier resize)
+                // Bottom-Right Resize Handle (40x40 px stylus-friendly opaque hitbox)
                 if (!note.isCollapsed && !readOnly)
                   Positioned(
-                    right: 0,
-                    bottom: 0,
+                    right: -8,
+                    bottom: -8,
                     child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
                       onPanStart: (_) => beginStickyDrag(),
                       onPanUpdate: (d) => updateStickyDrag(
                         (c) => (
@@ -5173,14 +5773,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       onPanEnd: (_) => endStickyDrag(),
                       onPanCancel: endStickyDrag,
                       child: Container(
-                        width: 24,
-                        height: 24,
-                        alignment: Alignment.bottomRight,
-                        padding: const EdgeInsets.all(3),
+                        width: 40,
+                        height: 40,
+                        alignment: Alignment.center,
                         child: Icon(
                           Icons.drag_handle_rounded,
-                          size: 14,
-                          color: Colors.black.withAlpha(105),
+                          size: 15,
+                          color: Colors.black.withAlpha(115),
                         ),
                       ),
                     ),
@@ -5193,19 +5792,24 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     );
   }
 
+  /// Sleek 14x14 visual resize dot centered inside a 40x40 stylus-friendly hitbox.
   Widget _buildResizeHandle() {
-    return Container(
-      width: 18,
-      height: 18,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        shape: BoxShape.circle,
-        border: Border.all(color: EditorColors.activeBlue, width: 2),
-      ),
-      child: const Icon(
-        Icons.open_in_full_rounded,
-        size: 10,
-        color: EditorColors.activeBlue,
+    return SizedBox(
+      width: 40,
+      height: 40,
+      child: Center(
+        child: Container(
+          width: 14,
+          height: 14,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            shape: BoxShape.circle,
+            border: Border.all(color: EditorColors.activeBlue, width: 2.2),
+            boxShadow: const [
+              BoxShadow(color: Colors.black26, blurRadius: 3),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -5284,5 +5888,428 @@ class _StickyCanvasPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _StickyCanvasPainter oldDelegate) {
     return oldDelegate.strokes != strokes || oldDelegate.noteId != noteId;
+  }
+}
+
+/// High-resolution live painter for the single selected/cropping [ImageElement]
+/// inside `_buildImageOverlay` (while [CanvasPainter] hides `hiddenImageId`
+/// to guarantee ZERO double-image ghosting during resize/drag/in-place crop).
+class _SelectedImagePainter extends CustomPainter {
+  final ui.Image image;
+  final double cropLeft;
+  final double cropTop;
+  final double cropRight;
+  final double cropBottom;
+  final List<double> clipPolygon;
+  final Rect? dimOutsideRect;
+
+  const _SelectedImagePainter({
+    required this.image,
+    required this.cropLeft,
+    required this.cropTop,
+    required this.cropRight,
+    required this.cropBottom,
+    this.clipPolygon = const [],
+    this.dimOutsideRect,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final dst = Offset.zero & size;
+    final src = Rect.fromLTRB(
+      cropLeft.clamp(0.0, 0.99) * image.width,
+      cropTop.clamp(0.0, 0.99) * image.height,
+      cropRight.clamp(0.01, 1.0) * image.width,
+      cropBottom.clamp(0.01, 1.0) * image.height,
+    );
+
+    canvas.save();
+    if (clipPolygon.length >= 6) {
+      final path = Path();
+      path.moveTo(clipPolygon[0] * size.width, clipPolygon[1] * size.height);
+      for (int i = 2; i + 1 < clipPolygon.length; i += 2) {
+        path.lineTo(
+          clipPolygon[i] * size.width,
+          clipPolygon[i + 1] * size.height,
+        );
+      }
+      path.close();
+      canvas.clipPath(path);
+    }
+
+    canvas.drawImageRect(
+      image,
+      src,
+      dst,
+      Paint()
+        ..filterQuality = FilterQuality.high
+        ..isAntiAlias = true,
+    );
+
+    // Optional dimmed outer veil for in-place on-canvas rectangular cropping
+    if (dimOutsideRect != null) {
+      final veil = Path()
+        ..fillType = PathFillType.evenOdd
+        ..addRect(dst)
+        ..addRect(dimOutsideRect!);
+      canvas.drawPath(
+        veil,
+        Paint()..color = Colors.black.withAlpha(120),
+      );
+    }
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant _SelectedImagePainter oldDelegate) {
+    return oldDelegate.image != image ||
+        oldDelegate.cropLeft != cropLeft ||
+        oldDelegate.cropTop != cropTop ||
+        oldDelegate.cropRight != cropRight ||
+        oldDelegate.cropBottom != cropBottom ||
+        oldDelegate.clipPolygon != clipPolygon ||
+        oldDelegate.dimOutsideRect != dimOutsideRect;
+  }
+}
+
+/// Zero-lag, draggable & deletable Text Box overlay.
+/// Owns its own [TextEditingController] & [FocusNode] so typing NEVER triggers
+/// per-keystroke [AppState.updatePage] rebuilds (commits on focus loss,
+/// editing complete, or 500ms debounce), while dragging & resizing run at 144fps
+/// via a local [ValueNotifier].
+class _DraggableTextBoxOverlay extends StatefulWidget {
+  final TextElement element;
+  final bool interactive;
+  final bool isSelected;
+  final VoidCallback onSelect;
+  final VoidCallback onDragStart;
+  final VoidCallback onDragEnd;
+  final ValueChanged<TextElement> onCommit;
+  final VoidCallback onDelete;
+  final Widget resizeHandle;
+
+  const _DraggableTextBoxOverlay({
+    super.key,
+    required this.element,
+    required this.interactive,
+    required this.isSelected,
+    required this.onSelect,
+    required this.onDragStart,
+    required this.onDragEnd,
+    required this.onCommit,
+    required this.onDelete,
+    required this.resizeHandle,
+  });
+
+  @override
+  State<_DraggableTextBoxOverlay> createState() =>
+      _DraggableTextBoxOverlayState();
+}
+
+class _DraggableTextBoxOverlayState extends State<_DraggableTextBoxOverlay> {
+  late final TextEditingController _controller;
+  late final FocusNode _focusNode;
+  final ValueNotifier<({double x, double y, double w, double h})?> _dragNotifier =
+      ValueNotifier(null);
+  Timer? _debounceTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.element.text);
+    _focusNode = FocusNode();
+    _focusNode.addListener(_onFocusChange);
+  }
+
+  @override
+  void didUpdateWidget(covariant _DraggableTextBoxOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!_focusNode.hasFocus &&
+        widget.element.text != oldWidget.element.text &&
+        _controller.text != widget.element.text) {
+      _controller.text = widget.element.text;
+    }
+  }
+
+  void _onFocusChange() {
+    if (_focusNode.hasFocus) {
+      widget.onSelect();
+    } else {
+      _debounceTimer?.cancel();
+      _commitTextIfChanged();
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _commitTextIfChanged() {
+    if (_controller.text != widget.element.text) {
+      widget.onCommit(widget.element.copyWith(text: _controller.text));
+    }
+  }
+
+  void _scheduleDebounceCommit() {
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(const Duration(milliseconds: 500), () {
+      if (mounted) _commitTextIfChanged();
+    });
+  }
+
+  @override
+  void dispose() {
+    _debounceTimer?.cancel();
+    _focusNode.removeListener(_onFocusChange);
+    _focusNode.dispose();
+    _controller.dispose();
+    _dragNotifier.dispose();
+    super.dispose();
+  }
+
+  void _beginDrag() {
+    widget.onSelect();
+    _dragNotifier.value = (
+      x: widget.element.x,
+      y: widget.element.y,
+      w: widget.element.width,
+      h: widget.element.height,
+    );
+    widget.onDragStart();
+  }
+
+  void _endDrag() {
+    final finalBox = _dragNotifier.value;
+    _dragNotifier.value = null;
+    if (finalBox != null) {
+      widget.onCommit(
+        widget.element.copyWith(
+          x: finalBox.x,
+          y: finalBox.y,
+          width: finalBox.w,
+          height: finalBox.h,
+          text: _controller.text,
+        ),
+      );
+    }
+    widget.onDragEnd();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bool showChrome = widget.isSelected || _focusNode.hasFocus;
+
+    return ValueListenableBuilder<({double x, double y, double w, double h})?>(
+      valueListenable: _dragNotifier,
+      builder: (_, drag, __) {
+        final double x = drag?.x ?? widget.element.x;
+        final double y = drag?.y ?? widget.element.y;
+        final double w = drag?.w ?? widget.element.width;
+        final double h = drag?.h ?? widget.element.height;
+
+        return Positioned(
+          left: x,
+          top: y,
+          child: IgnorePointer(
+            ignoring: !widget.interactive,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Container(
+                  width: w,
+                  constraints: BoxConstraints(minHeight: h),
+                  decoration: BoxDecoration(
+                    color: _focusNode.hasFocus
+                        ? Colors.white.withAlpha(230)
+                        : Colors.transparent,
+                    border: showChrome
+                        ? Border.all(color: EditorColors.activeBlue, width: 1.5)
+                        : null,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // Crisp Top Drag Handle Bar + A- / A+ / Bold / Delete
+                      if (showChrome)
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onPanStart: (_) => _beginDrag(),
+                          onPanUpdate: (d) {
+                            final cur = _dragNotifier.value;
+                            if (cur == null) return;
+                            _dragNotifier.value = (
+                              x: cur.x + d.delta.dx,
+                              y: cur.y + d.delta.dy,
+                              w: cur.w,
+                              h: cur.h,
+                            );
+                          },
+                          onPanEnd: (_) => _endDrag(),
+                          onPanCancel: _endDrag,
+                          child: Container(
+                            height: 28,
+                            padding: const EdgeInsets.symmetric(horizontal: 6),
+                            decoration: const BoxDecoration(
+                              color: EditorColors.obsidianSurface,
+                              borderRadius: BorderRadius.vertical(
+                                top: Radius.circular(6),
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.drag_indicator_rounded,
+                                  size: 15,
+                                  color: Colors.white60,
+                                ),
+                                const SizedBox(width: 4),
+                                InkWell(
+                                  onTap: () => widget.onCommit(
+                                    widget.element.copyWith(
+                                      text: _controller.text,
+                                      fontSize: (widget.element.fontSize - 2.0)
+                                          .clamp(10.0, 48.0),
+                                    ),
+                                  ),
+                                  child: const Padding(
+                                    padding: EdgeInsets.symmetric(
+                                      horizontal: 4,
+                                      vertical: 2,
+                                    ),
+                                    child: Text(
+                                      'A-',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                InkWell(
+                                  onTap: () => widget.onCommit(
+                                    widget.element.copyWith(
+                                      text: _controller.text,
+                                      fontSize: (widget.element.fontSize + 2.0)
+                                          .clamp(10.0, 48.0),
+                                    ),
+                                  ),
+                                  child: const Padding(
+                                    padding: EdgeInsets.symmetric(
+                                      horizontal: 4,
+                                      vertical: 2,
+                                    ),
+                                    child: Text(
+                                      'A+',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                InkWell(
+                                  onTap: () => widget.onCommit(
+                                    widget.element.copyWith(
+                                      text: _controller.text,
+                                      isBold: !widget.element.isBold,
+                                    ),
+                                  ),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 4,
+                                      vertical: 2,
+                                    ),
+                                    child: Icon(
+                                      Icons.format_bold_rounded,
+                                      size: 15,
+                                      color: widget.element.isBold
+                                          ? EditorColors.activeBlue
+                                          : Colors.white,
+                                    ),
+                                  ),
+                                ),
+                                const Spacer(),
+                                InkWell(
+                                  onTap: widget.onDelete,
+                                  child: const Padding(
+                                    padding: EdgeInsets.all(3),
+                                    child: Icon(
+                                      Icons.close_rounded,
+                                      size: 15,
+                                      color: Color(0xFFEF4444),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      // Zero-lag local TextField (commits on blur/debounce, never per-keystroke!)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 6,
+                        ),
+                        child: TextField(
+                          controller: _controller,
+                          focusNode: _focusNode,
+                          maxLines: null,
+                          onTap: widget.onSelect,
+                          onChanged: (_) => _scheduleDebounceCommit(),
+                          onEditingComplete: () {
+                            _debounceTimer?.cancel();
+                            _commitTextIfChanged();
+                            _focusNode.unfocus();
+                          },
+                          style: TextStyle(
+                            fontSize: widget.element.fontSize,
+                            color: Color(widget.element.colorValue),
+                            fontWeight: widget.element.isBold
+                                ? FontWeight.bold
+                                : FontWeight.normal,
+                            fontStyle: widget.element.isItalic
+                                ? FontStyle.italic
+                                : FontStyle.normal,
+                          ),
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            border: InputBorder.none,
+                            hintText: 'Nhập văn bản / PTHH...',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                // Bottom-Right Resize Handle (40x40 stylus-friendly opaque hitbox)
+                if (showChrome)
+                  Positioned(
+                    right: -20,
+                    bottom: -20,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onPanStart: (_) => _beginDrag(),
+                      onPanUpdate: (d) {
+                        final cur = _dragNotifier.value;
+                        if (cur == null) return;
+                        _dragNotifier.value = (
+                          x: cur.x,
+                          y: cur.y,
+                          w: math.max(110.0, cur.w + d.delta.dx),
+                          h: math.max(44.0, cur.h + d.delta.dy),
+                        );
+                      },
+                      onPanEnd: (_) => _endDrag(),
+                      onPanCancel: _endDrag,
+                      child: widget.resizeHandle,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 }

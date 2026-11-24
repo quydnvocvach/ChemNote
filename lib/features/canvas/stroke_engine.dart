@@ -155,6 +155,16 @@ class StrokeEngine {
   }) {
     if (currentPoints.isEmpty) return incoming;
 
+    // 0% smoothing = 100% raw untouched M-Pencil 3 ink (only skip exact duplicate coords)
+    if (stabilization <= 0.01) {
+      final prev = currentPoints.last;
+      if ((incoming.x - prev.x).abs() < 0.2 &&
+          (incoming.y - prev.y).abs() < 0.2) {
+        return null;
+      }
+      return incoming;
+    }
+
     final prev = currentPoints.last;
     final dx = incoming.x - prev.x;
     final dy = incoming.y - prev.y;
@@ -162,8 +172,6 @@ class StrokeEngine {
 
     final minDistance = 1.1 + stabilization * 1.3;
     if (dist < minDistance) return null;
-
-    if (stabilization <= 0.01) return incoming;
 
     final alpha = (1.0 - stabilization * 0.56).clamp(0.34, 1.0);
     return StrokePoint(
@@ -182,40 +190,36 @@ class StrokeEngine {
     bool autoNeaten = true,
     ToolType toolType = ToolType.fountainPen,
   }) {
-    if (rawPoints.length < 3) return List<StrokePoint>.from(rawPoints);
+    // When smoothing is OFF or 0%, bypass ALL smoothing/neatening completely!
+    if (!autoNeaten || stabilization <= 0.01 || rawPoints.length < 3) {
+      return List<StrokePoint>.from(rawPoints);
+    }
 
     final double strength = stabilization.clamp(0.0, 1.0);
     List<StrokePoint> working = _deduplicatePoints(rawPoints, minDist: 1.5);
     if (working.length < 3) return working;
 
-    // Step 1: Corner-preserving smoothing passes
-    if (strength > 0.05) {
-      final int passes = autoNeaten ? (1 + (strength * 3).round()) : 1;
-      final double weight = 0.22 + strength * 0.28;
-      for (int p = 0; p < passes; p++) {
-        working = _cornerPreservingSmooth(working, weight: weight);
-      }
+    // Step 1: At most ONE ultra-gentle micro-tremor pass (<= 0.18 * strength)
+    // Preserves sharp corners and NEVER pulls cursive loops inward or shrinks letters!
+    if (strength > 0.01) {
+      final double gentleWeight = (0.18 * strength).clamp(0.02, 0.18);
+      working = _cornerPreservingSmooth(working, weight: gentleWeight);
     }
 
-    // Step 2: Subtle baseline / axis neatening for nearly straight handwriting segments
-    if (autoNeaten && strength >= 0.35 && toolType != ToolType.highlighter) {
-      working = _applySubtleBaselineNeatening(working, strength: strength);
-    }
-
-    // Step 3: Catmull-Rom spline interpolation for smooth curvature
-    if (strength > 0.1 && working.length >= 4) {
+    // Step 2: Interpolating Catmull-Rom spline passing cleanly THROUGH actual letter
+    // peaks & loops (NO baseline squashing!) so handwriting stays 100% full-size & fluid.
+    if (working.length >= 4) {
       working = _catmullRomInterpolate(
         working,
         subdivisions: strength > 0.6 ? 3 : 2,
       );
     }
 
-    // Step 4: Smooth pressures & apply calligraphy taper on fountain/brush pen
+    // Step 3: Smooth pressures gently without needle tapering
     working = _smoothAndTaperPressure(
       working,
       toolType: toolType,
-      applyTaper: toolType == ToolType.fountainPen ||
-          toolType == ToolType.brushPen,
+      applyTaper: false,
     );
 
     return working;
@@ -766,48 +770,71 @@ class StrokeEngine {
         ? simplified.sublist(0, simplified.length - 1)
         : simplified;
 
-    // Evaluate normalized RMS fit error for every eligible candidate and pick the BEST (< 0.14)
+    // Compute filled polygon area ratio (shoelace / bounding-box area)
+    final double boxArea = math.max(1.0, bounds.width * bounds.height);
+    final double areaRatio = _polygonArea(rawPoints) / boxArea;
+
+    // Evaluate normalized RMS fit error for every eligible candidate and pick the BEST
     ShapeType bestType = ShapeType.none;
-    double bestError = 0.14;
+    double bestError = 0.21;
     List<StrokePoint>? bestPoints;
 
-    // Candidate A: Triangle (3 vertices, angle-sorted so edges never cross!)
-    if (vertices.length == 3) {
-      final sortedTri = _sortVerticesByAngle(vertices, center);
+    // Candidate A: Triangle (areaRatio ∈ [0.34, 0.64] or 3 DP vertices, angle-sorted)
+    if (vertices.length == 3 ||
+        (areaRatio >= 0.34 && areaRatio <= 0.64 && vertices.length >= 3 && vertices.length <= 5)) {
+      final triVertsRaw = vertices.length == 3
+          ? vertices
+          : _pickThreeExtremeVertices(vertices);
+      final sortedTri = _sortVerticesByAngle(triVertsRaw, center);
       final triErr = _polygonRmsError(
         rawPoints,
         sortedTri.map((v) => Offset(v.x, v.y)).toList(),
         meanR,
       );
-      if (triErr < bestError) {
+      if (triErr < 0.21 && triErr < bestError) {
         bestError = triErr;
         bestType = ShapeType.triangle;
         bestPoints = _generateCleanPolygon(sortedTri);
       }
     }
 
-    // Candidate B: Rectangle (4 vertices with ~90° corners, clean TL->TR->BR->BL->TL)
-    if (vertices.length == 4) {
-      final snappedRect = _trySnapRectangle(vertices, bounds);
-      if (snappedRect != null) {
-        final rectVerts = [
-          Offset(bounds.left, bounds.top),
-          Offset(bounds.right, bounds.top),
-          Offset(bounds.right, bounds.bottom),
-          Offset(bounds.left, bounds.bottom),
-        ];
-        final rectErr = _polygonRmsError(rawPoints, rectVerts, meanR);
-        if (rectErr < bestError) {
-          bestError = rectErr;
-          bestType = ShapeType.rectangle;
-          bestPoints = snappedRect;
-        }
+    // Candidate B: Square / Rectangle (works even with slightly rounded hand-drawn corners!)
+    final bool rectAreaOk = areaRatio >= 0.74 && areaRatio <= 1.08;
+    if (rectAreaOk || vertices.length == 4) {
+      final double aspect =
+          bounds.height > 1 ? bounds.width / bounds.height : 1.0;
+      final bool isSquare = aspect >= 0.85 && aspect <= 1.18;
+      final double halfW = isSquare
+          ? (bounds.width + bounds.height) * 0.25
+          : bounds.width * 0.5;
+      final double halfH = isSquare ? halfW : bounds.height * 0.5;
+      final snapBounds = Rect.fromCenter(
+        center: center,
+        width: halfW * 2,
+        height: halfH * 2,
+      );
+      final rectVerts = [
+        Offset(snapBounds.left, snapBounds.top),
+        Offset(snapBounds.right, snapBounds.top),
+        Offset(snapBounds.right, snapBounds.bottom),
+        Offset(snapBounds.left, snapBounds.bottom),
+      ];
+      final rectErr = _polygonRmsError(rawPoints, rectVerts, meanR);
+      if (rectErr < 0.19 && rectErr < bestError) {
+        bestError = rectErr;
+        bestType = ShapeType.rectangle;
+        bestPoints = _generateCleanPolygon([
+          StrokePoint(x: snapBounds.left, y: snapBounds.top, pressure: 0.6),
+          StrokePoint(x: snapBounds.right, y: snapBounds.top, pressure: 0.6),
+          StrokePoint(x: snapBounds.right, y: snapBounds.bottom, pressure: 0.6),
+          StrokePoint(x: snapBounds.left, y: snapBounds.bottom, pressure: 0.6),
+        ]);
       }
     }
 
-    // Candidate C: Circle / Oval-Ellipse (Complex polygons removed from freehand Pen auto-snap)
+    // Candidate C: Circle / Oval-Ellipse (exact mathematical ellipse, lower error wins over rect)
     final double ellipseErr = _circleEllipseRmsError(rawPoints, bounds);
-    if (ellipseErr < bestError) {
+    if (ellipseErr < 0.18 && ellipseErr < bestError) {
       final double aspect =
           bounds.height > 1 ? bounds.width / bounds.height : 1.0;
       final bool isCircle = aspect > 0.80 && aspect < 1.25;
@@ -831,6 +858,41 @@ class StrokeEngine {
       shapeType: ShapeType.none,
       snappedPoints: rawPoints,
     );
+  }
+
+  /// Shoelace formula for absolute polygon area.
+  static double _polygonArea(List<StrokePoint> pts) {
+    if (pts.length < 3) return 0.0;
+    double sum = 0.0;
+    for (int i = 0; i < pts.length; i++) {
+      final a = pts[i];
+      final b = pts[(i + 1) % pts.length];
+      sum += (a.x * b.y) - (b.x * a.y);
+    }
+    return sum.abs() * 0.5;
+  }
+
+  /// Selects the 3 vertices forming the largest-area triangle from a small vertex set.
+  static List<StrokePoint> _pickThreeExtremeVertices(List<StrokePoint> verts) {
+    if (verts.length <= 3) return verts;
+    double bestArea = -1.0;
+    List<StrokePoint> best = verts.sublist(0, 3);
+    for (int i = 0; i < verts.length; i++) {
+      for (int j = i + 1; j < verts.length; j++) {
+        for (int k = j + 1; k < verts.length; k++) {
+          final a = verts[i];
+          final b = verts[j];
+          final c = verts[k];
+          final area = ((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y))
+              .abs();
+          if (area > bestArea) {
+            bestArea = area;
+            best = [a, b, c];
+          }
+        }
+      }
+    }
+    return best;
   }
 
   static List<StrokePoint> _sortVerticesByAngle(

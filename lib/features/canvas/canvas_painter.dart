@@ -23,28 +23,42 @@ class CanvasPainter extends CustomPainter {
   final Map<String, ui.Image> elementImageCache;
   final LassoSelection lassoSelection;
   final Rect? lassoSelectionBounds;
+  final ValueListenable<Offset>? lassoDragOffset;
+  final ValueListenable<({String pageId, List<Stroke> strokes})?>?
+      erasingStrokesNotifier;
+  final String? hiddenImageId;
   final String? playingAudioId;
   final int? playingAudioTimeMs;
   final int repaintVersion;
   final bool drawBackground;
   final bool drawOverlays;
+  final bool drawTapes;
   final int? minZExclusive;
   final int? maxZInclusive;
 
-  const CanvasPainter({
+  CanvasPainter({
     required this.page,
     this.pdfBackgroundImage,
     this.elementImageCache = const {},
     this.lassoSelection = const LassoSelection(),
     this.lassoSelectionBounds,
+    this.lassoDragOffset,
+    this.erasingStrokesNotifier,
+    this.hiddenImageId,
     this.playingAudioId,
     this.playingAudioTimeMs,
     this.repaintVersion = 0,
     this.drawBackground = true,
     this.drawOverlays = true,
+    this.drawTapes = true,
     this.minZExclusive,
     this.maxZInclusive,
-  });
+  }) : super(
+          repaint: Listenable.merge([
+            if (lassoDragOffset != null) lassoDragOffset,
+            if (erasingStrokesNotifier != null) erasingStrokesNotifier,
+          ]),
+        );
 
   bool _inZRange(int z) {
     if (minZExclusive != null && z <= minZExclusive!) return false;
@@ -75,12 +89,18 @@ class CanvasPainter extends CustomPainter {
     final items = <({int z, int tie, int seq, Object item})>[];
     int seq = 0;
 
+    final erasingOverride = erasingStrokesNotifier?.value;
+    final List<Stroke> activeStrokes =
+        (erasingOverride != null && erasingOverride.pageId == page.id)
+            ? erasingOverride.strokes
+            : page.strokes;
+
     for (final img in page.imageElements) {
       if (_inZRange(img.zIndex)) {
         items.add((z: img.zIndex, tie: 0, seq: seq++, item: img));
       }
     }
-    for (final stroke in page.strokes) {
+    for (final stroke in activeStrokes) {
       if (_inZRange(stroke.zIndex)) {
         final tie = stroke.toolType == ToolType.highlighter ? 1 : 3;
         items.add((z: stroke.zIndex, tie: tie, seq: seq++, item: stroke));
@@ -100,32 +120,53 @@ class CanvasPainter extends CustomPainter {
       return a.seq.compareTo(b.seq);
     });
 
+    final Offset dragDelta = lassoDragOffset?.value ?? Offset.zero;
+    final bool hasDragDelta = dragDelta != Offset.zero;
+
     for (final entry in items) {
       final obj = entry.item;
       if (obj is ImageElement) {
+        if (obj.id == hiddenImageId) continue;
         final uiImg = elementImageCache[obj.filePath];
         if (uiImg != null) {
+          final bool sel = lassoSelection.imageIds.contains(obj.id);
+          if (sel && hasDragDelta) {
+            canvas.save();
+            canvas.translate(dragDelta.dx, dragDelta.dy);
+          }
           _paintHighResImageElement(
             canvas,
             obj,
             uiImg,
-            isSelected: lassoSelection.imageIds.contains(obj.id),
+            isSelected: sel,
           );
+          if (sel && hasDragDelta) canvas.restore();
         }
       } else if (obj is StencilElement) {
+        final bool sel = lassoSelection.stencilIds.contains(obj.id);
+        if (sel && hasDragDelta) {
+          canvas.save();
+          canvas.translate(dragDelta.dx, dragDelta.dy);
+        }
         _paintStencilElement(
           canvas,
           obj,
-          isSelected: lassoSelection.stencilIds.contains(obj.id),
+          isSelected: sel,
         );
+        if (sel && hasDragDelta) canvas.restore();
       } else if (obj is Stroke) {
+        final bool sel = lassoSelection.strokeIds.contains(obj.id);
         final audioState = _audioVisualForStroke(obj);
+        if (sel && hasDragDelta) {
+          canvas.save();
+          canvas.translate(dragDelta.dx, dragDelta.dy);
+        }
         if (obj.toolType == ToolType.highlighter) {
           paintHighlighterStroke(
             canvas,
             obj,
             isDarkPaper: isDarkPaper,
-            isSelected: lassoSelection.strokeIds.contains(obj.id),
+            isSelected: sel,
             opacityMultiplier: audioState.opacityMultiplier,
             isAudioHighlighted: audioState.isHighlighted,
           );
@@ -133,27 +174,33 @@ class CanvasPainter extends CustomPainter {
           paintInkStroke(
             canvas,
             obj,
-            isSelected: lassoSelection.strokeIds.contains(obj.id),
+            isSelected: sel,
             opacityMultiplier: audioState.opacityMultiplier,
             isAudioHighlighted: audioState.isHighlighted,
           );
         }
+        if (sel && hasDragDelta) canvas.restore();
       }
     }
 
     if (drawOverlays) {
-      // 4. Study Tape elements
-      for (final tape in page.tapeElements) {
-        paintStudyTape(
-          canvas,
-          tape,
-          isSelected: lassoSelection.tapeIds.contains(tape.id),
-        );
+      // 4. Study Tape elements (100% opaque in thumbnails/static pass; interactive widget handles live editor)
+      if (drawTapes) {
+        for (final tape in page.tapeElements) {
+          paintStudyTape(
+            canvas,
+            tape,
+            isSelected: lassoSelection.tapeIds.contains(tape.id),
+          );
+        }
       }
 
-      // 5. Lasso selection bounding box
+      // 5. Lasso selection bounding box (translated live at 144fps during drag)
       if (lassoSelectionBounds != null && lassoSelection.isNotEmpty) {
-        _paintSelectionBounds(canvas, lassoSelectionBounds!);
+        final Rect liveBounds = hasDragDelta
+            ? lassoSelectionBounds!.shift(dragDelta)
+            : lassoSelectionBounds!;
+        _paintSelectionBounds(canvas, liveBounds);
       }
     }
   }
@@ -329,19 +376,48 @@ class CanvasPainter extends CustomPainter {
             (baseAlpha * opacityMultiplier).round().clamp(16, 255),
           );
 
-    // Recognized geometric shapes render as a single clean exact Path (NO stray strikethrough lines!)
+    // Recognized geometric shapes render as pure exact geometry (ZERO chord lines or Bezier deformation!)
     if (stroke.shapeType != ShapeType.none) {
       final pts = stroke.points;
-      final path = Path()..moveTo(pts.first.x, pts.first.y);
-      for (int i = 1; i < pts.length; i++) {
-        path.lineTo(pts[i].x, pts[i].y);
-      }
-      if (stroke.shapeType != ShapeType.line) {
+      final strokePaint = Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = stroke.width
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..isAntiAlias = true;
+
+      void drawShapeWithPaint(Paint p) {
+        if (stroke.shapeType == ShapeType.line) {
+          canvas.drawLine(
+            Offset(pts.first.x, pts.first.y),
+            Offset(pts.last.x, pts.last.y),
+            p,
+          );
+          return;
+        }
+        if (stroke.shapeType == ShapeType.circle) {
+          double minX = pts.first.x, maxX = pts.first.x;
+          double minY = pts.first.y, maxY = pts.first.y;
+          for (final pt in pts) {
+            if (pt.x < minX) minX = pt.x;
+            if (pt.x > maxX) maxX = pt.x;
+            if (pt.y < minY) minY = pt.y;
+            if (pt.y > maxY) maxY = pt.y;
+          }
+          canvas.drawOval(Rect.fromLTRB(minX, minY, maxX, maxY), p);
+          return;
+        }
+        final path = Path()..moveTo(pts.first.x, pts.first.y);
+        for (int i = 1; i < pts.length; i++) {
+          path.lineTo(pts[i].x, pts[i].y);
+        }
         path.close();
+        canvas.drawPath(path, p);
       }
+
       if (isAudioHighlighted) {
-        canvas.drawPath(
-          path,
+        drawShapeWithPaint(
           Paint()
             ..color = const Color(0xFF3B82F6).withAlpha(135)
             ..style = PaintingStyle.stroke
@@ -352,8 +428,7 @@ class CanvasPainter extends CustomPainter {
         );
       }
       if (isSelected) {
-        canvas.drawPath(
-          path,
+        drawShapeWithPaint(
           Paint()
             ..color = const Color(0xFF3B82F6).withAlpha(75)
             ..style = PaintingStyle.stroke
@@ -362,16 +437,7 @@ class CanvasPainter extends CustomPainter {
             ..strokeJoin = StrokeJoin.round,
         );
       }
-      canvas.drawPath(
-        path,
-        Paint()
-          ..color = color
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = stroke.width
-          ..strokeCap = StrokeCap.round
-          ..strokeJoin = StrokeJoin.round
-          ..isAntiAlias = true,
-      );
+      drawShapeWithPaint(strokePaint);
       return;
     }
 
@@ -659,10 +725,10 @@ class CanvasPainter extends CustomPainter {
         gapLength: 4.0,
       );
     } else {
-      // Covered state: solid tape strip with diagonal hatch texture
+      // Covered state: 100% solid opaque tape strip (zero ink bleed-through!)
       canvas.save();
       canvas.clipRRect(rrect);
-      canvas.drawRect(rect, Paint()..color = baseColor.withAlpha(238));
+      canvas.drawRect(rect, Paint()..color = baseColor.withAlpha(255));
       final stripePaint = Paint()
         ..color = Colors.white.withAlpha(42)
         ..strokeWidth = 4.0;
@@ -781,6 +847,8 @@ class CanvasPainter extends CustomPainter {
         oldDelegate.pdfBackgroundImage != pdfBackgroundImage ||
         oldDelegate.lassoSelection != lassoSelection ||
         oldDelegate.lassoSelectionBounds != lassoSelectionBounds ||
+        oldDelegate.lassoDragOffset != lassoDragOffset ||
+        oldDelegate.hiddenImageId != hiddenImageId ||
         oldDelegate.playingAudioId != playingAudioId ||
         oldDelegate.playingAudioTimeMs != playingAudioTimeMs ||
         oldDelegate.drawBackground != drawBackground ||
