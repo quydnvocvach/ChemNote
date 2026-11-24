@@ -5,7 +5,6 @@ import 'package:provider/provider.dart';
 import '../../core/models/notebook.dart';
 import '../../core/providers/app_state.dart';
 import 'google_auth_service.dart';
-import 'google_oauth_config.dart';
 import 'sync_manager.dart';
 
 /// Màn hình cài đặt đồng bộ Google Drive (GMS-free cho Android & Huawei HarmonyOS).
@@ -18,6 +17,7 @@ class SyncSettingsScreen extends StatefulWidget {
 
 class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
   String _configuredClientId = '';
+  String _configuredClientSecret = '';
   bool _loadingClientId = true;
 
   @override
@@ -29,105 +29,143 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
   Future<void> _loadClientId() async {
     final syncManager = context.read<SyncManager>();
     final id = await syncManager.authService.config.loadClientId();
+    final secret = await syncManager.authService.config.loadClientSecret();
     if (!mounted) return;
     setState(() {
       _configuredClientId = id;
+      _configuredClientSecret = secret;
       _loadingClientId = false;
     });
   }
 
   Future<void> _showClientIdDialog() async {
     final syncManager = context.read<SyncManager>();
-    final controller = TextEditingController(text: _configuredClientId);
+    final idController = TextEditingController(text: _configuredClientId);
+    final secretController =
+        TextEditingController(text: _configuredClientSecret);
+    var obscureSecret = true;
 
     final saved = await showDialog<bool>(
       context: context,
       builder: (ctx) {
-        return AlertDialog(
-          title: const Text('Cấu hình Google OAuth Client ID'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Nhập OAuth 2.0 Client ID (loại Android hoặc Desktop/Native) từ Google Cloud Console để đồng bộ Google Drive không cần GMS:',
-                  style: TextStyle(fontSize: 13),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: controller,
-                  decoration: const InputDecoration(
-                    labelText: 'OAuth Client ID',
-                    hintText: '1234567890-xxxx.apps.googleusercontent.com',
-                    border: OutlineInputBorder(),
-                  ),
-                  maxLines: 2,
-                ),
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Redirect URI đã khai báo sẵn:',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 12,
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return AlertDialog(
+              title: const Text('Cấu hình Google OAuth (Desktop app)'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Trên Google Cloud Console -> Create OAuth client ID -> chọn loại Desktop app (Ứng dụng dành cho máy tính), rồi dán cả Client ID và Client Secret vào đây (chạy chuẩn trên Huawei HarmonyOS không cần GMS & không lỗi 401).',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: idController,
+                      decoration: const InputDecoration(
+                        labelText: 'Client ID',
+                        hintText: '1234567890-xxxx.apps.googleusercontent.com',
+                        border: OutlineInputBorder(),
+                      ),
+                      maxLines: 2,
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: secretController,
+                      obscureText: obscureSecret,
+                      decoration: InputDecoration(
+                        labelText: 'Client Secret (cho Desktop app)',
+                        hintText: 'GOCSPX-xxxxxxxxxxxxxxxx',
+                        border: const OutlineInputBorder(),
+                        suffixIcon: IconButton(
+                          tooltip: obscureSecret ? 'Hiện' : 'Ẩn',
+                          icon: Icon(
+                            obscureSecret
+                                ? Icons.visibility_outlined
+                                : Icons.visibility_off_outlined,
+                          ),
+                          onPressed: () {
+                            setDialogState(() {
+                              obscureSecret = !obscureSecret;
+                            });
+                          },
                         ),
                       ),
-                      SizedBox(height: 4),
-                      SelectableText(
-                        GoogleOAuthConfig.redirectUri,
-                        style: TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 12,
-                        ),
+                    ),
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color:
+                            Theme.of(ctx).colorScheme.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(8),
                       ),
-                    ],
+                      child: const Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Cơ chế xác thực RFC 8252 Loopback:',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 12,
+                            ),
+                          ),
+                          SizedBox(height: 4),
+                          SelectableText(
+                            'http://127.0.0.1:<port>/oauth2redirect',
+                            style: TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                if (_configuredClientId.isNotEmpty ||
+                    _configuredClientSecret.isNotEmpty)
+                  TextButton(
+                    onPressed: () async {
+                      await syncManager.authService.config.clearClientId();
+                      await syncManager.authService.config.clearClientSecret();
+                      if (ctx.mounted) Navigator.of(ctx).pop(true);
+                    },
+                    child: const Text('Xóa cấu hình'),
                   ),
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  child: const Text('Hủy'),
+                ),
+                FilledButton(
+                  onPressed: () async {
+                    await syncManager.authService.config
+                        .saveClientId(idController.text);
+                    await syncManager.authService.config
+                        .saveClientSecret(secretController.text);
+                    if (ctx.mounted) Navigator.of(ctx).pop(true);
+                  },
+                  child: const Text('Lưu'),
                 ),
               ],
-            ),
-          ),
-          actions: [
-            if (_configuredClientId.isNotEmpty)
-              TextButton(
-                onPressed: () async {
-                  await syncManager.authService.config.clearClientId();
-                  if (ctx.mounted) Navigator.of(ctx).pop(true);
-                },
-                child: const Text('Xóa ID'),
-              ),
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('Hủy'),
-            ),
-            FilledButton(
-              onPressed: () async {
-                await syncManager.authService.config
-                    .saveClientId(controller.text);
-                if (ctx.mounted) Navigator.of(ctx).pop(true);
-              },
-              child: const Text('Lưu'),
-            ),
-          ],
+            );
+          },
         );
       },
     );
 
-    controller.dispose();
+    idController.dispose();
+    secretController.dispose();
     if (saved == true) {
       await _loadClientId();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Đã cập nhật cấu hình OAuth Client ID.'),
+          content: Text('Đã cập nhật cấu hình Google OAuth.'),
         ),
       );
     }
@@ -505,8 +543,9 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
               if (!_loadingClientId)
                 Text(
                   _configuredClientId.isEmpty
-                      ? 'Trạng thái Client ID: Chưa cấu hình (có thể dùng Chế độ Demo ngay)'
-                      : 'Client ID đã cấu hình: ${_maskClientId(_configuredClientId)}',
+                      ? 'Trạng thái OAuth: Chưa cấu hình (có thể dùng Chế độ Demo ngay)'
+                      : 'Client ID: ${_maskClientId(_configuredClientId)}'
+                          '${_configuredClientSecret.isNotEmpty ? ' • Đã có Client Secret' : ' • Chưa nhập Client Secret'}',
                   style: theme.textTheme.labelMedium?.copyWith(
                     color: _configuredClientId.isEmpty
                         ? colorScheme.tertiary
@@ -526,7 +565,7 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
                   OutlinedButton.icon(
                     onPressed: _showClientIdDialog,
                     icon: const Icon(Icons.settings_outlined),
-                    label: const Text('Nhập Client ID'),
+                    label: const Text('Cấu hình OAuth'),
                   ),
                   TextButton.icon(
                     onPressed: _handleDemoSignIn,

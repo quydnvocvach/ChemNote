@@ -53,7 +53,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       TransformationController();
   final ScrollController _verticalScrollController = ScrollController();
   bool _whiteboardCenteredOnce = false;
-  double _whiteboardZoom = 1.0;
+  final ValueNotifier<double> _whiteboardZoomNotifier = ValueNotifier(1.0);
+  final ValueNotifier<({String id, double x, double y, double w, double h})?>
+      _imageDragNotifier = ValueNotifier(null);
+  final ValueNotifier<({String id, double x, double y, double w, double h})?>
+      _stickyDragNotifier = ValueNotifier(null);
+  final ValueNotifier<Stroke?> _activeStickyStrokeNotifier = ValueNotifier(null);
+  String? _activeStickyStrokeNoteId;
   final Map<String, TextEditingController> _stickyControllers = {};
   late PageController _horizontalPageController;
   final LassoController _lassoController = LassoController();
@@ -222,6 +228,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _eraserCursorNotifier.dispose();
     _lassoPathNotifier.dispose();
     _tapeDraftNotifier.dispose();
+    _whiteboardZoomNotifier.dispose();
+    _imageDragNotifier.dispose();
+    _stickyDragNotifier.dispose();
+    _activeStickyStrokeNotifier.dispose();
     _activeTextController?.dispose();
     _activeTextFocusNode?.dispose();
     for (final img in _pdfImageCache.values) {
@@ -1605,19 +1615,148 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
     setState(() => _isBusyPdf = true);
     final customDir = context.read<AppState>().pdfExportDirectory;
+    final bool showProgressDialog = action == 'share' || action == 'save';
+    final progressNotifier =
+        ValueNotifier<({int current, int total, String stage})>((
+      current: 0,
+      total: math.max(1, notebook.pages.length),
+      stage: 'Đang chuẩn bị xuất PDF...',
+    ));
+    bool dialogOpen = false;
+
+    if (showProgressDialog && mounted) {
+      dialogOpen = true;
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogCtx) {
+          final isDark = Theme.of(dialogCtx).brightness == Brightness.dark;
+          final bg = isDark ? EditorColors.obsidianSurface : Colors.white;
+          final fg = isDark ? Colors.white : const Color(0xFF0F172A);
+          final sub = isDark ? Colors.white70 : const Color(0xFF475569);
+          return PopScope(
+            canPop: false,
+            child: AlertDialog(
+              backgroundColor: bg,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(18),
+                side: BorderSide(
+                  color: isDark ? Colors.white12 : Colors.black12,
+                ),
+              ),
+              contentPadding: const EdgeInsets.fromLTRB(22, 20, 22, 20),
+              content: ValueListenableBuilder<
+                  ({int current, int total, String stage})>(
+                valueListenable: progressNotifier,
+                builder: (_, state, __) {
+                  final double ratio = state.total > 0
+                      ? (state.current / state.total).clamp(0.0, 1.0)
+                      : 0.0;
+                  final int pct = (ratio * 100).round();
+                  return SizedBox(
+                    width: 310,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.picture_as_pdf_rounded,
+                              color: EditorColors.activeBlue,
+                              size: 22,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                action == 'share'
+                                    ? 'Đang tạo & chia sẻ PDF'
+                                    : 'Đang xuất tệp PDF',
+                                style: TextStyle(
+                                  color: fg,
+                                  fontSize: 15.5,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              '$pct%',
+                              style: const TextStyle(
+                                color: EditorColors.activeBlue,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 14),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: LinearProgressIndicator(
+                            value: state.current == 0 ? null : ratio,
+                            minHeight: 7,
+                            backgroundColor: isDark
+                                ? Colors.white12
+                                : const Color(0xFFE2E8F0),
+                            valueColor: const AlwaysStoppedAnimation<Color>(
+                              EditorColors.activeBlue,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          state.stage,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: sub, fontSize: 12.5),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          );
+        },
+      );
+    }
+
+    void closeProgressDialog() {
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+    }
+
     try {
       if (action == 'share') {
         await _pdfExportService.shareNotebookPdf(
           notebook,
           customDirectory: customDir,
+          onProgress: (current, total, stage) {
+            progressNotifier.value = (
+              current: current,
+              total: total,
+              stage: stage,
+            );
+          },
         );
+        closeProgressDialog();
       } else if (action == 'print') {
         await _pdfExportService.printNotebookPdf(notebook);
       } else if (action == 'save') {
         final file = await _pdfExportService.exportNotebookToFile(
           notebook,
           customDirectory: customDir,
+          onProgress: (current, total, stage) {
+            progressNotifier.value = (
+              current: current,
+              total: total,
+              stage: stage,
+            );
+          },
         );
+        closeProgressDialog();
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Đã lưu PDF tại: ${file.path}')),
@@ -1625,12 +1764,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         }
       }
     } catch (e) {
+      closeProgressDialog();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Lỗi xuất PDF: $e')),
         );
       }
     } finally {
+      closeProgressDialog();
+      progressNotifier.dispose();
       if (mounted) setState(() => _isBusyPdf = false);
     }
   }
@@ -2751,7 +2893,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     final tx = viewportSize.width * 0.5 - PaperMetrics.whiteboardCenter.dx;
     final ty = viewportSize.height * 0.5 - PaperMetrics.whiteboardCenter.dy;
     _whiteboardTransformController.value = Matrix4.identity()..translate(tx, ty);
-    _whiteboardZoom = 1.0;
+    _whiteboardZoomNotifier.value = 1.0;
   }
 
   Widget _buildInfiniteWhiteboardView(
@@ -2763,6 +2905,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     final bool allowWhiteboardPanZoom = _pointerDownPositions.length >= 2 ||
         appState.readOnlyMode ||
         (!_isDrawingPointerDown &&
+            !_isOverlayDragging &&
             (appState.palmRejectionEnabled ||
                 _activeTool == EditorTool.panZoom));
 
@@ -2790,8 +2933,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 final scale = _whiteboardTransformController.value
                     .getMaxScaleOnAxis()
                     .clamp(0.25, 4.0);
-                if ((scale - _whiteboardZoom).abs() > 0.02) {
-                  setState(() => _whiteboardZoom = scale);
+                if ((scale - _whiteboardZoomNotifier.value).abs() > 0.015) {
+                  _whiteboardZoomNotifier.value = scale;
                 }
               },
               child: _buildSinglePageCanvas(
@@ -2821,7 +2964,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       InkWell(
-                        onTap: () => setState(() => _centerWhiteboard(viewportSize)),
+                        onTap: () => _centerWhiteboard(viewportSize),
                         borderRadius: BorderRadius.circular(14),
                         child: const Padding(
                           padding:
@@ -2854,17 +2997,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         color: Colors.white12,
                       ),
                       InkWell(
-                        onTap: () => setState(() => _centerWhiteboard(viewportSize)),
+                        onTap: () => _centerWhiteboard(viewportSize),
                         borderRadius: BorderRadius.circular(12),
                         child: Padding(
                           padding: const EdgeInsets.symmetric(
                               horizontal: 6, vertical: 5),
-                          child: Text(
-                            '${(_whiteboardZoom * 100).round()}%',
-                            style: const TextStyle(
-                              color: Colors.white70,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
+                          child: ValueListenableBuilder<double>(
+                            valueListenable: _whiteboardZoomNotifier,
+                            builder: (_, zoom, __) => Text(
+                              '${(zoom * 100).round()}%',
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
                           ),
                         ),
@@ -3068,6 +3214,119 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 sticky,
                 context.read<AppState>().readOnlyMode,
               ),
+
+            // 6-Button Floating Image Action Pill (Direct sibling in outer Stack so hit-testing works 100%!)
+            if ((_activeTool == EditorTool.image ||
+                    _activeTool == EditorTool.lasso) &&
+                _selectedImageId != null)
+              ...() {
+                ImageElement? selImg;
+                for (final e in page.imageElements) {
+                  if (e.id == _selectedImageId) {
+                    selImg = e;
+                    break;
+                  }
+                }
+                if (selImg == null) return const <Widget>[];
+                final targetImg = selImg;
+                return <Widget>[
+                  ValueListenableBuilder<
+                      ({String id, double x, double y, double w, double h})?>(
+                    valueListenable: _imageDragNotifier,
+                    builder: (_, drag, __) {
+                      final bool draggingThis =
+                          drag != null && drag.id == targetImg.id;
+                      final double imgX =
+                          draggingThis ? drag.x : targetImg.x;
+                      final double imgY =
+                          draggingThis ? drag.y : targetImg.y;
+                      final double pillLeft = imgX.clamp(
+                        8.0,
+                        math.max(8.0, pageSize.width - 420.0),
+                      );
+                      final double pillTop = (imgY - 52.0).clamp(
+                        8.0,
+                        math.max(8.0, pageSize.height - 56.0),
+                      );
+                      return Positioned(
+                        left: pillLeft,
+                        top: pillTop,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () {},
+                          child: ImageActionPill(
+                            onCropRect: () => _openImageCrop(
+                              page,
+                              targetImg,
+                              ImageCropMode.rectangle,
+                            ),
+                            onCropFreehand: () => _openImageCrop(
+                              page,
+                              targetImg,
+                              ImageCropMode.freehand,
+                            ),
+                            onCopy: () {
+                              final dup = targetImg.copyWith(
+                                id: _uuid.v4(),
+                                x: targetImg.x + 24,
+                                y: targetImg.y + 24,
+                              );
+                              _commitPage(
+                                page.copyWith(
+                                  imageElements: [...page.imageElements, dup],
+                                ),
+                                undoSnapshot: page,
+                              );
+                              setState(() => _selectedImageId = dup.id);
+                            },
+                            onCut: () {
+                              _lassoController.clear();
+                              _selectedImageId = null;
+                              final updated = page.imageElements
+                                  .where((e) => e.id != targetImg.id)
+                                  .toList();
+                              _commitPage(
+                                page.copyWith(imageElements: updated),
+                                undoSnapshot: page,
+                              );
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  duration: Duration(milliseconds: 1000),
+                                  content: Text('Đã cắt hình ảnh'),
+                                ),
+                              );
+                            },
+                            onAddToStickers: () {
+                              context
+                                  .read<AppState>()
+                                  .addCustomSticker(targetImg.filePath);
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    duration: Duration(milliseconds: 1200),
+                                    content: Text(
+                                        'Đã lưu vào bộ Hình dán của bạn'),
+                                  ),
+                                );
+                              }
+                            },
+                            onDelete: () {
+                              _selectedImageId = null;
+                              final updated = page.imageElements
+                                  .where((e) => e.id != targetImg.id)
+                                  .toList();
+                              _commitPage(
+                                page.copyWith(imageElements: updated),
+                                undoSnapshot: page,
+                              );
+                            },
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ];
+              }(),
 
             // Movable Zoom Window Focus Indicator on Active Page (locks page pan while dragging!)
             if (_zoomWindowEnabled && isActivePage)
@@ -3425,273 +3684,319 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     final bool hasHighRes = _elementImageCache.containsKey(img.filePath);
     final file = File(img.filePath);
 
-    void updateImg(ImageElement Function(ImageElement e) transform) {
-      final updated = page.imageElements
-          .map((e) => e.id == img.id ? transform(e) : e)
-          .toList();
-      context.read<AppState>().updatePage(
-            _activeNotebookId,
-            page.copyWith(imageElements: updated),
-          );
+    void beginDrag() {
+      _imageDragNotifier.value = (
+        id: img.id,
+        x: img.x,
+        y: img.y,
+        w: img.width,
+        h: img.height,
+      );
+      if (!_isOverlayDragging) {
+        setState(() => _isOverlayDragging = true);
+      }
     }
 
-    return Positioned(
-      left: img.x,
-      top: img.y,
-      child: IgnorePointer(
-        ignoring: !interactive,
-        child: Transform.rotate(
-          angle: img.rotation,
-          child: GestureDetector(
-            onTap: () => setState(() {
-              _selectedImageId = img.id;
-              _selectedTextId = null;
-              _selectedStencilId = null;
-            }),
-            onPanStart: (_) => setState(() => _isOverlayDragging = true),
-            onPanUpdate: (d) =>
-                updateImg((e) => e.copyWith(x: e.x + d.delta.dx, y: e.y + d.delta.dy)),
-            onPanEnd: (_) => setState(() => _isOverlayDragging = false),
-            onPanCancel: () => setState(() => _isOverlayDragging = false),
-            child: Stack(
-              clipBehavior: Clip.none,
-              children: [
-                // Transparent hit/border box (full-res cropped image is painted by CanvasPainter!)
-                Container(
-                  width: img.width,
-                  height: img.height,
-                  decoration: BoxDecoration(
-                    border: isSelected
-                        ? Border.all(color: EditorColors.activeBlue, width: 2)
-                        : null,
+    void updateDrag(
+      ({String id, double x, double y, double w, double h}) Function(
+        ({String id, double x, double y, double w, double h}) cur,
+      ) transform,
+    ) {
+      final cur = _imageDragNotifier.value ??
+          (id: img.id, x: img.x, y: img.y, w: img.width, h: img.height);
+      if (cur.id != img.id) return;
+      _imageDragNotifier.value = transform(cur);
+    }
+
+    void endDrag() {
+      final finalDrag = _imageDragNotifier.value;
+      _imageDragNotifier.value = null;
+      if (finalDrag != null && finalDrag.id == img.id) {
+        final updated = page.imageElements
+            .map((e) => e.id == img.id
+                ? e.copyWith(
+                    x: finalDrag.x,
+                    y: finalDrag.y,
+                    width: finalDrag.w,
+                    height: finalDrag.h,
+                  )
+                : e)
+            .toList();
+        _commitPage(
+          page.copyWith(imageElements: updated),
+          undoSnapshot: page,
+        );
+      }
+      if (_isOverlayDragging) {
+        setState(() => _isOverlayDragging = false);
+      }
+    }
+
+    return ValueListenableBuilder<
+        ({String id, double x, double y, double w, double h})?>(
+      valueListenable: _imageDragNotifier,
+      builder: (_, drag, __) {
+        final bool draggingThis = drag != null && drag.id == img.id;
+        final double x = draggingThis ? drag.x : img.x;
+        final double y = draggingThis ? drag.y : img.y;
+        final double w = draggingThis ? drag.w : img.width;
+        final double h = draggingThis ? drag.h : img.height;
+
+        return Positioned(
+          left: x,
+          top: y,
+          child: IgnorePointer(
+            ignoring: !interactive,
+            child: Transform.rotate(
+              angle: img.rotation,
+              child: GestureDetector(
+                onTap: () => setState(() {
+                  _selectedImageId = img.id;
+                  _selectedTextId = null;
+                  _selectedStencilId = null;
+                }),
+                onPanStart: (_) => beginDrag(),
+                onPanUpdate: (d) => updateDrag(
+                  (c) => (
+                    id: c.id,
+                    x: c.x + d.delta.dx,
+                    y: c.y + d.delta.dy,
+                    w: c.w,
+                    h: c.h,
                   ),
-                  child: hasHighRes
-                      ? const SizedBox.expand()
-                      : (file.existsSync()
-                          ? Image.file(
-                              file,
-                              fit: BoxFit.contain,
-                              filterQuality: FilterQuality.high,
-                            )
-                          : Container(
-                              color: Colors.grey.shade200,
-                              alignment: Alignment.center,
-                              child: const Icon(
-                                Icons.broken_image_outlined,
-                                size: 32,
-                              ),
-                            )),
                 ),
-                if (isSelected) ...[
-                  // 6-Button Floating Image Action Pill above image
-                  Positioned(
-                    top: -46,
-                    left: -40,
-                    child: ImageActionPill(
-                      onCropRect: () =>
-                          _openImageCrop(page, img, ImageCropMode.rectangle),
-                      onCropFreehand: () =>
-                          _openImageCrop(page, img, ImageCropMode.freehand),
-                      onCopy: () {
-                        final dup = img.copyWith(
-                          id: _uuid.v4(),
-                          x: img.x + 24,
-                          y: img.y + 24,
-                        );
-                        _commitPage(
-                          page.copyWith(
-                            imageElements: [...page.imageElements, dup],
-                          ),
-                          undoSnapshot: page,
-                        );
-                        setState(() => _selectedImageId = dup.id);
-                      },
-                      onCut: () {
-                        _lassoController.clear();
-                        _selectedImageId = null;
-                        final updated = page.imageElements
-                            .where((e) => e.id != img.id)
-                            .toList();
-                        _commitPage(
-                          page.copyWith(imageElements: updated),
-                          undoSnapshot: page,
-                        );
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            duration: Duration(milliseconds: 1000),
-                            content: Text('Đã cắt hình ảnh'),
-                          ),
-                        );
-                      },
-                      onAddToStickers: () {
-                        context
-                            .read<AppState>()
-                            .addCustomSticker(img.filePath);
-                        if (mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              duration: Duration(milliseconds: 1200),
-                              content: Text('Đã lưu vào bộ Hình dán của bạn'),
-                            ),
-                          );
-                        }
-                      },
-                      onDelete: () {
-                        _selectedImageId = null;
-                        final updated = page.imageElements
-                            .where((e) => e.id != img.id)
-                            .toList();
-                        _commitPage(
-                          page.copyWith(imageElements: updated),
-                          undoSnapshot: page,
-                        );
-                      },
+                onPanEnd: (_) => endDrag(),
+                onPanCancel: endDrag,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    // Live preview box during drag/resize, or crisp border box when idle
+                    RepaintBoundary(
+                      child: Container(
+                        width: w,
+                        height: h,
+                        decoration: BoxDecoration(
+                          border: isSelected
+                              ? Border.all(
+                                  color: EditorColors.activeBlue,
+                                  width: 2,
+                                )
+                              : null,
+                          color: draggingThis
+                              ? EditorColors.activeBlue.withAlpha(20)
+                              : null,
+                        ),
+                        child: hasHighRes && !draggingThis
+                            ? const SizedBox.expand()
+                            : (file.existsSync()
+                                ? Image.file(
+                                    file,
+                                    fit: BoxFit.contain,
+                                    filterQuality: FilterQuality.medium,
+                                    gaplessPlayback: true,
+                                  )
+                                : Container(
+                                    color: Colors.grey.shade200,
+                                    alignment: Alignment.center,
+                                    child: const Icon(
+                                      Icons.broken_image_outlined,
+                                      size: 32,
+                                    ),
+                                  )),
+                      ),
                     ),
-                  ),
-                  // Rotate handle (bottom-center stem)
-                  Positioned(
-                    left: img.width * 0.5 - 12,
-                    bottom: -34,
-                    child: _buildMiniCircleButton(
-                      icon: Icons.rotate_right_rounded,
-                      color: EditorColors.activeBlue,
-                      onTap: () {
-                        final updated = page.imageElements
-                            .map((e) => e.id == img.id
-                                ? e.copyWith(rotation: e.rotation + math.pi / 12)
-                                : e)
-                            .toList();
-                        _commitPage(page.copyWith(imageElements: updated));
-                      },
-                    ),
-                  ),
-                  // 8 Resize Handles: 4 corners + 4 edge midpoints
-                  // Top-Left
-                  Positioned(
-                    left: -8,
-                    top: -8,
-                    child: GestureDetector(
-                      onPanUpdate: (d) => updateImg((e) {
-                        final nw = math.max(32.0, e.width - d.delta.dx);
-                        final nh = math.max(32.0, e.height - d.delta.dy);
-                        return e.copyWith(
-                          x: e.x + (e.width - nw),
-                          y: e.y + (e.height - nh),
-                          width: nw,
-                          height: nh,
-                        );
-                      }),
-                      child: _buildResizeHandle(),
-                    ),
-                  ),
-                  // Top-Center
-                  Positioned(
-                    left: img.width * 0.5 - 8,
-                    top: -8,
-                    child: GestureDetector(
-                      onPanUpdate: (d) => updateImg((e) {
-                        final nh = math.max(32.0, e.height - d.delta.dy);
-                        return e.copyWith(
-                          y: e.y + (e.height - nh),
-                          height: nh,
-                        );
-                      }),
-                      child: _buildResizeHandle(),
-                    ),
-                  ),
-                  // Top-Right
-                  Positioned(
-                    right: -8,
-                    top: -8,
-                    child: GestureDetector(
-                      onPanUpdate: (d) => updateImg((e) {
-                        final nh = math.max(32.0, e.height - d.delta.dy);
-                        return e.copyWith(
-                          y: e.y + (e.height - nh),
-                          width: math.max(32.0, e.width + d.delta.dx),
-                          height: nh,
-                        );
-                      }),
-                      child: _buildResizeHandle(),
-                    ),
-                  ),
-                  // Middle-Left
-                  Positioned(
-                    left: -8,
-                    top: img.height * 0.5 - 8,
-                    child: GestureDetector(
-                      onPanUpdate: (d) => updateImg((e) {
-                        final nw = math.max(32.0, e.width - d.delta.dx);
-                        return e.copyWith(
-                          x: e.x + (e.width - nw),
-                          width: nw,
-                        );
-                      }),
-                      child: _buildResizeHandle(),
-                    ),
-                  ),
-                  // Middle-Right
-                  Positioned(
-                    right: -8,
-                    top: img.height * 0.5 - 8,
-                    child: GestureDetector(
-                      onPanUpdate: (d) => updateImg(
-                        (e) => e.copyWith(
-                          width: math.max(32.0, e.width + d.delta.dx),
+                    if (isSelected) ...[
+                      // Rotate handle (bottom-center stem)
+                      Positioned(
+                        left: w * 0.5 - 12,
+                        bottom: -34,
+                        child: _buildMiniCircleButton(
+                          icon: Icons.rotate_right_rounded,
+                          color: EditorColors.activeBlue,
+                          onTap: () {
+                            final updated = page.imageElements
+                                .map((e) => e.id == img.id
+                                    ? e.copyWith(
+                                        rotation: e.rotation + math.pi / 12,
+                                      )
+                                    : e)
+                                .toList();
+                            _commitPage(
+                              page.copyWith(imageElements: updated),
+                              undoSnapshot: page,
+                            );
+                          },
                         ),
                       ),
-                      child: _buildResizeHandle(),
-                    ),
-                  ),
-                  // Bottom-Left
-                  Positioned(
-                    left: -8,
-                    bottom: -8,
-                    child: GestureDetector(
-                      onPanUpdate: (d) => updateImg((e) {
-                        final nw = math.max(32.0, e.width - d.delta.dx);
-                        return e.copyWith(
-                          x: e.x + (e.width - nw),
-                          width: nw,
-                          height: math.max(32.0, e.height + d.delta.dy),
-                        );
-                      }),
-                      child: _buildResizeHandle(),
-                    ),
-                  ),
-                  // Bottom-Center
-                  Positioned(
-                    left: img.width * 0.5 - 8,
-                    bottom: -8,
-                    child: GestureDetector(
-                      onPanUpdate: (d) => updateImg(
-                        (e) => e.copyWith(
-                          height: math.max(32.0, e.height + d.delta.dy),
+                      // 8 Resize Handles: 4 corners + 4 edge midpoints (zero-rebuild ValueNotifier drag)
+                      // Top-Left
+                      Positioned(
+                        left: -8,
+                        top: -8,
+                        child: GestureDetector(
+                          onPanStart: (_) => beginDrag(),
+                          onPanUpdate: (d) => updateDrag((c) {
+                            final nw = math.max(32.0, c.w - d.delta.dx);
+                            final nh = math.max(32.0, c.h - d.delta.dy);
+                            return (
+                              id: c.id,
+                              x: c.x + (c.w - nw),
+                              y: c.y + (c.h - nh),
+                              w: nw,
+                              h: nh,
+                            );
+                          }),
+                          onPanEnd: (_) => endDrag(),
+                          onPanCancel: endDrag,
+                          child: _buildResizeHandle(),
                         ),
                       ),
-                      child: _buildResizeHandle(),
-                    ),
-                  ),
-                  // Bottom-Right
-                  Positioned(
-                    right: -8,
-                    bottom: -8,
-                    child: GestureDetector(
-                      onPanUpdate: (d) => updateImg(
-                        (e) => e.copyWith(
-                          width: math.max(32.0, e.width + d.delta.dx),
-                          height: math.max(32.0, e.height + d.delta.dy),
+                      // Top-Center
+                      Positioned(
+                        left: w * 0.5 - 8,
+                        top: -8,
+                        child: GestureDetector(
+                          onPanStart: (_) => beginDrag(),
+                          onPanUpdate: (d) => updateDrag((c) {
+                            final nh = math.max(32.0, c.h - d.delta.dy);
+                            return (
+                              id: c.id,
+                              x: c.x,
+                              y: c.y + (c.h - nh),
+                              w: c.w,
+                              h: nh,
+                            );
+                          }),
+                          onPanEnd: (_) => endDrag(),
+                          onPanCancel: endDrag,
+                          child: _buildResizeHandle(),
                         ),
                       ),
-                      child: _buildResizeHandle(),
-                    ),
-                  ),
-                ],
-              ],
+                      // Top-Right
+                      Positioned(
+                        right: -8,
+                        top: -8,
+                        child: GestureDetector(
+                          onPanStart: (_) => beginDrag(),
+                          onPanUpdate: (d) => updateDrag((c) {
+                            final nh = math.max(32.0, c.h - d.delta.dy);
+                            return (
+                              id: c.id,
+                              x: c.x,
+                              y: c.y + (c.h - nh),
+                              w: math.max(32.0, c.w + d.delta.dx),
+                              h: nh,
+                            );
+                          }),
+                          onPanEnd: (_) => endDrag(),
+                          onPanCancel: endDrag,
+                          child: _buildResizeHandle(),
+                        ),
+                      ),
+                      // Middle-Left
+                      Positioned(
+                        left: -8,
+                        top: h * 0.5 - 8,
+                        child: GestureDetector(
+                          onPanStart: (_) => beginDrag(),
+                          onPanUpdate: (d) => updateDrag((c) {
+                            final nw = math.max(32.0, c.w - d.delta.dx);
+                            return (
+                              id: c.id,
+                              x: c.x + (c.w - nw),
+                              y: c.y,
+                              w: nw,
+                              h: c.h,
+                            );
+                          }),
+                          onPanEnd: (_) => endDrag(),
+                          onPanCancel: endDrag,
+                          child: _buildResizeHandle(),
+                        ),
+                      ),
+                      // Middle-Right
+                      Positioned(
+                        right: -8,
+                        top: h * 0.5 - 8,
+                        child: GestureDetector(
+                          onPanStart: (_) => beginDrag(),
+                          onPanUpdate: (d) => updateDrag((c) => (
+                                id: c.id,
+                                x: c.x,
+                                y: c.y,
+                                w: math.max(32.0, c.w + d.delta.dx),
+                                h: c.h,
+                              )),
+                          onPanEnd: (_) => endDrag(),
+                          onPanCancel: endDrag,
+                          child: _buildResizeHandle(),
+                        ),
+                      ),
+                      // Bottom-Left
+                      Positioned(
+                        left: -8,
+                        bottom: -8,
+                        child: GestureDetector(
+                          onPanStart: (_) => beginDrag(),
+                          onPanUpdate: (d) => updateDrag((c) {
+                            final nw = math.max(32.0, c.w - d.delta.dx);
+                            return (
+                              id: c.id,
+                              x: c.x + (c.w - nw),
+                              y: c.y,
+                              w: nw,
+                              h: math.max(32.0, c.h + d.delta.dy),
+                            );
+                          }),
+                          onPanEnd: (_) => endDrag(),
+                          onPanCancel: endDrag,
+                          child: _buildResizeHandle(),
+                        ),
+                      ),
+                      // Bottom-Center
+                      Positioned(
+                        left: w * 0.5 - 8,
+                        bottom: -8,
+                        child: GestureDetector(
+                          onPanStart: (_) => beginDrag(),
+                          onPanUpdate: (d) => updateDrag((c) => (
+                                id: c.id,
+                                x: c.x,
+                                y: c.y,
+                                w: c.w,
+                                h: math.max(32.0, c.h + d.delta.dy),
+                              )),
+                          onPanEnd: (_) => endDrag(),
+                          onPanCancel: endDrag,
+                          child: _buildResizeHandle(),
+                        ),
+                      ),
+                      // Bottom-Right
+                      Positioned(
+                        right: -8,
+                        bottom: -8,
+                        child: GestureDetector(
+                          onPanStart: (_) => beginDrag(),
+                          onPanUpdate: (d) => updateDrag((c) => (
+                                id: c.id,
+                                x: c.x,
+                                y: c.y,
+                                w: math.max(32.0, c.w + d.delta.dx),
+                                h: math.max(32.0, c.h + d.delta.dy),
+                              )),
+                          onPanEnd: (_) => endDrag(),
+                          onPanCancel: endDrag,
+                          child: _buildResizeHandle(),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -3922,6 +4227,46 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     0xFFDDD6FE, // Tím
   ];
 
+  Future<void> _editStickyNoteTitle(
+    NotePage page,
+    StickyNoteElement note,
+  ) async {
+    final ctrl = TextEditingController(text: note.text);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Tiêu đề giấy nhớ'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLines: 2,
+          decoration: const InputDecoration(
+            hintText: 'Nhập tiêu đề ngắn (tùy chọn)...',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: const Text('Lưu'),
+          ),
+        ],
+      ),
+    );
+    ctrl.dispose();
+    if (result == null || !mounted) return;
+    final updated = page.stickyNotes
+        .map((s) => s.id == note.id
+            ? s.copyWith(text: result, updatedAt: DateTime.now())
+            : s)
+        .toList();
+    _commitPage(page.copyWith(stickyNotes: updated), undoSnapshot: page);
+  }
+
   Widget _buildStickyNoteOverlay(
     NotePage page,
     StickyNoteElement note,
@@ -3929,235 +4274,504 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   ) {
     final bgColor = Color(note.colorValue);
     final headerColor = Color.lerp(bgColor, Colors.black, 0.08) ?? bgColor;
-    final ctrl = _stickyControllers.putIfAbsent(
-      note.id,
-      () => TextEditingController(text: note.text),
-    );
-    if (ctrl.text != note.text) {
-      ctrl.value = TextEditingValue(
-        text: note.text,
-        selection: TextSelection.collapsed(offset: note.text.length),
-      );
-    }
 
-    void updateSticky(StickyNoteElement Function(StickyNoteElement s) fn) {
+    void commitSticky(StickyNoteElement Function(StickyNoteElement s) fn) {
       final updated = page.stickyNotes
           .map((s) => s.id == note.id ? fn(s) : s)
           .toList();
-      context.read<AppState>().updatePage(
-            _activeNotebookId,
-            page.copyWith(stickyNotes: updated),
-          );
+      _commitPage(
+        page.copyWith(stickyNotes: updated),
+        undoSnapshot: page,
+      );
     }
 
-    final firstLine = note.text.trim().isEmpty
-        ? 'Giấy nhớ dán'
-        : note.text.trim().split('\n').first;
+    void beginStickyDrag() {
+      _stickyDragNotifier.value = (
+        id: note.id,
+        x: note.x,
+        y: note.y,
+        w: note.width,
+        h: note.height,
+      );
+      if (!_isOverlayDragging) {
+        setState(() => _isOverlayDragging = true);
+      }
+    }
 
-    return Positioned(
-      left: note.x,
-      top: note.y,
-      child: Container(
-        width: note.isCollapsed ? math.min(note.width, 196.0) : note.width,
-        height: note.isCollapsed ? 40.0 : note.height,
-        decoration: BoxDecoration(
-          color: bgColor,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: Colors.black.withAlpha(28)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withAlpha(42),
-              blurRadius: 10,
-              offset: const Offset(0, 4),
+    void updateStickyDrag(
+      ({String id, double x, double y, double w, double h}) Function(
+        ({String id, double x, double y, double w, double h}) cur,
+      ) transform,
+    ) {
+      final cur = _stickyDragNotifier.value ??
+          (id: note.id, x: note.x, y: note.y, w: note.width, h: note.height);
+      if (cur.id != note.id) return;
+      _stickyDragNotifier.value = transform(cur);
+    }
+
+    void endStickyDrag() {
+      final finalDrag = _stickyDragNotifier.value;
+      _stickyDragNotifier.value = null;
+      if (finalDrag != null && finalDrag.id == note.id) {
+        commitSticky(
+          (s) => s.copyWith(
+            x: finalDrag.x,
+            y: finalDrag.y,
+            width: finalDrag.w,
+            height: finalDrag.h,
+            updatedAt: DateTime.now(),
+          ),
+        );
+      }
+      if (_isOverlayDragging) {
+        setState(() => _isOverlayDragging = false);
+      }
+    }
+
+    ToolType stickyToolType() {
+      switch (_activeTool) {
+        case EditorTool.ballpointPen:
+          return ToolType.ballpointPen;
+        case EditorTool.pencil:
+          return ToolType.pencil;
+        case EditorTool.brushPen:
+          return ToolType.brushPen;
+        case EditorTool.highlighter:
+          return ToolType.highlighter;
+        default:
+          return ToolType.fountainPen;
+      }
+    }
+
+    int stickyInkColorValue() {
+      if (_activeTool == EditorTool.highlighter) {
+        return _highlighterColor.value;
+      }
+      // Avoid invisible white ink on bright pastel sticky notes
+      final c = _penColor;
+      final lum = c.computeLuminance();
+      if (lum > 0.88) return 0xFF1E293B;
+      return c.value;
+    }
+
+    void eraseStickyAt(Offset localPos) {
+      final remaining = note.strokes
+          .where((s) => !StrokeEngine.hitTestStroke(s, localPos, tolerance: 14.0))
+          .toList();
+      if (remaining.length != note.strokes.length) {
+        commitSticky(
+          (s) => s.copyWith(strokes: remaining, updatedAt: DateTime.now()),
+        );
+      }
+    }
+
+    final collapsedLabel = note.text.trim().isNotEmpty
+        ? note.text.trim().split('\n').first
+        : (note.strokes.isNotEmpty
+            ? 'Giấy nhớ (${note.strokes.length} nét)'
+            : 'Giấy nhớ dán');
+
+    return ValueListenableBuilder<
+        ({String id, double x, double y, double w, double h})?>(
+      valueListenable: _stickyDragNotifier,
+      builder: (_, drag, __) {
+        final bool draggingThis = drag != null && drag.id == note.id;
+        final double x = draggingThis ? drag.x : note.x;
+        final double y = draggingThis ? drag.y : note.y;
+        final double w = draggingThis ? drag.w : note.width;
+        final double h = draggingThis ? drag.h : note.height;
+
+        return Positioned(
+          left: x,
+          top: y,
+          child: Container(
+            width: note.isCollapsed ? math.min(w, 210.0) : w,
+            height: note.isCollapsed ? 40.0 : h,
+            decoration: BoxDecoration(
+              color: bgColor,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.black.withAlpha(28)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withAlpha(42),
+                  blurRadius: 10,
+                  offset: const Offset(0, 4),
+                ),
+              ],
             ),
-          ],
-        ),
-        child: Stack(
-          children: [
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+            child: Stack(
               children: [
-                // Top Drag Header Bar
-                GestureDetector(
-                  onPanStart: readOnly
-                      ? null
-                      : (_) => setState(() => _isOverlayDragging = true),
-                  onPanUpdate: readOnly
-                      ? null
-                      : (d) => updateSticky(
-                            (s) => s.copyWith(
-                              x: s.x + d.delta.dx,
-                              y: s.y + d.delta.dy,
-                            ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // Top Drag Header Bar (zero-rebuild ValueNotifier drag)
+                    GestureDetector(
+                      onPanStart: readOnly ? null : (_) => beginStickyDrag(),
+                      onPanUpdate: readOnly
+                          ? null
+                          : (d) => updateStickyDrag(
+                                (c) => (
+                                  id: c.id,
+                                  x: c.x + d.delta.dx,
+                                  y: c.y + d.delta.dy,
+                                  w: c.w,
+                                  h: c.h,
+                                ),
+                              ),
+                      onPanEnd: readOnly ? null : (_) => endStickyDrag(),
+                      onPanCancel: readOnly ? null : endStickyDrag,
+                      child: Container(
+                        height: 36,
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        decoration: BoxDecoration(
+                          color: headerColor,
+                          borderRadius: BorderRadius.vertical(
+                            top: const Radius.circular(9),
+                            bottom: note.isCollapsed
+                                ? const Radius.circular(9)
+                                : Radius.zero,
                           ),
-                  onPanEnd: readOnly
-                      ? null
-                      : (_) => setState(() => _isOverlayDragging = false),
-                  onPanCancel: () {
-                    if (_isOverlayDragging) {
-                      setState(() => _isOverlayDragging = false);
-                    }
-                  },
-                  child: Container(
-                    height: 36,
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
-                    decoration: BoxDecoration(
-                      color: headerColor,
-                      borderRadius: BorderRadius.vertical(
-                        top: const Radius.circular(9),
-                        bottom: note.isCollapsed
-                            ? const Radius.circular(9)
-                            : Radius.zero,
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        if (note.isCollapsed)
-                          Expanded(
-                            child: Padding(
-                              padding: const EdgeInsets.only(left: 4),
-                              child: Text(
-                                firstLine,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: Color(0xFF1E293B),
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
+                        ),
+                        child: Row(
+                          children: [
+                            if (note.isCollapsed)
+                              Expanded(
+                                child: Padding(
+                                  padding: const EdgeInsets.only(left: 4),
+                                  child: Text(
+                                    collapsedLabel,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Color(0xFF1E293B),
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              )
+                            else ...[
+                              for (final cVal in _stickyPastelColors)
+                                GestureDetector(
+                                  onTap: readOnly
+                                      ? null
+                                      : () => commitSticky(
+                                            (s) => s.copyWith(colorValue: cVal),
+                                          ),
+                                  child: Container(
+                                    width: 13,
+                                    height: 13,
+                                    margin: const EdgeInsets.symmetric(
+                                      horizontal: 2,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Color(cVal),
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color: note.colorValue == cVal
+                                            ? const Color(0xFF1E293B)
+                                            : Colors.black26,
+                                        width:
+                                            note.colorValue == cVal ? 1.8 : 1.0,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              const Spacer(),
+                              if (!readOnly)
+                                Tooltip(
+                                  message: 'Tiêu đề',
+                                  child: InkWell(
+                                    onTap: () =>
+                                        _editStickyNoteTitle(page, note),
+                                    child: const Padding(
+                                      padding: EdgeInsets.all(3.5),
+                                      child: Icon(
+                                        Icons.title_rounded,
+                                        size: 15,
+                                        color: Color(0xFF334155),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              if (!readOnly && note.strokes.isNotEmpty)
+                                Tooltip(
+                                  message: 'Xóa nét viết',
+                                  child: InkWell(
+                                    onTap: () => commitSticky(
+                                      (s) => s.copyWith(
+                                        strokes: const [],
+                                        updatedAt: DateTime.now(),
+                                      ),
+                                    ),
+                                    child: const Padding(
+                                      padding: EdgeInsets.all(3.5),
+                                      child: Icon(
+                                        Icons.cleaning_services_outlined,
+                                        size: 14,
+                                        color: Color(0xFF334155),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                            InkWell(
+                              onTap: () => commitSticky(
+                                (s) => s.copyWith(isCollapsed: !s.isCollapsed),
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.all(3.5),
+                                child: Icon(
+                                  note.isCollapsed
+                                      ? Icons.unfold_more_rounded
+                                      : Icons.unfold_less_rounded,
+                                  size: 16,
+                                  color: const Color(0xFF334155),
                                 ),
                               ),
                             ),
-                          )
-                        else ...[
-                          for (final cVal in _stickyPastelColors)
-                            GestureDetector(
-                              onTap: readOnly
-                                  ? null
-                                  : () => updateSticky(
-                                        (s) => s.copyWith(colorValue: cVal),
-                                      ),
-                              child: Container(
-                                width: 14,
-                                height: 14,
-                                margin:
-                                    const EdgeInsets.symmetric(horizontal: 2.5),
-                                decoration: BoxDecoration(
-                                  color: Color(cVal),
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: note.colorValue == cVal
-                                        ? const Color(0xFF1E293B)
-                                        : Colors.black26,
-                                    width: note.colorValue == cVal ? 1.8 : 1.0,
+                            if (!readOnly)
+                              InkWell(
+                                onTap: () {
+                                  _stickyControllers
+                                      .remove(note.id)
+                                      ?.dispose();
+                                  final updated = page.stickyNotes
+                                      .where((s) => s.id != note.id)
+                                      .toList();
+                                  _commitPage(
+                                    page.copyWith(stickyNotes: updated),
+                                    undoSnapshot: page,
+                                  );
+                                },
+                                child: const Padding(
+                                  padding: EdgeInsets.all(3.5),
+                                  child: Icon(
+                                    Icons.close_rounded,
+                                    size: 15,
+                                    color: Color(0xFF334155),
                                   ),
                                 ),
                               ),
-                            ),
-                          const Spacer(),
-                        ],
-                        InkWell(
-                          onTap: () => updateSticky(
-                            (s) => s.copyWith(isCollapsed: !s.isCollapsed),
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.all(4),
-                            child: Icon(
-                              note.isCollapsed
-                                  ? Icons.unfold_more_rounded
-                                  : Icons.unfold_less_rounded,
-                              size: 16,
-                              color: const Color(0xFF334155),
-                            ),
-                          ),
+                          ],
                         ),
-                        if (!readOnly)
-                          InkWell(
-                            onTap: () {
-                              _stickyControllers.remove(note.id)?.dispose();
-                              final updated = page.stickyNotes
-                                  .where((s) => s.id != note.id)
-                                  .toList();
-                              _commitPage(
-                                page.copyWith(stickyNotes: updated),
-                                undoSnapshot: page,
+                      ),
+                    ),
+                    // 144fps Direct M-Pencil 3 Handwriting Canvas Body
+                    if (!note.isCollapsed)
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: const BorderRadius.vertical(
+                            bottom: Radius.circular(9),
+                          ),
+                          child: Listener(
+                            behavior: HitTestBehavior.opaque,
+                            onPointerDown: (e) {
+                              if (readOnly || !_palmFilter.shouldAccept(e)) {
+                                return;
+                              }
+                              if (!_isOverlayDragging) {
+                                setState(() => _isOverlayDragging = true);
+                              }
+                              if (_activeTool == EditorTool.eraser) {
+                                eraseStickyAt(e.localPosition);
+                                return;
+                              }
+                              final rawP =
+                                  (e.pressure > 0 && e.pressure <= 1.0)
+                                      ? e.pressure
+                                      : 0.55;
+                              final pt = StrokePoint(
+                                x: e.localPosition.dx,
+                                y: e.localPosition.dy,
+                                pressure: StrokeEngine.applyMPencilPressureCurve(
+                                  rawP,
+                                  gamma: _pressureGamma,
+                                ),
+                                tilt: e.tilt,
+                                timestamp:
+                                    DateTime.now().millisecondsSinceEpoch,
+                              );
+                              final width =
+                                  _activeTool == EditorTool.highlighter
+                                      ? _highlighterWidth * 0.7
+                                      : _penWidth.clamp(1.2, 6.0);
+                              _activeStickyStrokeNoteId = note.id;
+                              _activeStickyStrokeNotifier.value = Stroke(
+                                id: _uuid.v4(),
+                                toolType: stickyToolType(),
+                                colorValue: stickyInkColorValue(),
+                                width: width,
+                                points: [pt],
+                                isFilled: false,
                               );
                             },
-                            child: const Padding(
-                              padding: EdgeInsets.all(4),
-                              child: Icon(
-                                Icons.close_rounded,
-                                size: 15,
-                                color: Color(0xFF334155),
-                              ),
+                            onPointerMove: (e) {
+                              if (readOnly) return;
+                              if (_activeTool == EditorTool.eraser &&
+                                  _isOverlayDragging) {
+                                eraseStickyAt(e.localPosition);
+                                return;
+                              }
+                              final current = _activeStickyStrokeNotifier.value;
+                              if (_activeStickyStrokeNoteId != note.id ||
+                                  current == null) {
+                                return;
+                              }
+                              final rawP =
+                                  (e.pressure > 0 && e.pressure <= 1.0)
+                                      ? e.pressure
+                                      : 0.55;
+                              final candidate = StrokePoint(
+                                x: e.localPosition.dx,
+                                y: e.localPosition.dy,
+                                pressure: StrokeEngine.applyMPencilPressureCurve(
+                                  rawP,
+                                  gamma: _pressureGamma,
+                                ),
+                                tilt: e.tilt,
+                                timestamp:
+                                    DateTime.now().millisecondsSinceEpoch,
+                              );
+                              final filtered = StrokeEngine.filterLivePoint(
+                                candidate,
+                                current.points,
+                                stabilization: _smoothingStrength * 0.65,
+                              );
+                              if (filtered != null) {
+                                _activeStickyStrokeNotifier.value =
+                                    current.copyWith(
+                                  points: [...current.points, filtered],
+                                );
+                              }
+                            },
+                            onPointerUp: (_) {
+                              final current = _activeStickyStrokeNotifier.value;
+                              if (_activeStickyStrokeNoteId == note.id &&
+                                  current != null) {
+                                _activeStickyStrokeNotifier.value = null;
+                                _activeStickyStrokeNoteId = null;
+                                final smoothed =
+                                    StrokeEngine.smoothAndNeatenStroke(
+                                  current.points,
+                                  stabilization: _smoothingStrength * 0.65,
+                                  autoNeaten: _autoNeatenEnabled,
+                                  toolType: current.toolType,
+                                );
+                                final finalStroke =
+                                    current.copyWith(points: smoothed);
+                                commitSticky(
+                                  (s) => s.copyWith(
+                                    strokes: [...s.strokes, finalStroke],
+                                    updatedAt: DateTime.now(),
+                                  ),
+                                );
+                              }
+                              if (_isOverlayDragging) {
+                                setState(() => _isOverlayDragging = false);
+                              }
+                            },
+                            onPointerCancel: (_) {
+                              if (_activeStickyStrokeNoteId == note.id) {
+                                _activeStickyStrokeNotifier.value = null;
+                                _activeStickyStrokeNoteId = null;
+                              }
+                              if (_isOverlayDragging) {
+                                setState(() => _isOverlayDragging = false);
+                              }
+                            },
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                if (note.text.trim().isNotEmpty)
+                                  Positioned(
+                                    left: 8,
+                                    right: 8,
+                                    top: 4,
+                                    child: IgnorePointer(
+                                      child: Text(
+                                        note.text.trim(),
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: const Color(0xFF1E293B)
+                                              .withAlpha(190),
+                                          fontSize: 11.5,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                if (note.strokes.isEmpty &&
+                                    note.text.trim().isEmpty)
+                                  Center(
+                                    child: IgnorePointer(
+                                      child: Text(
+                                        'Viết tay trực tiếp bằng bút...',
+                                        style: TextStyle(
+                                          color: const Color(0xFF475569)
+                                              .withAlpha(140),
+                                          fontSize: 12,
+                                          fontStyle: FontStyle.italic,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                RepaintBoundary(
+                                  child: CustomPaint(
+                                    painter: _StickyCanvasPainter(
+                                      strokes: note.strokes,
+                                      activeStrokeNotifier:
+                                          _activeStickyStrokeNotifier,
+                                      noteId: note.id,
+                                      getActiveNoteId: () =>
+                                          _activeStickyStrokeNoteId,
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                      ],
-                    ),
-                  ),
+                        ),
+                      ),
+                  ],
                 ),
-                // Inline Editable Body
-                if (!note.isCollapsed)
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(10, 4, 10, 10),
-                      child: TextField(
-                        controller: ctrl,
-                        readOnly: readOnly,
-                        maxLines: null,
-                        expands: true,
-                        style: const TextStyle(
-                          color: Color(0xFF1E293B),
-                          fontSize: 13.5,
-                          height: 1.35,
+                // Bottom-Right Resize Handle (zero-rebuild ValueNotifier resize)
+                if (!note.isCollapsed && !readOnly)
+                  Positioned(
+                    right: 0,
+                    bottom: 0,
+                    child: GestureDetector(
+                      onPanStart: (_) => beginStickyDrag(),
+                      onPanUpdate: (d) => updateStickyDrag(
+                        (c) => (
+                          id: c.id,
+                          x: c.x,
+                          y: c.y,
+                          w: math.max(140.0, c.w + d.delta.dx),
+                          h: math.max(110.0, c.h + d.delta.dy),
                         ),
-                        decoration: const InputDecoration(
-                          isDense: true,
-                          border: InputBorder.none,
-                          hintText: 'Ghi chú nhanh...',
-                          hintStyle: TextStyle(
-                            color: Color(0xFF64748B),
-                            fontSize: 13,
-                          ),
-                        ),
-                        onChanged: (val) => updateSticky(
-                          (s) => s.copyWith(
-                            text: val,
-                            updatedAt: DateTime.now(),
-                          ),
+                      ),
+                      onPanEnd: (_) => endStickyDrag(),
+                      onPanCancel: endStickyDrag,
+                      child: Container(
+                        width: 24,
+                        height: 24,
+                        alignment: Alignment.bottomRight,
+                        padding: const EdgeInsets.all(3),
+                        child: Icon(
+                          Icons.drag_handle_rounded,
+                          size: 14,
+                          color: Colors.black.withAlpha(105),
                         ),
                       ),
                     ),
                   ),
               ],
             ),
-            // Bottom-Right Resize Handle
-            if (!note.isCollapsed && !readOnly)
-              Positioned(
-                right: 0,
-                bottom: 0,
-                child: GestureDetector(
-                  onPanUpdate: (d) => updateSticky(
-                    (s) => s.copyWith(
-                      width: math.max(140.0, s.width + d.delta.dx),
-                      height: math.max(110.0, s.height + d.delta.dy),
-                    ),
-                  ),
-                  child: Container(
-                    width: 20,
-                    height: 20,
-                    alignment: Alignment.bottomRight,
-                    padding: const EdgeInsets.all(3),
-                    child: Icon(
-                      Icons.drag_handle_rounded,
-                      size: 13,
-                      color: Colors.black.withAlpha(90),
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 
@@ -4192,5 +4806,65 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         child: Icon(icon, size: 14, color: Colors.white),
       ),
     );
+  }
+}
+
+/// Lightweight 144fps CustomPainter for handwritten strokes inside a Sticky Note.
+class _StickyCanvasPainter extends CustomPainter {
+  final List<Stroke> strokes;
+  final ValueNotifier<Stroke?> activeStrokeNotifier;
+  final String noteId;
+  final String? Function() getActiveNoteId;
+
+  _StickyCanvasPainter({
+    required this.strokes,
+    required this.activeStrokeNotifier,
+    required this.noteId,
+    required this.getActiveNoteId,
+  }) : super(repaint: activeStrokeNotifier);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.save();
+    canvas.clipRect(Offset.zero & size);
+
+    // Paint highlighters first so ink stays crisp on top
+    for (final s in strokes) {
+      if (s.toolType == ToolType.highlighter) {
+        CanvasPainter.paintHighlighterStroke(
+          canvas,
+          s,
+          isDarkPaper: false,
+          isSelected: false,
+        );
+      }
+    }
+    for (final s in strokes) {
+      if (s.toolType != ToolType.highlighter) {
+        CanvasPainter.paintInkStroke(canvas, s, isSelected: false);
+      }
+    }
+
+    // Live 144Hz stroke belonging to this sticky note
+    final active = activeStrokeNotifier.value;
+    if (active != null && getActiveNoteId() == noteId) {
+      if (active.toolType == ToolType.highlighter) {
+        CanvasPainter.paintHighlighterStroke(
+          canvas,
+          active,
+          isDarkPaper: false,
+          isSelected: false,
+        );
+      } else {
+        CanvasPainter.paintInkStroke(canvas, active, isSelected: false);
+      }
+    }
+
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant _StickyCanvasPainter oldDelegate) {
+    return oldDelegate.strokes != strokes || oldDelegate.noteId != noteId;
   }
 }

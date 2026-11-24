@@ -12,6 +12,13 @@ import '../../core/models/drawing_elements.dart';
 import '../../core/models/note_page.dart';
 import '../../core/models/notebook.dart';
 
+/// Callback báo tiến độ xuất PDF từng bước để hiển thị thanh tiến trình mượt mà.
+typedef PdfExportProgressCallback = void Function(
+  int currentStep,
+  int totalSteps,
+  String stage,
+);
+
 /// Dịch vụ xuất sổ tay `Notebook` sang tệp PDF nhiều trang (gồm giấy nền/PDF gốc,
 /// nét viết tay, văn bản, hình ảnh và các khuôn vẽ Hóa học), đồng thời hỗ trợ in & chia sẻ.
 class PdfExportService {
@@ -29,6 +36,7 @@ class PdfExportService {
     Notebook notebook, {
     double canvasWidth = defaultCanvasWidth,
     double canvasHeight = defaultCanvasHeight,
+    PdfExportProgressCallback? onProgress,
   }) async {
     final doc = pw.Document(
       title: notebook.title,
@@ -49,7 +57,34 @@ class PdfExportService {
           ]
         : notebook.pages;
 
-    for (final page in pages) {
+    final totalPages = pages.length;
+    // Bộ nhớ đệm ảnh đã giải mã theo đường dẫn tệp để tránh đọc lại đĩa nhiều lần.
+    final imageCache = <String, pw.MemoryImage>{};
+
+    Future<pw.MemoryImage?> loadCachedImage(String path) async {
+      if (path.isEmpty) return null;
+      final cached = imageCache[path];
+      if (cached != null) return cached;
+      final file = File(path);
+      if (!await file.exists()) return null;
+      try {
+        final mem = pw.MemoryImage(await file.readAsBytes());
+        imageCache[path] = mem;
+        return mem;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    for (var i = 0; i < totalPages; i++) {
+      final page = pages[i];
+      onProgress?.call(
+        i + 1,
+        totalPages,
+        'Đang dựng trang ${i + 1}/$totalPages...',
+      );
+      await Future<void>.delayed(Duration.zero);
+
       final isWhiteboard = page.isInfiniteWhiteboard || notebook.isWhiteboard;
       final viewport = _computePageViewport(
         page,
@@ -63,27 +98,19 @@ class PdfExportService {
       final scaleX = viewport.scaleX;
       final scaleY = viewport.scaleY;
 
-      // Tải trước ảnh nền PDF (nếu có)
+      // Tải trước ảnh nền PDF (nếu có, dùng cache chống trùng lặp)
       pw.MemoryImage? pdfBgImage;
       if (page.pdfBackgroundPath != null &&
           page.pdfBackgroundPath!.isNotEmpty) {
-        final bgFile = File(page.pdfBackgroundPath!);
-        if (await bgFile.exists()) {
-          try {
-            pdfBgImage = pw.MemoryImage(await bgFile.readAsBytes());
-          } catch (_) {}
-        }
+        pdfBgImage = await loadCachedImage(page.pdfBackgroundPath!);
       }
 
-      // Tải trước các ảnh đính kèm trên trang
+      // Tải trước các ảnh đính kèm trên trang (dùng cache chống trùng lặp)
       final loadedImages = <String, pw.MemoryImage>{};
       for (final img in page.imageElements) {
-        if (img.filePath.isEmpty) continue;
-        final file = File(img.filePath);
-        if (await file.exists()) {
-          try {
-            loadedImages[img.id] = pw.MemoryImage(await file.readAsBytes());
-          } catch (_) {}
+        final mem = await loadCachedImage(img.filePath);
+        if (mem != null) {
+          loadedImages[img.id] = mem;
         }
       }
 
@@ -265,6 +292,13 @@ class PdfExportService {
       );
     }
 
+    onProgress?.call(
+      totalPages,
+      totalPages,
+      'Đang nén và đóng gói tệp PDF...',
+    );
+    await Future<void>.delayed(Duration.zero);
+
     return doc.save();
   }
 
@@ -277,8 +311,21 @@ class PdfExportService {
     Notebook notebook, {
     String? customFileName,
     String? customDirectory,
+    PdfExportProgressCallback? onProgress,
   }) async {
-    final bytes = await buildNotebookPdfBytes(notebook);
+    final totalPages = notebook.pages.isEmpty ? 1 : notebook.pages.length;
+    final bytes = await buildNotebookPdfBytes(
+      notebook,
+      onProgress: onProgress,
+    );
+
+    onProgress?.call(
+      totalPages,
+      totalPages,
+      'Đang lưu tệp vào bộ nhớ...',
+    );
+    await Future<void>.delayed(Duration.zero);
+
     final rawName = (customFileName ?? notebook.title).trim();
     final safeName = rawName
         .replaceAll(RegExp(r'[^a-zA-Z0-9_\-\s]'), '')
@@ -313,10 +360,12 @@ class PdfExportService {
   Future<File> shareNotebookPdf(
     Notebook notebook, {
     String? customDirectory,
+    PdfExportProgressCallback? onProgress,
   }) async {
     final file = await exportNotebookToFile(
       notebook,
       customDirectory: customDirectory,
+      onProgress: onProgress,
     );
     await Share.shareXFiles(
       <XFile>[XFile(file.path)],
@@ -680,7 +729,6 @@ class PdfExportService {
     if (stroke.points.isEmpty) return;
     if (stroke.toolType == ToolType.laserPointer) return;
 
-    canvas.saveContext();
     final baseAlpha = _alphaFromArgb(stroke.colorValue);
     final (opacity, widthMultiplier) = switch (stroke.toolType) {
       ToolType.highlighter => (0.35, 1.8),
@@ -690,40 +738,103 @@ class PdfExportService {
       ToolType.fountainPen || ToolType.ballpointPen => (baseAlpha, 1.0),
       ToolType.laserPointer => (0.0, 1.0),
     };
-    canvas.setGraphicState(
-      PdfGraphicState(strokeOpacity: opacity, fillOpacity: opacity),
-    );
-    canvas.setStrokeColor(_pdfColorFromArgb(stroke.colorValue));
-    canvas.setFillColor(_pdfColorFromArgb(stroke.colorValue));
-    canvas.setLineCap(PdfLineCap.round);
-    canvas.setLineJoin(PdfLineJoin.round);
 
+    // Chỉ dùng saveContext/setGraphicState khi nét có độ trong suốt < 1.0
+    // để tránh tạo thừa đối tượng ExtGState trong PDF cho từng nét viết tay.
+    final needsAlphaState = opacity < 0.999;
+    if (needsAlphaState) {
+      canvas.saveContext();
+      canvas.setGraphicState(
+        PdfGraphicState(strokeOpacity: opacity, fillOpacity: opacity),
+      );
+    }
+
+    final color = _pdfColorFromArgb(stroke.colorValue);
     final scaledWidth = math.max(
       0.8,
       stroke.width * scaleX * widthMultiplier,
     );
-    canvas.setLineWidth(scaledWidth);
 
     double mapX(double x) => (x - originX) * scaleX;
     double mapY(double y) => size.y - ((y - originY) * scaleY);
 
-    if (stroke.points.length == 1) {
-      final p = stroke.points.first;
+    final pts = _thinPointsForPdf(
+      stroke.points,
+      isShape: stroke.shapeType != ShapeType.none,
+    );
+
+    if (pts.length == 1) {
+      final p = pts.first;
       final r = scaledWidth / 2;
+      canvas.setFillColor(color);
       canvas.drawEllipse(mapX(p.x), mapY(p.y), r, r);
       canvas.fillPath();
-      canvas.restoreContext();
+      if (needsAlphaState) {
+        canvas.restoreContext();
+      }
       return;
     }
 
-    final first = stroke.points.first;
+    canvas.setStrokeColor(color);
+    canvas.setLineCap(PdfLineCap.round);
+    canvas.setLineJoin(PdfLineJoin.round);
+    canvas.setLineWidth(scaledWidth);
+
+    final first = pts.first;
     canvas.moveTo(mapX(first.x), mapY(first.y));
-    for (var i = 1; i < stroke.points.length; i++) {
-      final pt = stroke.points[i];
+    for (var i = 1; i < pts.length; i++) {
+      final pt = pts[i];
       canvas.lineTo(mapX(pt.x), mapY(pt.y));
     }
     canvas.strokePath();
-    canvas.restoreContext();
+
+    if (needsAlphaState) {
+      canvas.restoreContext();
+    }
+  }
+
+  /// Giảm mật độ điểm thừa cho nét viết tay 240Hz trước khi dựng PDF
+  /// (loại bỏ các điểm cách nhau < 1.8 logical px, luôn giữ điểm đầu, điểm cuối và góc nhọn).
+  List<StrokePoint> _thinPointsForPdf(
+    List<StrokePoint> points, {
+    bool isShape = false,
+  }) {
+    if (points.length <= 2) return points;
+    final minDistSq = isShape ? 0.25 : 3.24; // 1.8 * 1.8 = 3.24
+    final result = <StrokePoint>[points.first];
+    var lastKept = points.first;
+
+    for (var i = 1; i < points.length - 1; i++) {
+      final curr = points[i];
+      final dx = curr.x - lastKept.x;
+      final dy = curr.y - lastKept.y;
+      final distSq = dx * dx + dy * dy;
+
+      if (distSq >= minDistSq) {
+        result.add(curr);
+        lastKept = curr;
+        continue;
+      }
+
+      // Luôn giữ lại điểm góc nhọn để nét chữ không bị tù
+      if (!isShape && distSq > 0.25) {
+        final next = points[i + 1];
+        final ndx = next.x - curr.x;
+        final ndy = next.y - curr.y;
+        final nextDistSq = ndx * ndx + ndy * ndy;
+        if (nextDistSq > 0.25) {
+          final cosAngle =
+              (dx * ndx + dy * ndy) / math.sqrt(distSq * nextDistSq);
+          if (cosAngle < 0.72) {
+            result.add(curr);
+            lastKept = curr;
+          }
+        }
+      }
+    }
+
+    result.add(points.last);
+    return result;
   }
 
   void _paintStudyTape(
@@ -1107,10 +1218,13 @@ class PdfExportService {
     final top = (note.y - originY) * scaleY;
 
     if (note.isCollapsed) {
+      final fallbackLabel = note.strokes.isNotEmpty
+          ? 'Ghi chú viết tay (${note.strokes.length} nét)'
+          : 'Ghi chú dán';
       final firstLine = note.text
           .trim()
           .split('\n')
-          .firstWhere((l) => l.trim().isNotEmpty, orElse: () => 'Ghi chú dán');
+          .firstWhere((l) => l.trim().isNotEmpty, orElse: () => fallbackLabel);
       final pillW = math.max(96.0, note.width * scaleX);
       return pw.Positioned(
         left: left,
@@ -1139,6 +1253,10 @@ class PdfExportService {
     final cardW = math.max(90.0, note.width * scaleX);
     final cardH = math.max(68.0, note.height * scaleY);
     final headerH = math.min(18.0, math.max(12.0, cardH * 0.16));
+    final bodyW = cardW;
+    final bodyH = math.max(20.0, cardH - headerH);
+    final localScaleX = bodyW / math.max(1.0, note.width);
+    final localScaleY = bodyH / math.max(1.0, note.height - 32.0);
     final bodyFontSize = (9.5 * scaleX).clamp(7.0, 11.0);
 
     return pw.Positioned(
@@ -1176,15 +1294,39 @@ class PdfExportService {
               ),
             ),
             pw.Expanded(
-              child: pw.Padding(
-                padding: const pw.EdgeInsets.all(6),
-                child: pw.Text(
-                  note.text,
-                  style: pw.TextStyle(
-                    fontSize: bodyFontSize,
-                    color: inkColor,
-                    lineSpacing: 1.8,
-                  ),
+              child: pw.ClipRect(
+                child: pw.Stack(
+                  children: [
+                    if (note.text.trim().isNotEmpty)
+                      pw.Padding(
+                        padding: const pw.EdgeInsets.all(6),
+                        child: pw.Text(
+                          note.text,
+                          style: pw.TextStyle(
+                            fontSize: bodyFontSize,
+                            color: inkColor,
+                            lineSpacing: 1.8,
+                          ),
+                        ),
+                      ),
+                    if (note.strokes.isNotEmpty)
+                      pw.Positioned.fill(
+                        child: pw.CustomPaint(
+                          size: PdfPoint(bodyW, bodyH),
+                          painter: (PdfGraphics canvas, PdfPoint size) {
+                            for (final stroke in note.strokes) {
+                              _paintStroke(
+                                canvas,
+                                size,
+                                stroke,
+                                localScaleX,
+                                localScaleY,
+                              );
+                            }
+                          },
+                        ),
+                      ),
+                  ],
                 ),
               ),
             ),

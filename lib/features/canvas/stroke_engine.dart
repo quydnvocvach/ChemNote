@@ -715,14 +715,14 @@ class StrokeEngine {
     final end = rawPoints.last;
     final startEndDist = _dist(start, end);
 
-    // 1. Straight Line
-    if (startEndDist > totalLength * 0.78) {
+    // 1. Straight Line FIRST (strict open-line check)
+    if (startEndDist >= totalLength * 0.86) {
       double maxDev = 0.0;
       for (final p in rawPoints) {
         final d = _pointToLineDistance(p, start, end);
         if (d > maxDev) maxDev = d;
       }
-      if (maxDev < math.max(12.0, startEndDist * 0.09)) {
+      if (maxDev <= math.max(12.0, startEndDist * 0.08)) {
         final snappedEnd = _snapLineEndpoint(start, end);
         return ShapeRecognitionResult(
           shapeType: ShapeType.line,
@@ -731,8 +731,8 @@ class StrokeEngine {
       }
     }
 
-    // 2. Closed Shapes
-    final bool isClosed = startEndDist < math.max(42.0, diag * 0.38);
+    // 2. Closed Shapes ONLY if the stroke actually closes
+    final bool isClosed = startEndDist <= math.max(44.0, diag * 0.34);
     if (!isClosed) {
       return ShapeRecognitionResult(
         shapeType: ShapeType.none,
@@ -741,20 +741,20 @@ class StrokeEngine {
     }
 
     final center = Offset(bounds.center.dx, bounds.center.dy);
-    final radii = <double>[];
+    double sumR = 0.0;
     for (final p in rawPoints) {
-      radii.add(math.sqrt(
+      sumR += math.sqrt(
         (p.x - center.dx) * (p.x - center.dx) +
             (p.y - center.dy) * (p.y - center.dy),
-      ));
+      );
     }
-    final meanR = radii.reduce((a, b) => a + b) / radii.length;
-    double variance = 0.0;
-    for (final r in radii) {
-      variance += (r - meanR) * (r - meanR);
+    final meanR = sumR / rawPoints.length;
+    if (meanR < 8.0) {
+      return ShapeRecognitionResult(
+        shapeType: ShapeType.none,
+        snappedPoints: rawPoints,
+      );
     }
-    final stdDev = math.sqrt(variance / radii.length);
-    final radialCv = meanR > 1.0 ? stdDev / meanR : 1.0;
 
     final closedLoop = <StrokePoint>[...rawPoints, rawPoints.first];
     final simplified = _douglasPeucker(
@@ -762,56 +762,63 @@ class StrokeEngine {
       epsilon: math.max(6.0, diag * 0.048),
     );
     final vertices = simplified.length > 1 &&
-            _dist(simplified.first, simplified.last) < diag * 0.12
+            _dist(simplified.first, simplified.last) < diag * 0.14
         ? simplified.sublist(0, simplified.length - 1)
         : simplified;
 
-    // 2a. Triangle
+    // Evaluate normalized RMS fit error for every eligible candidate and pick the BEST (< 0.14)
+    ShapeType bestType = ShapeType.none;
+    double bestError = 0.14;
+    List<StrokePoint>? bestPoints;
+
+    // Candidate A: Triangle (3 vertices, angle-sorted so edges never cross!)
     if (vertices.length == 3) {
-      return ShapeRecognitionResult(
-        shapeType: ShapeType.triangle,
-        snappedPoints: _generatePolygonPoints(vertices),
+      final sortedTri = _sortVerticesByAngle(vertices, center);
+      final triErr = _polygonRmsError(
+        rawPoints,
+        sortedTri.map((v) => Offset(v.x, v.y)).toList(),
+        meanR,
       );
+      if (triErr < bestError) {
+        bestError = triErr;
+        bestType = ShapeType.triangle;
+        bestPoints = _generateCleanPolygon(sortedTri);
+      }
     }
 
-    // 2b. Rectangle
+    // Candidate B: Rectangle (4 vertices with ~90° corners, clean TL->TR->BR->BL->TL)
     if (vertices.length == 4) {
       final snappedRect = _trySnapRectangle(vertices, bounds);
       if (snappedRect != null) {
-        return ShapeRecognitionResult(
-          shapeType: ShapeType.rectangle,
-          snappedPoints: snappedRect,
-        );
+        final rectVerts = [
+          Offset(bounds.left, bounds.top),
+          Offset(bounds.right, bounds.top),
+          Offset(bounds.right, bounds.bottom),
+          Offset(bounds.left, bounds.bottom),
+        ];
+        final rectErr = _polygonRmsError(rawPoints, rectVerts, meanR);
+        if (rectErr < bestError) {
+          bestError = rectErr;
+          bestType = ShapeType.rectangle;
+          bestPoints = snappedRect;
+        }
       }
     }
 
-    // 2c. Regular Hexagon (Benzene ring!)
+    // Candidate C: Regular Hexagon (Benzene ring!)
     if (vertices.length >= 5 && vertices.length <= 7) {
-      // Edge-sampled points on a regular hexagon have mean radius ~0.91 * circumradius.
       final double hexRadius = meanR / 0.91;
-      final double hexFitError =
-          _regularHexagonError(rawPoints, center, hexRadius);
-      final double circleFitError = _circleEllipseError(rawPoints, bounds);
-
-      if (vertices.length == 6 &&
-          hexFitError <= circleFitError * 1.18 &&
-          hexFitError < 0.22) {
-        return ShapeRecognitionResult(
-          shapeType: ShapeType.hexagon,
-          snappedPoints: _generateRegularHexagon(rawPoints, center, hexRadius),
-        );
-      }
-      if (hexFitError < 0.14 && hexFitError < circleFitError * 0.92) {
-        return ShapeRecognitionResult(
-          shapeType: ShapeType.hexagon,
-          snappedPoints: _generateRegularHexagon(rawPoints, center, hexRadius),
-        );
+      final double hexErr = _regularHexagonError(rawPoints, center, hexRadius);
+      if (hexErr < bestError) {
+        bestError = hexErr;
+        bestType = ShapeType.hexagon;
+        bestPoints = _generateRegularHexagon(rawPoints, center, hexRadius);
       }
     }
 
-    // 2d. Circle / Ellipse
-    final double ellipseErr = _circleEllipseError(rawPoints, bounds);
-    if (radialCv < 0.22 || ellipseErr < 0.18) {
+    // Candidate D: Circle / Ellipse
+    final double ellipseErr = _circleEllipseRmsError(rawPoints, bounds);
+    if (ellipseErr < bestError) {
       final double aspect =
           bounds.height > 1 ? bounds.width / bounds.height : 1.0;
       final bool isCircle = aspect > 0.80 && aspect < 1.25;
@@ -819,9 +826,15 @@ class StrokeEngine {
           ? (bounds.width + bounds.height) * 0.25
           : bounds.width * 0.5;
       final double ry = isCircle ? rx : bounds.height * 0.5;
+      bestError = ellipseErr;
+      bestType = ShapeType.circle;
+      bestPoints = _generateEllipsePoints(center, rx, ry);
+    }
+
+    if (bestType != ShapeType.none && bestPoints != null) {
       return ShapeRecognitionResult(
-        shapeType: ShapeType.circle,
-        snappedPoints: _generateEllipsePoints(center, rx, ry),
+        shapeType: bestType,
+        snappedPoints: bestPoints,
       );
     }
 
@@ -829,6 +842,75 @@ class StrokeEngine {
       shapeType: ShapeType.none,
       snappedPoints: rawPoints,
     );
+  }
+
+  static List<StrokePoint> _sortVerticesByAngle(
+    List<StrokePoint> verts,
+    Offset center,
+  ) {
+    final copy = List<StrokePoint>.from(verts);
+    copy.sort((a, b) {
+      final angA = math.atan2(a.y - center.dy, a.x - center.dx);
+      final angB = math.atan2(b.y - center.dy, b.x - center.dx);
+      return angA.compareTo(angB);
+    });
+    return copy;
+  }
+
+  static double _polygonRmsError(
+    List<StrokePoint> rawPoints,
+    List<Offset> polyVerts,
+    double normScale,
+  ) {
+    if (polyVerts.length < 3 || normScale < 1.0) return 1.0;
+    double sumSq = 0.0;
+    for (final p in rawPoints) {
+      final pt = Offset(p.x, p.y);
+      double minD = double.infinity;
+      for (int i = 0; i < polyVerts.length; i++) {
+        final d = _pointToSegmentDistance(
+          pt,
+          polyVerts[i],
+          polyVerts[(i + 1) % polyVerts.length],
+        );
+        if (d < minD) minD = d;
+      }
+      final norm = minD / normScale;
+      sumSq += norm * norm;
+    }
+    return math.sqrt(sumSq / rawPoints.length);
+  }
+
+  static double _circleEllipseRmsError(List<StrokePoint> points, Rect bounds) {
+    final rx = math.max(1.0, bounds.width * 0.5);
+    final ry = math.max(1.0, bounds.height * 0.5);
+    final cx = bounds.center.dx;
+    final cy = bounds.center.dy;
+
+    double sumSq = 0.0;
+    for (final p in points) {
+      final nx = (p.x - cx) / rx;
+      final ny = (p.y - cy) / ry;
+      final err = math.sqrt(nx * nx + ny * ny) - 1.0;
+      sumSq += err * err;
+    }
+    return math.sqrt(sumSq / points.length);
+  }
+
+  /// Emits clean, non-crossing polygon vertices closed cleanly to [vertices.first].
+  static List<StrokePoint> _generateCleanPolygon(List<StrokePoint> vertices) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return [
+      for (final v in vertices)
+        StrokePoint(x: v.x, y: v.y, pressure: 0.6, tilt: 0.0, timestamp: now),
+      StrokePoint(
+        x: vertices.first.x,
+        y: vertices.first.y,
+        pressure: 0.6,
+        tilt: 0.0,
+        timestamp: now,
+      ),
+    ];
   }
 
   static StrokePoint _snapLineEndpoint(StrokePoint start, StrokePoint end) {
@@ -960,7 +1042,7 @@ class StrokeEngine {
       StrokePoint(x: bounds.right, y: bounds.bottom, pressure: 0.6, tilt: 0, timestamp: now),
       StrokePoint(x: bounds.left, y: bounds.bottom, pressure: 0.6, tilt: 0, timestamp: now),
     ];
-    return _generatePolygonPoints(rectVerts);
+    return _generateCleanPolygon(rectVerts);
   }
 
   static double _regularHexagonError(
@@ -1040,7 +1122,7 @@ class StrokeEngine {
         timestamp: now,
       );
     });
-    return _generatePolygonPoints(vertices);
+    return _generateCleanPolygon(vertices);
   }
 
   static double _circleEllipseError(List<StrokePoint> points, Rect bounds) {

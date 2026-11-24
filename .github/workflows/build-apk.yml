@@ -160,16 +160,19 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.2.1 with APK
+      - name: Publish Release v3.2.2 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.2.1
-          name: ChemNote Pro v3.2.1 (Huawei MatePad 11.5"S & Android)
+          tag_name: v3.2.2
+          name: ChemNote Pro v3.2.2 (Huawei MatePad 11.5"S & Android)
           body: |
-            ### ChemNote Pro v3.2.1 — Chữ ký APK cố định vĩnh viễn & Cài đặt ngay trên Thư viện
-            - **Chữ ký APK cố định (Permanent Release Keystore):** Từ bản `v3.2.1` trở đi, mọi bản cập nhật sau đều cài đè trực tiếp không cần gỡ bản cũ, giữ nguyên 100% ghi chú!
-            - **Mục Cài đặt & Cập nhật ngay trên thanh bên Thư viện:** Kiểm tra cập nhật APK, chọn Thư mục xuất PDF mặc định (`Documents/ChemNote`), và đổi Giao diện Sáng/Tối ngay từ màn hình chính.
-            - Bao gồm toàn bộ 11 tinh chỉnh phần cứng Huawei MatePad 11.5"S + M-Pencil 3 từ `v3.2.0`.
+            ### ChemNote Pro v3.2.2 — Cài đè trực tiếp không mất dữ liệu!
+            - **Sửa triệt để lỗi Google Drive OAuth 401:** Chuyển sang chuẩn RFC 8252 Loopback (`http://127.0.0.1`) hỗ trợ loại **Desktop app** (Client ID + Client Secret), không cần GMS hay SHA-1!
+            - **Xuất PDF nhanh hơn 5× kèm Thanh tiến trình (%):** Lọc bớt điểm thừa 240Hz, bộ nhớ đệm ảnh trùng lặp, và hộp thoại hiển thị tiến độ xuất từng trang.
+            - **Zero-Lag 144Hz Pinch-Zoom & Di chuyển Ảnh/Sticky Note:** Loại bỏ hoàn toàn `setState` khi zoom/kéo/đổi cỡ bằng `ValueNotifier` + `RepaintBoundary`.
+            - **Sửa triệt để thanh công cụ Ảnh (`ImageActionPill`):** Tất cả 6 nút (`Cắt hình chữ nhật`, `Cắt tùy chỉnh`, `Sao chép`, `Cắt`, `Thêm vào hình dán`, `Xóa`) phản hồi nhạy 100%.
+            - **Sửa nhận diện Hình học (Auto Shape):** Nắn chính xác Đường thẳng, Tròn, Chữ nhật, Tam giác, Lục giác đều (Benzen) không còn nét gạch ngang lỗi.
+            - **Viết tay trực tiếp trên Sticky Notes:** Dùng bút M-Pencil 3 viết, tô sáng và tẩy ngay trên tờ giấy nhớ dán pastel (kèm xuất PDF đầy đủ nét viết tay)!
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

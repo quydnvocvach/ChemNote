@@ -1,10 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
 import 'package:http/http.dart' as http;
+import 'package:url_launcher/url_launcher.dart';
 
 import 'google_oauth_config.dart';
 
@@ -111,37 +113,57 @@ class GoogleAuthService {
     }
   }
 
-  /// Đăng nhập Google bằng OAuth 2.0 + PKCE thông qua trình duyệt hệ thống (GMS-free).
+  /// Đăng nhập Google bằng OAuth 2.0 + PKCE với RFC 8252 Loopback IP Redirect
+  /// (`http://127.0.0.1:<port>/oauth2redirect`) qua trình duyệt hệ thống (GMS-free, không lỗi 401).
   Future<AuthUser> signIn() async {
     final clientId = await _config.loadClientId();
     if (clientId.isEmpty) {
       throw const GoogleAuthException(
-        'Chưa cấu hình Google OAuth Client ID. Vui lòng nhập Client ID trong cài đặt hoặc sử dụng Chế độ Demo.',
+        'Chưa cấu hình Google OAuth Client ID. Vui lòng nhập Client ID (và Client Secret cho Desktop app) trong cài đặt hoặc sử dụng Chế độ Demo.',
         needsClientId: true,
       );
     }
+    final clientSecret = await _config.loadClientSecret();
 
     final codeVerifier = generateCodeVerifier();
     final codeChallenge = computeCodeChallenge(codeVerifier);
     final state = generateCodeVerifier(length: 32);
 
+    final HttpServer server;
+    try {
+      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    } catch (e) {
+      throw GoogleAuthException(
+        'Không thể khởi tạo máy chủ loopback cục bộ để nhận mã xác thực: $e',
+      );
+    }
+
+    final loopbackRedirectUri =
+        'http://127.0.0.1:${server.port}/oauth2redirect';
     final authUri = _config.buildAuthorizationUri(
       clientId: clientId,
       codeChallenge: codeChallenge,
       state: state,
+      redirectUriOverride: loopbackRedirectUri,
     );
 
-    final String callbackUrl;
+    Uri returnedUri;
     try {
-      callbackUrl = await FlutterWebAuth2.authenticate(
-        url: authUri.toString(),
-        callbackUrlScheme: GoogleOAuthConfig.redirectScheme,
+      final launched = await launchUrl(
+        authUri,
+        mode: LaunchMode.externalApplication,
       );
-    } catch (e) {
-      throw GoogleAuthException('Đăng nhập bị hủy hoặc không thể mở trình duyệt: $e');
+      if (!launched) {
+        throw const GoogleAuthException(
+          'Không thể mở trình duyệt hệ thống để đăng nhập Google.',
+        );
+      }
+
+      returnedUri = await _awaitLoopbackCallback(server);
+    } finally {
+      await server.close(force: true);
     }
 
-    final returnedUri = Uri.parse(callbackUrl);
     final error = returnedUri.queryParameters['error'];
     if (error != null && error.isNotEmpty) {
       throw GoogleAuthException('Google từ chối cấp quyền: $error');
@@ -160,18 +182,21 @@ class GoogleAuthService {
     }
 
     // Đổi authorization code lấy access_token và refresh_token
+    final tokenBody = <String, String>{
+      'client_id': clientId,
+      'code': authCode,
+      'code_verifier': codeVerifier,
+      'grant_type': 'authorization_code',
+      'redirect_uri': loopbackRedirectUri,
+      if (clientSecret.isNotEmpty) 'client_secret': clientSecret,
+    };
+
     final tokenResponse = await _httpClient.post(
       Uri.parse(GoogleOAuthConfig.tokenEndpoint),
       headers: const <String, String>{
         'Content-Type': 'application/x-www-form-urlencoded',
       },
-      body: <String, String>{
-        'client_id': clientId,
-        'code': authCode,
-        'code_verifier': codeVerifier,
-        'grant_type': 'authorization_code',
-        'redirect_uri': GoogleOAuthConfig.redirectUri,
-      },
+      body: tokenBody,
     );
 
     if (tokenResponse.statusCode < 200 || tokenResponse.statusCode >= 300) {
@@ -201,6 +226,48 @@ class GoogleAuthService {
 
     await _persistSession();
     return user;
+  }
+
+  /// Chờ yêu cầu callback duy nhất từ Google trên máy chủ loopback `127.0.0.1`.
+  Future<Uri> _awaitLoopbackCallback(HttpServer server) async {
+    final completer = Completer<Uri>();
+    final sub = server.listen((HttpRequest request) async {
+      final path = request.uri.path;
+      // Bỏ qua yêu cầu favicon tự động của trình duyệt
+      if (path == '/favicon.ico') {
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+        return;
+      }
+
+      final hasError = request.uri.queryParameters['error'] != null;
+      final html = hasError
+          ? '<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChemNote</title></head><body style="font-family:sans-serif;background:#0F1117;color:#F3F4F6;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;text-align:center"><div><h2>Đăng nhập Google chưa hoàn tất</h2><p>Bạn có thể đóng tab này và thử lại trong ứng dụng ChemNote.</p></div></body></html>'
+          : '<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChemNote</title></head><body style="font-family:sans-serif;background:#0F1117;color:#F3F4F6;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;text-align:center"><div><h2>Đăng nhập Google thành công!</h2><p>Bạn có thể đóng tab này và quay lại ứng dụng ChemNote.</p></div></body></html>';
+
+      request.response
+        ..statusCode = HttpStatus.ok
+        ..headers.contentType = ContentType('text', 'html', charset: 'utf-8')
+        ..write(html);
+      await request.response.close();
+
+      if (!completer.isCompleted) {
+        completer.complete(request.uri);
+      }
+    });
+
+    try {
+      return await completer.future.timeout(
+        const Duration(minutes: 3),
+        onTimeout: () {
+          throw const GoogleAuthException(
+            'Hết thời gian chờ đăng nhập Google (3 phút). Vui lòng thử lại.',
+          );
+        },
+      );
+    } finally {
+      await sub.cancel();
+    }
   }
 
   /// Đăng nhập nhanh ở Chế độ Demo (mô phỏng Google Drive cục bộ khi chưa có Client ID).
@@ -287,6 +354,7 @@ class GoogleAuthService {
     if (clientId.isEmpty) {
       return null;
     }
+    final clientSecret = await _config.loadClientSecret();
 
     try {
       final response = await _httpClient.post(
@@ -298,6 +366,7 @@ class GoogleAuthService {
           'client_id': clientId,
           'refresh_token': refreshToken,
           'grant_type': 'refresh_token',
+          if (clientSecret.isNotEmpty) 'client_secret': clientSecret,
         },
       );
 

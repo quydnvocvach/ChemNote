@@ -33,11 +33,14 @@ class GoogleOAuthConfig {
   static const String userInfoEndpoint =
       'https://www.googleapis.com/oauth2/v3/userinfo';
 
-  /// Key lưu Client ID tùy chỉnh do người dùng cấu hình.
+  /// Key lưu Client ID và Client Secret tùy chỉnh do người dùng cấu hình.
   static const String _clientIdStorageKey = 'chemnote_google_oauth_client_id';
+  static const String _clientSecretStorageKey =
+      'chemnote_google_oauth_client_secret';
 
   /// Giá trị mặc định (trống -> ứng dụng sẽ gợi ý nhập Client ID hoặc dùng Chế độ Demo).
   static const String defaultClientId = '';
+  static const String defaultClientSecret = '';
 
   final FlutterSecureStorage _storage;
 
@@ -71,6 +74,36 @@ class GoogleOAuthConfig {
     } catch (_) {}
   }
 
+  /// Đọc OAuth Client Secret (dùng cho loại Google Cloud Console `Desktop app`).
+  Future<String> loadClientSecret() async {
+    try {
+      final stored = await _storage.read(key: _clientSecretStorageKey);
+      if (stored != null && stored.trim().isNotEmpty) {
+        return stored.trim();
+      }
+    } catch (_) {
+      // Bỏ qua lỗi đọc storage trên môi trường test không có plugin platform.
+    }
+    return defaultClientSecret;
+  }
+
+  /// Lưu OAuth Client Secret (dạng `GOCSPX-...`).
+  Future<void> saveClientSecret(String clientSecret) async {
+    final trimmed = clientSecret.trim();
+    if (trimmed.isEmpty) {
+      await clearClientSecret();
+      return;
+    }
+    await _storage.write(key: _clientSecretStorageKey, value: trimmed);
+  }
+
+  /// Xóa OAuth Client Secret đã lưu.
+  Future<void> clearClientSecret() async {
+    try {
+      await _storage.delete(key: _clientSecretStorageKey);
+    } catch (_) {}
+  }
+
   /// Kiểm tra xem người dùng đã cấu hình Google OAuth Client ID hợp lệ hay chưa.
   Future<bool> hasConfiguredClientId() async {
     final id = await loadClientId();
@@ -78,15 +111,17 @@ class GoogleOAuthConfig {
   }
 
   /// Tạo URL ủy quyền OAuth 2.0 với PKCE (S256) và access_type=offline để lấy refresh_token.
+  /// Hỗ trợ `redirectUriOverride` cho RFC 8252 Loopback IP Redirect (`http://127.0.0.1:<port>/oauth2redirect`).
   Uri buildAuthorizationUri({
     required String clientId,
     required String codeChallenge,
     required String state,
+    String? redirectUriOverride,
   }) {
     return Uri.parse(authorizationEndpoint).replace(
       queryParameters: <String, String>{
         'client_id': clientId,
-        'redirect_uri': redirectUri,
+        'redirect_uri': redirectUriOverride ?? redirectUri,
         'response_type': 'code',
         'scope': scopes.join(' '),
         'code_challenge': codeChallenge,

@@ -245,7 +245,7 @@ class AudioRecording {
   }
 }
 
-/// Giấy nhớ dán (Sticky Note) kiểu GoodNotes 6 có thể kéo thả, đổi màu pastel và thu gọn.
+/// Giấy nhớ dán (Sticky Note) kiểu GoodNotes 6 có thể viết tay trực tiếp, kéo thả, đổi màu pastel và thu gọn.
 class StickyNoteElement {
   final String id;
   final double x;
@@ -255,6 +255,7 @@ class StickyNoteElement {
   final String text;
   final int colorValue;
   final bool isCollapsed;
+  final List<Stroke> strokes;
   final DateTime updatedAt;
 
   StickyNoteElement({
@@ -266,6 +267,7 @@ class StickyNoteElement {
     this.text = '',
     this.colorValue = 0xFFFEF08A,
     this.isCollapsed = false,
+    this.strokes = const [],
     DateTime? updatedAt,
   }) : updatedAt = updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -278,6 +280,7 @@ class StickyNoteElement {
     String? text,
     int? colorValue,
     bool? isCollapsed,
+    List<Stroke>? strokes,
     DateTime? updatedAt,
   }) {
     return StickyNoteElement(
@@ -289,6 +292,7 @@ class StickyNoteElement {
       text: text ?? this.text,
       colorValue: colorValue ?? this.colorValue,
       isCollapsed: isCollapsed ?? this.isCollapsed,
+      strokes: strokes ?? this.strokes,
       updatedAt: updatedAt ?? this.updatedAt,
     );
   }
@@ -303,11 +307,13 @@ class StickyNoteElement {
       'text': text,
       'colorValue': colorValue,
       'isCollapsed': isCollapsed,
+      'strokes': strokes.map((s) => s.toJson()).toList(),
       'updatedAt': updatedAt.toIso8601String(),
     };
   }
 
   factory StickyNoteElement.fromJson(Map<String, dynamic> json) {
+    final rawStrokes = json['strokes'] as List<dynamic>? ?? const [];
     return StickyNoteElement(
       id: json['id'] as String,
       x: (json['x'] as num).toDouble(),
@@ -317,6 +323,9 @@ class StickyNoteElement {
       text: json['text'] as String? ?? '',
       colorValue: (json['colorValue'] as num?)?.toInt() ?? 0xFFFEF08A,
       isCollapsed: json['isCollapsed'] as bool? ?? false,
+      strokes: rawStrokes
+          .map((e) => Stroke.fromJson(e as Map<String, dynamic>))
+          .toList(),
       updatedAt: json['updatedAt'] != null
           ? DateTime.tryParse(json['updatedAt'] as String) ?? DateTime.now()
           : DateTime.now(),

@@ -291,9 +291,16 @@ class CanvasPainter extends CustomPainter {
             (baseAlpha * opacityMultiplier).round().clamp(16, 255),
           );
 
-    // Recognized geometric shapes render with crisp uniform stroke width
+    // Recognized geometric shapes render as a single clean exact Path (NO stray strikethrough lines!)
     if (stroke.shapeType != ShapeType.none) {
-      final path = StrokeEngine.buildCenterlinePath(stroke.points);
+      final pts = stroke.points;
+      final path = Path()..moveTo(pts.first.x, pts.first.y);
+      for (int i = 1; i < pts.length; i++) {
+        path.lineTo(pts[i].x, pts[i].y);
+      }
+      if (stroke.shapeType != ShapeType.line) {
+        path.close();
+      }
       if (isAudioHighlighted) {
         canvas.drawPath(
           path,
