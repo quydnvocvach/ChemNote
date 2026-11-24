@@ -138,7 +138,8 @@ class _ImageCropDialogState extends State<ImageCropDialog> {
     final b = _bottom * imgBox.height;
     final cx = (l + r) * 0.5;
     final cy = (t + b) * 0.5;
-    const hitR = 20.0;
+    const hitR = 34.0;
+    const edgeBand = 24.0;
 
     bool near(double x, double y) => (local - Offset(x, y)).distance <= hitR;
 
@@ -150,29 +151,53 @@ class _ImageCropDialogState extends State<ImageCropDialog> {
     if (near(cx, b)) return _CropDragHandle.bottomCenter;
     if (near(l, cy)) return _CropDragHandle.middleLeft;
     if (near(r, cy)) return _CropDragHandle.middleRight;
+
+    if ((local.dy - t).abs() <= edgeBand &&
+        local.dx >= l - hitR &&
+        local.dx <= r + hitR) {
+      return _CropDragHandle.topCenter;
+    }
+    if ((local.dy - b).abs() <= edgeBand &&
+        local.dx >= l - hitR &&
+        local.dx <= r + hitR) {
+      return _CropDragHandle.bottomCenter;
+    }
+    if ((local.dx - l).abs() <= edgeBand &&
+        local.dy >= t - hitR &&
+        local.dy <= b + hitR) {
+      return _CropDragHandle.middleLeft;
+    }
+    if ((local.dx - r).abs() <= edgeBand &&
+        local.dy >= t - hitR &&
+        local.dy <= b + hitR) {
+      return _CropDragHandle.middleRight;
+    }
     if (Rect.fromLTRB(l, t, r, b).contains(local)) {
       return _CropDragHandle.move;
     }
     return _CropDragHandle.none;
   }
 
-  void _handlePanStart(DragStartDetails d, Size imgBox) {
+  void _handlePanStart(DragStartDetails d, Size imgBox, [double hitPad = 0.0]) {
+    final local = d.localPosition - Offset(hitPad, hitPad);
     final norm = Offset(
-      (d.localPosition.dx / imgBox.width).clamp(0.0, 1.0),
-      (d.localPosition.dy / imgBox.height).clamp(0.0, 1.0),
+      (local.dx / imgBox.width).clamp(0.0, 1.0),
+      (local.dy / imgBox.height).clamp(0.0, 1.0),
     );
     if (_mode == ImageCropMode.freehand) {
       setState(() => _freehandNorm = [norm]);
     } else {
-      _activeHandle = _hitTestHandle(d.localPosition, imgBox);
+      _activeHandle = _hitTestHandle(local, imgBox);
       _lastDragNorm = norm;
     }
   }
 
-  void _handlePanUpdate(DragUpdateDetails d, Size imgBox) {
+  void _handlePanUpdate(
+      DragUpdateDetails d, Size imgBox, [double hitPad = 0.0]) {
+    final local = d.localPosition - Offset(hitPad, hitPad);
     final norm = Offset(
-      (d.localPosition.dx / imgBox.width).clamp(0.0, 1.0),
-      (d.localPosition.dy / imgBox.height).clamp(0.0, 1.0),
+      (local.dx / imgBox.width).clamp(0.0, 1.0),
+      (local.dy / imgBox.height).clamp(0.0, 1.0),
     );
     if (_mode == ImageCropMode.freehand) {
       if (_freehandNorm.isEmpty ||
@@ -367,8 +392,11 @@ class _ImageCropDialogState extends State<ImageCropDialog> {
                 ),
                 child: LayoutBuilder(
                   builder: (ctx, constraints) {
-                    final maxW = constraints.maxWidth - 24;
-                    final maxH = constraints.maxHeight - 24;
+                    const double hitPad = 28.0;
+                    final maxW =
+                        math.max(40.0, constraints.maxWidth - hitPad * 2);
+                    final maxH =
+                        math.max(40.0, constraints.maxHeight - hitPad * 2);
                     double boxW = maxW;
                     double boxH = boxW / imgAspect;
                     if (boxH > maxH) {
@@ -386,21 +414,26 @@ class _ImageCropDialogState extends State<ImageCropDialog> {
                             minHeight: constraints.maxHeight,
                           ),
                           alignment: Alignment.center,
-                          padding: const EdgeInsets.all(12),
                           child: GestureDetector(
-                            onPanStart: (d) => _handlePanStart(d, imgBox),
-                            onPanUpdate: (d) => _handlePanUpdate(d, imgBox),
+                            behavior: HitTestBehavior.opaque,
+                            onPanStart: (d) =>
+                                _handlePanStart(d, imgBox, hitPad),
+                            onPanUpdate: (d) =>
+                                _handlePanUpdate(d, imgBox, hitPad),
                             onPanEnd: _handlePanEnd,
-                            child: CustomPaint(
-                              size: imgBox,
-                              painter: _CropCanvasPainter(
-                                image: widget.image,
-                                mode: _mode,
-                                left: _left,
-                                top: _top,
-                                right: _right,
-                                bottom: _bottom,
-                                freehandNorm: _freehandNorm,
+                            child: Padding(
+                              padding: const EdgeInsets.all(hitPad),
+                              child: CustomPaint(
+                                size: imgBox,
+                                painter: _CropCanvasPainter(
+                                  image: widget.image,
+                                  mode: _mode,
+                                  left: _left,
+                                  top: _top,
+                                  right: _right,
+                                  bottom: _bottom,
+                                  freehandNorm: _freehandNorm,
+                                ),
                               ),
                             ),
                           ),

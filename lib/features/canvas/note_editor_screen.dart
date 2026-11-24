@@ -124,6 +124,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   bool _stylusPanMode = false;
   bool _isOverlayDragging = false;
   final Set<int> _activeTouchPointers = {};
+  final Set<int> _overlayTouchPointers = {};
 
   // Smoothing & M-Pencil 3 curve
   bool _autoNeatenEnabled = true;
@@ -2368,7 +2369,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       if (i < notebook.pages.length - 1) totalContentHeight += 14.0;
     }
     final m = _transformController.value;
-    final scale = m.getMaxScaleOnAxis().clamp(0.5, 4.0);
+    final scale = m.getMaxScaleOnAxis().clamp(0.35, 4.0);
     final ty = m.getTranslation().y;
 
     // Keep current page index in sync for the page counter pill without setState()
@@ -3348,6 +3349,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                 (!_isDrawingPointerDown &&
                                     _activeTool == EditorTool.panZoom))));
 
+                final double scrollMult =
+                    appState.scrollSpeedMultiplier.clamp(1.0, 25.0);
+                final bool useFastVerticalPan = scrollMult > 1.01 &&
+                    !currentPage.isInfiniteWhiteboard &&
+                    !notebook.isWhiteboard &&
+                    appState.verticalContinuousScroll;
+
                 return Listener(
                   behavior: HitTestBehavior.translucent,
                   onPointerHover: (e) {
@@ -3405,18 +3413,88 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     }
                   },
                   onPointerMove: (e) {
-                    if (e.kind != PointerDeviceKind.touch) return;
-                    if (_tapMovedTooFar) return;
-                    final start = _tapTouchStarts[e.pointer];
-                    if (start != null && (e.position - start).distance > 18.0) {
-                      _tapMovedTooFar = true;
+                    if (e.kind == PointerDeviceKind.touch &&
+                        !_tapMovedTooFar) {
+                      final start = _tapTouchStarts[e.pointer];
+                      if (start != null && (e.position - start).distance > 18.0) {
+                        _tapMovedTooFar = true;
+                      }
+                    }
+
+                    final bool isTouchPan = e.kind == PointerDeviceKind.touch &&
+                        _activeTouchPointers.length == 1 &&
+                        _activeTouchPointers.contains(e.pointer);
+                    final bool isStylusPan = _stylusPanMode &&
+                        _isStylusDown &&
+                        e.down &&
+                        (e.kind == PointerDeviceKind.stylus ||
+                            e.kind == PointerDeviceKind.invertedStylus);
+                    if (useFastVerticalPan &&
+                        allowZoomPan &&
+                        !_isOverlayDragging &&
+                        _overlayTouchPointers.isEmpty &&
+                        !stylusBlocksViewport &&
+                        !_isDrawingPointerDown &&
+                        _croppingImageId == null &&
+                        (isTouchPan || isStylusPan)) {
+                      final m = _transformController.value;
+                      final double scale =
+                          m.getMaxScaleOnAxis().clamp(0.35, 4.0);
+                      final double curTx = m.getTranslation().x;
+                      final double curTy = m.getTranslation().y;
+                      final double contentH =
+                          _totalVerticalContentHeight(notebook);
+                      final double scaledH = contentH * scale;
+                      double maxPageW = 0.0;
+                      for (final p in notebook.pages) {
+                        final pw = PaperMetrics.pageSize(
+                          isLandscape: p.isLandscape,
+                        ).width;
+                        if (pw > maxPageW) maxPageW = pw;
+                      }
+                      final double scaledW = (maxPageW + 48.0) * scale;
+
+                      final double dx = (appState.freePaperMovement ||
+                              scaledW > vpSize.width)
+                          ? e.delta.dx
+                          : 0.0;
+                      final double dy = e.delta.dy * scrollMult;
+
+                      final double nextTx = appState.freePaperMovement
+                          ? (curTx + dx)
+                              .clamp(
+                                math.min(0.0, vpSize.width - scaledW) - 800.0,
+                                800.0,
+                              )
+                              .toDouble()
+                          : (scaledW <= vpSize.width
+                              ? (vpSize.width - scaledW) * 0.5
+                              : (curTx + dx)
+                                  .clamp(vpSize.width - scaledW, 0.0)
+                                  .toDouble());
+
+                      final double minTy = appState.freePaperMovement
+                          ? math.min(0.0, vpSize.height - scaledH) - 800.0
+                          : math.min(0.0, vpSize.height - scaledH) - 120.0;
+                      final double maxTy =
+                          appState.freePaperMovement ? 800.0 : 120.0;
+                      final double nextTy =
+                          (curTy + dy).clamp(minTy, maxTy).toDouble();
+
+                      _transformController.value = m.clone()
+                        ..setTranslationRaw(nextTx, nextTy, 0.0);
+                      _updatePullToAddProgress(notebook, vpSize);
                     }
                   },
                   onPointerUp: (e) {
                     if (e.kind == PointerDeviceKind.stylus ||
                         e.kind == PointerDeviceKind.invertedStylus) {
+                      _overlayTouchPointers.remove(e.pointer);
                       _lockedMatrixDuringStylus = null;
                       _lockedWhiteboardMatrixDuringStylus = null;
+                      if (_stylusPanMode && useFastVerticalPan) {
+                        _finishPullToAddIfReady(notebook);
+                      }
                       if (_isStylusDown || _isDrawingPointerDown) {
                         setState(() {
                           _isStylusDown = false;
@@ -3427,7 +3505,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     }
                     if (e.kind != PointerDeviceKind.touch) return;
                     _activeTouchPointers.remove(e.pointer);
+                    _overlayTouchPointers.remove(e.pointer);
                     _pointerDownPositions.remove(e.pointer);
+                    if (useFastVerticalPan && _activeTouchPointers.isEmpty) {
+                      _finishPullToAddIfReady(notebook);
+                    }
                     if (_activeTouchPointers.isEmpty &&
                         !_isStylusDown &&
                         _isDrawingPointerDown) {
@@ -3458,6 +3540,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                   onPointerCancel: (e) {
                     if (e.kind == PointerDeviceKind.stylus ||
                         e.kind == PointerDeviceKind.invertedStylus) {
+                      _overlayTouchPointers.remove(e.pointer);
                       _lockedMatrixDuringStylus = null;
                       _lockedWhiteboardMatrixDuringStylus = null;
                       if (_isStylusDown || _isDrawingPointerDown) {
@@ -3470,7 +3553,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     }
                     if (e.kind != PointerDeviceKind.touch) return;
                     _activeTouchPointers.remove(e.pointer);
+                    _overlayTouchPointers.remove(e.pointer);
                     _pointerDownPositions.remove(e.pointer);
+                    if (useFastVerticalPan && _activeTouchPointers.isEmpty) {
+                      _pullAddProgressNotifier.value = 0.0;
+                    }
                     if (_activeTouchPointers.isEmpty &&
                         !_isStylusDown &&
                         _isDrawingPointerDown) {
@@ -3500,84 +3587,27 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         constrained: false,
                         minScale: 0.35,
                         maxScale: 4.0,
-                        boundaryMargin: const EdgeInsets.all(800),
-                        panEnabled: allowZoomPan,
+                        panAxis: appState.freePaperMovement
+                            ? PanAxis.free
+                            : PanAxis.aligned,
+                        boundaryMargin: appState.freePaperMovement
+                            ? const EdgeInsets.all(800)
+                            : const EdgeInsets.symmetric(
+                                horizontal: 360,
+                                vertical: 120,
+                              ),
+                        panEnabled: allowZoomPan &&
+                            (!useFastVerticalPan ||
+                                _activeTouchPointers.length >= 2),
                         scaleEnabled:
                             !_isOverlayDragging && !stylusBlocksViewport,
-                        onInteractionUpdate: (details) {
+                        onInteractionUpdate: (_) {
                           if (!_stylusPanMode &&
                               _isStylusDown &&
                               _lockedMatrixDuringStylus != null) {
                             _transformController.value =
                                 _lockedMatrixDuringStylus!.clone();
                             return;
-                          }
-
-                          final m = _transformController.value;
-                          final double scale =
-                              m.getMaxScaleOnAxis().clamp(0.35, 4.0);
-                          final double curTx = m.getTranslation().x;
-                          final double curTy = m.getTranslation().y;
-                          final double contentH =
-                              _totalVerticalContentHeight(notebook);
-                          final double scaledH = contentH * scale;
-                          double maxPageW = 0.0;
-                          for (final p in notebook.pages) {
-                            final pw = PaperMetrics.pageSize(
-                              isLandscape: p.isLandscape,
-                            ).width;
-                            if (pw > maxPageW) maxPageW = pw;
-                          }
-                          final double scaledW = (maxPageW + 48.0) * scale;
-
-                          if (details.pointerCount == 1 &&
-                              (details.scale - 1.0).abs() < 0.001 &&
-                              details.focalPointDelta != Offset.zero) {
-                            // Preserve exact v3.4 1.0x native scroll feel; boost vertical-only from 1x up to 25x
-                            final double mult =
-                                appState.scrollSpeedMultiplier.clamp(1.0, 25.0);
-                            final double extraDy =
-                                (mult > 1.01 && details.focalPointDelta.dy != 0.0)
-                                    ? details.focalPointDelta.dy * (mult - 1.0)
-                                    : 0.0;
-                            final double minTy = appState.freePaperMovement
-                                ? math.min(0.0, vpSize.height - scaledH) - 800.0
-                                : math.min(0.0, vpSize.height - scaledH) -
-                                    120.0;
-                            final double maxTy =
-                                appState.freePaperMovement ? 800.0 : 24.0;
-                            final double nextTy =
-                                (curTy + extraDy).clamp(minTy, maxTy).toDouble();
-
-                            final double nextTx = appState.freePaperMovement
-                                ? curTx
-                                : (scaledW <= vpSize.width
-                                    ? (vpSize.width - scaledW) * 0.5
-                                    : curTx
-                                        .clamp(vpSize.width - scaledW, 0.0)
-                                        .toDouble());
-
-                            if ((nextTx - curTx).abs() > 0.01 ||
-                                (nextTy - curTy).abs() > 0.01) {
-                              _transformController.value = m.clone()
-                                ..setTranslationRaw(nextTx, nextTy, 0.0);
-                            }
-                          } else if (details.pointerCount >= 2 &&
-                              !appState.freePaperMovement) {
-                            final double nextTx = scaledW <= vpSize.width
-                                ? (vpSize.width - scaledW) * 0.5
-                                : curTx
-                                    .clamp(vpSize.width - scaledW, 0.0)
-                                    .toDouble();
-                            final double minTy =
-                                math.min(0.0, vpSize.height - scaledH) - 120.0;
-                            final double nextTy =
-                                curTy.clamp(minTy, 24.0).toDouble();
-                            if ((nextTx - curTx).abs() > 0.5 ||
-                                (nextTy - curTy).abs() > 0.5) {
-                              _transformController.value = m.clone()
-                                ..setTranslationRaw(nextTx, nextTy, 0.0);
-                            }
                           }
                           _updatePullToAddProgress(notebook, vpSize);
                         },
@@ -4949,15 +4979,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   Widget _buildCropBracketHandle() {
     return SizedBox(
-      width: 40,
-      height: 40,
+      width: 56,
+      height: 56,
       child: Center(
         child: Container(
-          width: 14,
-          height: 14,
+          width: 16,
+          height: 16,
           decoration: BoxDecoration(
             color: EditorColors.activeBlue,
-            borderRadius: BorderRadius.circular(3),
+            borderRadius: BorderRadius.circular(3.5),
             border: Border.all(color: Colors.white, width: 2),
             boxShadow: const [
               BoxShadow(color: Colors.black38, blurRadius: 3),
@@ -4986,6 +5016,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       final fullY = img.y - img.cropTop * fullH;
       final minNormX = (8.0 / fullW).clamp(0.01, 0.45);
       final minNormY = (8.0 / fullH).clamp(0.01, 0.45);
+      const double cropPad = 32.0;
 
       void updateCrop(
         ({String id, double left, double top, double right, double bottom})
@@ -5026,20 +5057,25 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             cr * fullW,
             cb * fullH,
           );
+          final uiRect = cropRect.shift(const Offset(cropPad, cropPad));
 
           return Positioned(
-            left: fullX,
-            top: fullY,
+            left: fullX - cropPad,
+            top: fullY - cropPad,
             child: Transform.rotate(
               angle: img.rotation,
               child: SizedBox(
-                width: fullW,
-                height: fullH,
+                width: fullW + cropPad * 2,
+                height: fullH + cropPad * 2,
                 child: Stack(
                   clipBehavior: Clip.none,
                   children: [
                     // Full uncropped image with dimmed veil outside live cropRect
-                    Positioned.fill(
+                    Positioned(
+                      left: cropPad,
+                      top: cropPad,
+                      width: fullW,
+                      height: fullH,
                       child: RepaintBoundary(
                         child: cachedUiImg != null
                             ? CustomPaint(
@@ -5063,7 +5099,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     ),
                     // Crisp blue live crop border
                     Positioned.fromRect(
-                      rect: cropRect,
+                      rect: uiRect,
                       child: IgnorePointer(
                         child: Container(
                           decoration: BoxDecoration(
@@ -5075,11 +5111,108 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         ),
                       ),
                     ),
-                    // 8 In-Place Crop Handles (40x40 px stylus-friendly opaque hitboxes!)
+                    // 4 Edge-Drag Strips along crop border (placed BELOW 56x56 corner/mid handles)
+                    if (uiRect.width > 36) ...[
+                      Positioned(
+                        left: uiRect.left + 14,
+                        top: uiRect.top - 14,
+                        width: uiRect.width - 28,
+                        height: 28,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onPanStart: (_) =>
+                              setState(() => _isOverlayDragging = true),
+                          onPanUpdate: (d) => updateCrop((c) => (
+                                id: c.id,
+                                left: c.left,
+                                top: (c.top + d.delta.dy / fullH)
+                                    .clamp(0.0, c.bottom - minNormY),
+                                right: c.right,
+                                bottom: c.bottom,
+                              )),
+                          onPanEnd: (_) =>
+                              setState(() => _isOverlayDragging = false),
+                          onPanCancel: () =>
+                              setState(() => _isOverlayDragging = false),
+                        ),
+                      ),
+                      Positioned(
+                        left: uiRect.left + 14,
+                        top: uiRect.bottom - 14,
+                        width: uiRect.width - 28,
+                        height: 28,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onPanStart: (_) =>
+                              setState(() => _isOverlayDragging = true),
+                          onPanUpdate: (d) => updateCrop((c) => (
+                                id: c.id,
+                                left: c.left,
+                                top: c.top,
+                                right: c.right,
+                                bottom: (c.bottom + d.delta.dy / fullH)
+                                    .clamp(c.top + minNormY, 1.0),
+                              )),
+                          onPanEnd: (_) =>
+                              setState(() => _isOverlayDragging = false),
+                          onPanCancel: () =>
+                              setState(() => _isOverlayDragging = false),
+                        ),
+                      ),
+                    ],
+                    if (uiRect.height > 36) ...[
+                      Positioned(
+                        left: uiRect.left - 14,
+                        top: uiRect.top + 14,
+                        width: 28,
+                        height: uiRect.height - 28,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onPanStart: (_) =>
+                              setState(() => _isOverlayDragging = true),
+                          onPanUpdate: (d) => updateCrop((c) => (
+                                id: c.id,
+                                left: (c.left + d.delta.dx / fullW)
+                                    .clamp(0.0, c.right - minNormX),
+                                top: c.top,
+                                right: c.right,
+                                bottom: c.bottom,
+                              )),
+                          onPanEnd: (_) =>
+                              setState(() => _isOverlayDragging = false),
+                          onPanCancel: () =>
+                              setState(() => _isOverlayDragging = false),
+                        ),
+                      ),
+                      Positioned(
+                        left: uiRect.right - 14,
+                        top: uiRect.top + 14,
+                        width: 28,
+                        height: uiRect.height - 28,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onPanStart: (_) =>
+                              setState(() => _isOverlayDragging = true),
+                          onPanUpdate: (d) => updateCrop((c) => (
+                                id: c.id,
+                                left: c.left,
+                                top: c.top,
+                                right: (c.right + d.delta.dx / fullW)
+                                    .clamp(c.left + minNormX, 1.0),
+                                bottom: c.bottom,
+                              )),
+                          onPanEnd: (_) =>
+                              setState(() => _isOverlayDragging = false),
+                          onPanCancel: () =>
+                              setState(() => _isOverlayDragging = false),
+                        ),
+                      ),
+                    ],
+                    // 8 In-Place Crop Handles (56x56 px stylus-friendly hitboxes, 100% inside cropPad bounds!)
                     // Top-Left
                     Positioned(
-                      left: cropRect.left - 20,
-                      top: cropRect.top - 20,
+                      left: uiRect.left - 28,
+                      top: uiRect.top - 28,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onPanStart: (_) =>
@@ -5102,8 +5235,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     ),
                     // Top-Center
                     Positioned(
-                      left: (cropRect.left + cropRect.right) * 0.5 - 20,
-                      top: cropRect.top - 20,
+                      left: (uiRect.left + uiRect.right) * 0.5 - 28,
+                      top: uiRect.top - 28,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onPanStart: (_) =>
@@ -5125,8 +5258,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     ),
                     // Top-Right
                     Positioned(
-                      left: cropRect.right - 20,
-                      top: cropRect.top - 20,
+                      left: uiRect.right - 28,
+                      top: uiRect.top - 28,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onPanStart: (_) =>
@@ -5149,8 +5282,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     ),
                     // Middle-Left
                     Positioned(
-                      left: cropRect.left - 20,
-                      top: (cropRect.top + cropRect.bottom) * 0.5 - 20,
+                      left: uiRect.left - 28,
+                      top: (uiRect.top + uiRect.bottom) * 0.5 - 28,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onPanStart: (_) =>
@@ -5172,8 +5305,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     ),
                     // Middle-Right
                     Positioned(
-                      left: cropRect.right - 20,
-                      top: (cropRect.top + cropRect.bottom) * 0.5 - 20,
+                      left: uiRect.right - 28,
+                      top: (uiRect.top + uiRect.bottom) * 0.5 - 28,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onPanStart: (_) =>
@@ -5195,8 +5328,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     ),
                     // Bottom-Left
                     Positioned(
-                      left: cropRect.left - 20,
-                      top: cropRect.bottom - 20,
+                      left: uiRect.left - 28,
+                      top: uiRect.bottom - 28,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onPanStart: (_) =>
@@ -5219,8 +5352,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     ),
                     // Bottom-Center
                     Positioned(
-                      left: (cropRect.left + cropRect.right) * 0.5 - 20,
-                      top: cropRect.bottom - 20,
+                      left: (uiRect.left + uiRect.right) * 0.5 - 28,
+                      top: uiRect.bottom - 28,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onPanStart: (_) =>
@@ -5242,8 +5375,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     ),
                     // Bottom-Right
                     Positioned(
-                      left: cropRect.right - 20,
-                      top: cropRect.bottom - 20,
+                      left: uiRect.right - 28,
+                      top: uiRect.bottom - 28,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onPanStart: (_) =>
@@ -5330,6 +5463,21 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         final double y = draggingThis ? drag.y : img.y;
         final double w = draggingThis ? drag.w : img.width;
         final double h = draggingThis ? drag.h : img.height;
+        final double aspect = img.width / math.max(1.0, img.height);
+        final double minW = aspect >= 1.0 ? 32.0 * aspect : 32.0;
+
+        ({double w, double h}) scaleKeepingAspect(
+          double curW,
+          double curH,
+          double signedDx,
+          double signedDy,
+        ) {
+          final double rawW = signedDx.abs() >= signedDy.abs() * aspect
+              ? curW + signedDx
+              : (curH + signedDy) * aspect;
+          final double nw = math.max(minW, rawW);
+          return (w: nw, h: nw / aspect);
+        }
 
         // Expand Positioned bounds by 24px on all 4 sides when selected so all 8
         // 48x48 px stylus-friendly circular handles sit 100% INSIDE hit-test bounds!
@@ -5341,8 +5489,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           height: h + pad * 2,
           child: IgnorePointer(
             ignoring: !interactive,
-            child: Transform.rotate(
-              angle: img.rotation,
+            child: Listener(
+              onPointerDown: isSelected
+                  ? (e) => _overlayTouchPointers.add(e.pointer)
+                  : null,
+              onPointerUp: isSelected
+                  ? (e) => _overlayTouchPointers.remove(e.pointer)
+                  : null,
+              onPointerCancel: isSelected
+                  ? (e) => _overlayTouchPointers.remove(e.pointer)
+                  : null,
+              child: Transform.rotate(
+                angle: img.rotation,
               child: Stack(
                 clipBehavior: Clip.none,
                 children: [
@@ -5470,7 +5628,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       ),
                     ),
                     // 8 Resize Handles — 100% INSIDE the 24px-padded bounds, ABOVE body drag!
-                    // Top-Left
+                    // Top-Left (aspect-locked uniform corner scaling)
                     Positioned(
                       left: 0,
                       top: 0,
@@ -5478,14 +5636,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         behavior: HitTestBehavior.opaque,
                         onPanStart: (_) => beginDrag(),
                         onPanUpdate: (d) => updateDrag((c) {
-                          final nw = math.max(32.0, c.w - d.delta.dx);
-                          final nh = math.max(32.0, c.h - d.delta.dy);
+                          final s = scaleKeepingAspect(
+                            c.w,
+                            c.h,
+                            -d.delta.dx,
+                            -d.delta.dy,
+                          );
                           return (
                             id: c.id,
-                            x: c.x + (c.w - nw),
-                            y: c.y + (c.h - nh),
-                            w: nw,
-                            h: nh,
+                            x: c.x + (c.w - s.w),
+                            y: c.y + (c.h - s.h),
+                            w: s.w,
+                            h: s.h,
                           );
                         }),
                         onPanEnd: (_) => endDrag(),
@@ -5515,7 +5677,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         child: _buildResizeHandle(),
                       ),
                     ),
-                    // Top-Right
+                    // Top-Right (aspect-locked uniform corner scaling)
                     Positioned(
                       right: 0,
                       top: 0,
@@ -5523,13 +5685,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         behavior: HitTestBehavior.opaque,
                         onPanStart: (_) => beginDrag(),
                         onPanUpdate: (d) => updateDrag((c) {
-                          final nh = math.max(32.0, c.h - d.delta.dy);
+                          final s = scaleKeepingAspect(
+                            c.w,
+                            c.h,
+                            d.delta.dx,
+                            -d.delta.dy,
+                          );
                           return (
                             id: c.id,
                             x: c.x,
-                            y: c.y + (c.h - nh),
-                            w: math.max(32.0, c.w + d.delta.dx),
-                            h: nh,
+                            y: c.y + (c.h - s.h),
+                            w: s.w,
+                            h: s.h,
                           );
                         }),
                         onPanEnd: (_) => endDrag(),
@@ -5578,7 +5745,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         child: _buildResizeHandle(),
                       ),
                     ),
-                    // Bottom-Left
+                    // Bottom-Left (aspect-locked uniform corner scaling)
                     Positioned(
                       left: 0,
                       bottom: 0,
@@ -5586,13 +5753,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         behavior: HitTestBehavior.opaque,
                         onPanStart: (_) => beginDrag(),
                         onPanUpdate: (d) => updateDrag((c) {
-                          final nw = math.max(32.0, c.w - d.delta.dx);
+                          final s = scaleKeepingAspect(
+                            c.w,
+                            c.h,
+                            -d.delta.dx,
+                            d.delta.dy,
+                          );
                           return (
                             id: c.id,
-                            x: c.x + (c.w - nw),
+                            x: c.x + (c.w - s.w),
                             y: c.y,
-                            w: nw,
-                            h: math.max(32.0, c.h + d.delta.dy),
+                            w: s.w,
+                            h: s.h,
                           );
                         }),
                         onPanEnd: (_) => endDrag(),
@@ -5619,20 +5791,28 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         child: _buildResizeHandle(),
                       ),
                     ),
-                    // Bottom-Right
+                    // Bottom-Right (aspect-locked uniform corner scaling)
                     Positioned(
                       right: 0,
                       bottom: 0,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onPanStart: (_) => beginDrag(),
-                        onPanUpdate: (d) => updateDrag((c) => (
-                              id: c.id,
-                              x: c.x,
-                              y: c.y,
-                              w: math.max(32.0, c.w + d.delta.dx),
-                              h: math.max(32.0, c.h + d.delta.dy),
-                            )),
+                        onPanUpdate: (d) => updateDrag((c) {
+                          final s = scaleKeepingAspect(
+                            c.w,
+                            c.h,
+                            d.delta.dx,
+                            d.delta.dy,
+                          );
+                          return (
+                            id: c.id,
+                            x: c.x,
+                            y: c.y,
+                            w: s.w,
+                            h: s.h,
+                          );
+                        }),
                         onPanEnd: (_) => endDrag(),
                         onPanCancel: endDrag,
                         child: _buildResizeHandle(),
@@ -5640,6 +5820,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     ),
                   ],
                 ],
+              ),
               ),
             ),
           ),

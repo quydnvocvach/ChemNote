@@ -160,15 +160,16 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.6.5 with APK
+      - name: Publish Release v3.6.6 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.6.5
-          name: ChemNote Pro v3.6.5 (Khôi phục cảm giác lướt chuẩn 1× bản 3.4 & thanh tốc độ lướt dọc 1×–25×)
+          tag_name: v3.6.6
+          name: ChemNote Pro v3.6.6 (Lướt trang mượt không giật, Nút cắt viền ảnh nhạy & Giữ tỉ lệ ảnh khi kéo góc)
           body: |
-            ### ChemNote Pro v3.6.5 — Cảm giác lướt gốc chuẩn v3.4 kết hợp tùy chỉnh lướt dọc tới 25×!
-            - **Khôi phục tốc độ & cảm giác lướt chuẩn bản 3.4 (`1.0×` gốc):** Loại bỏ hệ số nhân nền `3×` để giữ đúng độ mượt, quán tính và tốc độ tự nhiên của `InteractiveViewer` khi cuộn dọc, cuộn ngang hay lướt chéo ở mức `1.0×`.
-            - **Thanh chỉnh tốc độ lướt dọc mở rộng `1.0×` → `25.0×`:** Chỉ tăng tốc độ theo chiều dọc khi kéo trên `1.0×`, giữ nguyên tốc độ lướt ngang `1×` và bảo toàn đầy đủ khả năng khóa bút M-Pencil 3 + zoom 2 ngón khi tắt Chuyển động giấy tự do.
+            ### ChemNote Pro v3.6.6 — Khắc phục triệt để độ mượt cuộn trang & thao tác chỉnh ảnh!
+            - **Lướt trang mượt mà không giật:** Loại bỏ xung đột ghi đè `_transformController` bên trong `InteractiveViewer.onInteractionUpdate`; chế độ `1.0×` giữ nguyên cảm giác cuộn gốc chuẩn, chế độ tăng tốc dọc (`>1.0×` đến `25×`) xử lý trực tiếp ở tầng `Listener` 144Hz không xung đột với `InteractiveViewer`.
+            - **Nút kéo viền khi cắt hình siêu nhạy:** Mở rộng vùng chạm của 8 nút viền cắt lên `56×56 px`, thêm phần đệm viền ngoài `32 px` để không bị cắt hit-test ở mép ảnh và bổ sung kéo trực tiếp trên 4 cạnh viền khung cắt (cả cắt trực tiếp trên trang & hộp thoại cắt).
+            - **Giữ nguyên tỉ lệ ảnh khi phóng to/thu nhỏ từ 4 góc:** Kéo 4 nút góc của ảnh tự động khóa đúng tỉ lệ gốc (`width : height`), trong khi 4 nút cạnh giữa vẫn hỗ trợ kéo giãn 1 chiều khi cần.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true
