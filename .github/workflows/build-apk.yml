@@ -160,16 +160,16 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.6.0 with APK
+      - name: Publish Release v3.6.1 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.6.0
-          name: ChemNote Pro v3.6.0 (Chuẩn mực 144Hz MatePad 11.5"S — M-Pencil 3 & Đồng bộ Assets)
+          tag_name: v3.6.1
+          name: ChemNote Pro v3.6.1 (Sửa lỗi đen PDF, văng app & mất nét bút M-Pencil 3 trên MatePad 11.5"S)
           body: |
-            ### ChemNote Pro v3.6.0 — Bản nâng cấp toàn diện hiệu năng 144Hz & độ ổn định cho Huawei MatePad 11.5"S!
-            - **Sửa triệt để lỗi đơ/mất bút cảm ứng sau khi cuộn ngón tay & Chống tỳ tay chuẩn mực:** Gắn `ActiveStrokePainter` trên mọi trang hiển thị, tự làm sạch bộ đếm chạm ngón tay, hạ độ trễ hover xuống `280ms`, chống chạm lòng bàn tay ngay trong `ScaleGestureRecognizer`, và chống kích đúp phím thân bút M-Pencil 3 (`450ms`).
-            - **Khung trang & Zoom/Fling siêu mượt 144Hz:** Sửa lệch trang khi thu nhỏ, nối hoàn chỉnh tùy chọn "Chuyển động giấy tự do", khóa tâm zoom 2 ngón + quán tính `FrictionSimulation`, và cô lập vẽ lại từng trang (`_pageRepaintNotifiers`) + LRU cache ảnh/PDF (`targetWidth: 1600`).
-            - **An toàn dữ liệu & Đồng bộ đa thiết bị:** Tự động lưu ngay khi ẩn app (`WidgetsBindingObserver`), dọn tệp mồ côi khi xóa vĩnh viễn sổ, hỗ trợ Lasso cho Giấy nhớ & Tệp đính kèm, tự dừng ghi âm an toàn khi đổi tab, tùy chọn tắt/bật tự xuất PDF khi đồng bộ (tự bỏ qua sổ >30 trang), và đồng bộ tăng dần thư mục `ChemNote_Backups/Assets/` trên Google Drive!
+            ### ChemNote Pro v3.6.1 — Bản vá khẩn cấp cho Huawei MatePad 11.5"S (HarmonyOS 4.2)!
+            - **Sửa triệt để lỗi đen thui trang PDF (cả PDF mới chèn lẫn vở có PDF từ trước) & văng app:** Chuyển renderer Android từ Impeller Vulkan sang Skia OpenGL (`EnableImpeller = false`) tương thích GPU Maleoon trên Kirin, hoãn giải phóng GPU texture an toàn (`_safeDisposeImage`), giải mã PDF nguyên bản không upscale, và loại bỏ fallback ảnh nền đã bị thu hồi trong `CanvasPainter`.
+            - **Khôi phục 100% cảm ứng bút M-Pencil 3 trên mọi trang & Bảng trắng 6000×6000:** Thay `OverflowBox` bằng `_UnboundedHitTestViewportBox` để giữ nguyên khung khi thu nhỏ nhưng luôn truyền trọn tọa độ bút xuống từng trang ở mọi vị trí cuộn.
+            - **Cân chỉnh nhảy trang `_jumpToPage` & chiều cao cuộn dọc:** Nhảy thẳng chính giữa trang PDF vừa chèn, tránh kẹt hoặc lệch khung nhìn.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

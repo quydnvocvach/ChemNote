@@ -106,8 +106,9 @@ class CanvasPainter extends CustomPainter {
       }
     }
 
-    final ui.Image? pdfBg =
-        pdfBackgroundImageGetter?.call() ?? pdfBackgroundImage;
+    final ui.Image? pdfBg = pdfBackgroundImageGetter != null
+        ? pdfBackgroundImageGetter!()
+        : pdfBackgroundImage;
     final ui.Image? pdfThumb =
         pdfBg == null ? pdfThumbnailImageGetter?.call() : null;
 

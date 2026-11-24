@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
+import 'package:flutter/rendering.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
@@ -330,17 +331,21 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _activeTextController?.dispose();
     _activeTextFocusNode?.dispose();
     for (final img in _pdfImageCache.values) {
-      img.dispose();
+      _safeDisposeImage(img);
     }
     for (final img in _pdfThumbCache.values) {
-      img.dispose();
+      _safeDisposeImage(img);
     }
     for (final img in _elementImageCache.values) {
-      img.dispose();
+      _safeDisposeImage(img);
     }
     for (final img in _pageSnapshotCache.values) {
-      img.dispose();
+      _safeDisposeImage(img);
     }
+    _pdfImageCache.clear();
+    _pdfThumbCache.clear();
+    _elementImageCache.clear();
+    _pageSnapshotCache.clear();
     _fullResPdfQueue.clear();
     super.dispose();
   }
@@ -390,8 +395,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     return fallback;
   }
 
+  void _safeDisposeImage(ui.Image? img) {
+    if (img == null) return;
+    Future<void>.delayed(const Duration(milliseconds: 350), () {
+      try {
+        img.dispose();
+      } catch (_) {}
+    });
+  }
+
   void _invalidatePageSnapshot(String pageId) {
-    _pageSnapshotCache.remove(pageId)?.dispose();
+    _safeDisposeImage(_pageSnapshotCache.remove(pageId));
   }
 
   Future<void> _commitPage(
@@ -477,7 +491,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   }
 
   double _totalVerticalContentHeight(Notebook notebook) {
-    double h = 18.0 + 18.0 + 44.0 + 36.0;
+    double h = 18.0 + 18.0 + 18.0 + 44.0 + 36.0;
     for (int i = 0; i < notebook.pages.length; i++) {
       h += PaperMetrics.pageSize(isLandscape: notebook.pages[i].isLandscape)
           .height;
@@ -514,9 +528,38 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     } else if (appState.verticalContinuousScroll && !notebook.isWhiteboard) {
       final m = _transformController.value;
       final double scale = m.getMaxScaleOnAxis().clamp(0.5, 4.0);
-      final double tx = m.getTranslation().x;
+      double maxPageW = 0.0;
+      for (final p in notebook.pages) {
+        final pw = PaperMetrics.pageSize(isLandscape: p.isLandscape).width;
+        if (pw > maxPageW) maxPageW = pw;
+      }
+      final double contentW = maxPageW + 48.0;
+      final double scaledW = contentW * scale;
+      double tx = m.getTranslation().x;
+      if (!appState.freePaperMovement && _editorViewportSize.width > 0) {
+        tx = scaledW <= _editorViewportSize.width
+            ? (_editorViewportSize.width - scaledW) * 0.5
+            : tx.clamp(_editorViewportSize.width - scaledW, 0.0).toDouble();
+      }
+      final double contentH = _totalVerticalContentHeight(notebook);
+      final double scaledH = contentH * scale;
       final double pageTopY = _pageTopOffsetY(notebook, clampedIdx);
-      final double targetTy = -(pageTopY * scale);
+      double targetTy = -(pageTopY * scale);
+      if (_editorViewportSize.height > 0) {
+        if (appState.freePaperMovement) {
+          final double padTop = _editorViewportSize.height * 0.40;
+          final double padBottom = _editorViewportSize.height * 0.45;
+          final double minTy =
+              math.min(0.0, _editorViewportSize.height - scaledH) - padBottom;
+          targetTy = targetTy
+              .clamp(math.min(minTy, padTop), math.max(minTy, padTop))
+              .toDouble();
+        } else {
+          final double minTy =
+              math.min(0.0, _editorViewportSize.height - scaledH) - 100.0;
+          targetTy = targetTy.clamp(minTy, 24.0).toDouble();
+        }
+      }
       _transformController.value = Matrix4.identity()
         ..translate(tx, targetTy)
         ..scale(scale, scale);
@@ -595,7 +638,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       }
       while (_pdfThumbCache.length >= _maxPdfThumbCacheEntries) {
         final oldestKey = _pdfThumbCache.keys.first;
-        _pdfThumbCache.remove(oldestKey)?.dispose();
+        _safeDisposeImage(_pdfThumbCache.remove(oldestKey));
       }
       _pdfThumbCache[path] = frame.image;
       _notifyImageLoaded(pageId);
@@ -608,8 +651,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   void _ensurePdfImageLoaded(String? path, {String? pageId, int? pageIdx}) {
     if (path == null || path.isEmpty) return;
-    // Always kick off fast 320px thumbnail so pages are NEVER blank white!
-    _ensurePdfThumbLoaded(path, pageId: pageId);
+    final int idx = pageIdx ?? _visiblePageNotifier.value;
+    // Decode 320px thumbnail only for off-center pages or during fast scrolling
+    // so the visible center page never double-reads & double-decodes the same PNG.
+    if (_isFastScrollingNotifier.value ||
+        (idx - _visiblePageNotifier.value).abs() > 0) {
+      _ensurePdfThumbLoaded(path, pageId: pageId);
+    }
 
     final existing = _pdfImageCache[path];
     if (existing != null) {
@@ -618,11 +666,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       _pdfImageCache[path] = existing;
       return;
     }
-    // Defer heavy 1600px full-res decode while user is fast-scrolling (> 500 px/s)
+    // Defer full-res decode while user is fast-scrolling (> 500 px/s)
     if (_isFastScrollingNotifier.value) return;
     if (_loadingPdfPaths.contains(path)) return;
 
-    final int idx = pageIdx ?? _visiblePageNotifier.value;
     final String pid = pageId ?? '';
     if (!_fullResPdfQueue.any((e) => e.path == path)) {
       _fullResPdfQueue.add((pageIdx: idx, pageId: pid, path: path));
@@ -670,17 +717,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       if (!await file.exists()) return;
       final bytes = await file.readAsBytes();
       if (!mounted || (idx - _visiblePageNotifier.value).abs() > 2) return;
-      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 1600);
+      final codec = await ui.instantiateImageCodec(bytes);
       final frame = await codec.getNextFrame();
       if (!mounted || (idx - _visiblePageNotifier.value).abs() > 2) {
-        frame.image.dispose();
+        _safeDisposeImage(frame.image);
         return;
       }
       while (_pdfImageCache.length >= _maxPdfImageCacheEntries) {
         final oldestKey = _pdfImageCache.keys.first;
-        _pdfImageCache.remove(oldestKey)?.dispose();
+        _safeDisposeImage(_pdfImageCache.remove(oldestKey));
       }
       _pdfImageCache[path] = frame.image;
+      if (pageId != null && pageId.isNotEmpty) {
+        _invalidatePageSnapshot(pageId);
+      }
       _notifyImageLoaded(pageId != null && pageId.isNotEmpty ? pageId : null);
     } catch (_) {
       // Ignore missing/corrupt PDF page image
@@ -692,7 +742,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   }
 
   void _maybeSchedulePageSnapshot(NotePage page, Size pageSize) {
-    if (page.strokes.length <= 80) return;
+    if (page.strokes.length <= 150 || page.pdfBackgroundPath != null) return;
     if (page.id == _activeDrawingPageId ||
         _isFastScrollingNotifier.value ||
         page.stickyNotes.isNotEmpty ||
@@ -737,12 +787,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       final ui.Image img = await picture.toImage(w, h);
       picture.dispose();
       if (!mounted || page.id == _activeDrawingPageId) {
-        img.dispose();
+        _safeDisposeImage(img);
         return;
       }
       while (_pageSnapshotCache.length >= _maxPageSnapshotCacheEntries) {
         final oldest = _pageSnapshotCache.keys.first;
-        _pageSnapshotCache.remove(oldest)?.dispose();
+        _safeDisposeImage(_pageSnapshotCache.remove(oldest));
       }
       _pageSnapshotCache[page.id] = img;
       _repaintNotifierForPage(page.id).value++;
@@ -775,12 +825,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       final codec = await ui.instantiateImageCodec(bytes, targetWidth: 1600);
       final frame = await codec.getNextFrame();
       if (!mounted) {
-        frame.image.dispose();
+        _safeDisposeImage(frame.image);
         return;
       }
       while (_elementImageCache.length >= _maxElementImageCacheEntries) {
         final oldestKey = _elementImageCache.keys.first;
-        _elementImageCache.remove(oldestKey)?.dispose();
+        _safeDisposeImage(_elementImageCache.remove(oldestKey));
       }
       _elementImageCache[path] = frame.image;
       _notifyImageLoaded(pageId);
@@ -2519,7 +2569,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   void _updatePullToAddProgress(Notebook notebook, Size viewportSize) {
     if (notebook.pages.isEmpty || _isAddingPullPage) return;
-    double totalContentHeight = 18.0 + 18.0 + 44.0 + 36.0;
+    double totalContentHeight = 18.0 + 18.0 + 18.0 + 44.0 + 36.0;
     for (int i = 0; i < notebook.pages.length; i++) {
       totalContentHeight +=
           PaperMetrics.pageSize(isLandscape: notebook.pages[i].isLandscape)
@@ -4395,9 +4445,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       painter: CanvasPainter(
                         page: page,
                         pageGetter: () => _latestPageOr(page),
-                        pdfBackgroundImage: page.pdfBackgroundPath != null
-                            ? _pdfImageCache[page.pdfBackgroundPath!]
-                            : null,
                         pdfBackgroundImageGetter: () =>
                             page.pdfBackgroundPath != null
                                 ? _pdfImageCache[page.pdfBackgroundPath!]
@@ -7441,14 +7488,12 @@ class _StylusSafePanZoomViewportState extends State<_StylusSafePanZoomViewport>
             alignment: Alignment.topLeft,
             child: child,
           ),
-          // Fixed-size OverflowBox prevents zoom-out rightward shift while keeping full hit-testing!
+          // Fixed viewport size prevents zoom-out rightward shift while allowing full hit-testing across all pages & whiteboard!
           child: widget.unconstrainedChild
-              ? OverflowBox(
-                  minWidth: widget.contentWidth,
-                  maxWidth: widget.contentWidth,
-                  minHeight: widget.contentHeight,
-                  maxHeight: widget.contentHeight,
-                  alignment: Alignment.topLeft,
+              ? _UnboundedHitTestViewportBox(
+                  contentWidth: widget.contentWidth,
+                  contentHeight: widget.contentHeight,
+                  tightHeight: widget.isWhiteboard,
                   child: widget.child,
                 )
               : widget.child,
@@ -7498,5 +7543,105 @@ class _PageActiveStrokePainter extends CustomPainter {
   bool shouldRepaint(covariant _PageActiveStrokePainter oldDelegate) {
     return oldDelegate.pageId != pageId ||
         delegate.shouldRepaint(oldDelegate.delegate);
+  }
+}
+
+/// Keeps the child laid out at explicit document width/height while reporting
+/// bounded viewport [size] to ancestor [Transform] (preventing zoom-out shift)
+/// and bypassing [size.contains] in [hitTest] so M-Pencil 3 works on every page
+/// and anywhere across the 6000×6000 Whiteboard.
+class _UnboundedHitTestViewportBox extends SingleChildRenderObjectWidget {
+  final double contentWidth;
+  final double contentHeight;
+  final bool tightHeight;
+
+  const _UnboundedHitTestViewportBox({
+    required this.contentWidth,
+    required this.contentHeight,
+    required this.tightHeight,
+    super.child,
+  });
+
+  @override
+  _RenderUnboundedHitTestViewportBox createRenderObject(BuildContext context) {
+    return _RenderUnboundedHitTestViewportBox(
+      contentWidth: contentWidth,
+      contentHeight: contentHeight,
+      tightHeight: tightHeight,
+    );
+  }
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderUnboundedHitTestViewportBox renderObject,
+  ) {
+    renderObject
+      ..contentWidth = contentWidth
+      ..contentHeight = contentHeight
+      ..tightHeight = tightHeight;
+  }
+}
+
+class _RenderUnboundedHitTestViewportBox extends RenderShiftedBox {
+  double _contentWidth;
+  double _contentHeight;
+  bool _tightHeight;
+
+  _RenderUnboundedHitTestViewportBox({
+    required double contentWidth,
+    required double contentHeight,
+    required bool tightHeight,
+  })  : _contentWidth = contentWidth,
+        _contentHeight = contentHeight,
+        _tightHeight = tightHeight,
+        super(null);
+
+  double get contentWidth => _contentWidth;
+  set contentWidth(double value) {
+    if (_contentWidth == value) return;
+    _contentWidth = value;
+    markNeedsLayout();
+  }
+
+  double get contentHeight => _contentHeight;
+  set contentHeight(double value) {
+    if (_contentHeight == value) return;
+    _contentHeight = value;
+    markNeedsLayout();
+  }
+
+  bool get tightHeight => _tightHeight;
+  set tightHeight(bool value) {
+    if (_tightHeight == value) return;
+    _tightHeight = value;
+    markNeedsLayout();
+  }
+
+  @override
+  void performLayout() {
+    size = constraints.biggest;
+    final RenderBox? c = child;
+    if (c != null) {
+      c.layout(
+        BoxConstraints(
+          minWidth: _contentWidth,
+          maxWidth: _contentWidth,
+          minHeight: _tightHeight ? _contentHeight : 0.0,
+          maxHeight: _tightHeight ? _contentHeight : double.infinity,
+        ),
+        parentUsesSize: true,
+      );
+      (c.parentData! as BoxParentData).offset = Offset.zero;
+    }
+  }
+
+  @override
+  bool hitTest(BoxHitTestResult result, {required Offset position}) {
+    if (hitTestChildren(result, position: position)) {
+      result.add(BoxHitTestEntry(this, position));
+      return true;
+    }
+    return false;
   }
 }
