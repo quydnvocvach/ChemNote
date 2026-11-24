@@ -160,16 +160,15 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.6.1 with APK
+      - name: Publish Release v3.6.2 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.6.1
-          name: ChemNote Pro v3.6.1 (Sửa lỗi đen PDF, văng app & mất nét bút M-Pencil 3 trên MatePad 11.5"S)
+          tag_name: v3.6.2
+          name: ChemNote Pro v3.6.2 (Khôi phục lõi InteractiveViewer & CanvasPainter ổn định của v3.4 + Đầy đủ tính năng v3.5/v3.6)
           body: |
-            ### ChemNote Pro v3.6.1 — Bản vá khẩn cấp cho Huawei MatePad 11.5"S (HarmonyOS 4.2)!
-            - **Sửa triệt để lỗi đen thui trang PDF (cả PDF mới chèn lẫn vở có PDF từ trước) & văng app:** Chuyển renderer Android từ Impeller Vulkan sang Skia OpenGL (`EnableImpeller = false`) tương thích GPU Maleoon trên Kirin, hoãn giải phóng GPU texture an toàn (`_safeDisposeImage`), giải mã PDF nguyên bản không upscale, và loại bỏ fallback ảnh nền đã bị thu hồi trong `CanvasPainter`.
-            - **Khôi phục 100% cảm ứng bút M-Pencil 3 trên mọi trang & Bảng trắng 6000×6000:** Thay `OverflowBox` bằng `_UnboundedHitTestViewportBox` để giữ nguyên khung khi thu nhỏ nhưng luôn truyền trọn tọa độ bút xuống từng trang ở mọi vị trí cuộn.
-            - **Cân chỉnh nhảy trang `_jumpToPage` & chiều cao cuộn dọc:** Nhảy thẳng chính giữa trang PDF vừa chèn, tránh kẹt hoặc lệch khung nhìn.
+            ### ChemNote Pro v3.6.2 — Loại bỏ triệt để lỗi đen trang/PDF, lag delay bút & văng app!
+            - **Khôi phục lõi hiển thị gốc v3.4.0 siêu ổn định:** Gỡ bỏ hoàn toàn lớp viewport/cache/snapshot tự chế thêm vào ở v3.5.1–v3.6.1 (`_StylusSafePanZoomViewport`, `OverflowBox`/`_UnboundedHitTestViewportBox`, `_visiblePageNotifier`, `_pageSnapshotCache`, `_pdfThumbCache`, `_pageRepaintNotifiers`, `_PageActiveStrokePainter`, cờ tắt Impeller), dùng lại **`InteractiveViewer` gốc của Flutter** + **`CanvasPainter` thuần**.
+            - **Giữ trọn 100% các nâng cấp giá trị:** Đồng bộ Google Drive (`JSON/` + `PDF/` + `Assets/`), nhập Word `.docx` & PDF tốc độ cao + thanh tiến trình, bảng chọn màu Huawei HSV, chế độ Bút lướt trang (`_stylusPanMode`), tự lưu chống đơ (`compute` background isolate), `WidgetsBindingObserver` lưu khi ẩn app, dọn file mồ côi khi xóa vĩnh viễn, Lasso Giấy nhớ/Tệp đính kèm, tay nắm ảnh 48px, Giấy nhớ trong suốt, và bỏ thông báo dưới đáy màn hình.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true
