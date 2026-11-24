@@ -160,17 +160,16 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.6.3 with APK
+      - name: Publish Release v3.6.4 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.6.3
-          name: ChemNote Pro v3.6.3 (Giữ nguyên tỉ lệ ảnh, Tốc độ lướt 3x/1-10x, Huawei Tệp tin Download & Sửa Zoom)
+          tag_name: v3.6.4
+          name: ChemNote Pro v3.6.4 (Khóa cứng giấy khi viết bút M-Pencil 3, Zoom khi tắt Chuyển động tự do & Lướt ngang chuẩn 1×)
           body: |
-            ### ChemNote Pro v3.6.3 — Tối ưu trải nghiệm MatePad 11.5"S theo phản hồi thực tế!
-            - **Giữ nguyên tỉ lệ ảnh gốc khi chèn:** Tự động giải mã kích thước tự nhiên của ảnh trước khi đặt vào trang/tạo sổ mới (không ép thành hình vuông hay méo tỉ lệ).
-            - **Tăng 3× tốc độ lướt gốc & mở rộng thanh chỉnh 1.0× – 10.0×:** Lướt tài liệu dài cực nhanh ở mức mặc định `1.0×` và tùy chỉnh tới `10.0×` trong Cài đặt & Thanh công cụ.
-            - **Mặc định trình chọn tệp sang Tệp tin Huawei (`Download`):** Nhập PDF/Word/đính kèm mở thẳng ứng dụng Tệp tin của Huawei (`com.huawei.filemanager`) tại thư mục `Download`.
-            - **Sửa triệt để Zoom 2 ngón khi bật "Chuyển động giấy tự do":** Mở rộng `boundaryMargin` (`800` khi bật), `minScale: 0.35`, và tách `scaleEnabled: !_isOverlayDragging && !_isStylusDown` trên nền `InteractiveViewer` chuẩn của v3.4.0.
+            ### ChemNote Pro v3.6.4 — Tinh chỉnh cảm giác viết & lướt chuẩn mực trên MatePad 11.5"S!
+            - **Khóa kép chống di chuyển giấy khi đặt bút M-Pencil 3:** Bổ sung khóa trước từ lúc bút hover gần màn hình (`_isStylusHovering`) kết hợp khóa cứng ma trận (`_lockedMatrixDuringStylus`) trên `InteractiveViewer` cuộn dọc, lật ngang và Bảng vô cực — viết bút không làm trôi trang giấy (trừ khi bật Chế độ Bút lướt).
+            - **Zoom 2 ngón mượt cả khi TẮT "Chuyển động giấy tự do":** Giữ `boundaryMargin: EdgeInsets.all(800)` cho `InteractiveViewer` (`minScale: 0.35` – `4.0`) để luôn thu phóng được 2 ngón ở mọi chế độ, trong khi vẫn giữ căn giữa và khóa biên gọn gàng khi tắt chuyển động tự do.
+            - **Chỉ tăng tốc lướt DỌC (3× gốc), giữ nguyên tốc độ lướt NGANG 1×:** Loại bỏ nhân tốc độ trên trục ngang `dx` để lướt ngang & lướt chéo tự nhiên, chuẩn xác.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

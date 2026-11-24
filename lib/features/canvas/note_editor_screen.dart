@@ -117,6 +117,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   bool _eyedropperActive = false;
   bool _isDrawingPointerDown = false;
   bool _isStylusDown = false;
+  bool _isStylusHovering = false;
+  Timer? _stylusHoverTimer;
+  Matrix4? _lockedMatrixDuringStylus;
+  Matrix4? _lockedWhiteboardMatrixDuringStylus;
   bool _stylusPanMode = false;
   bool _isOverlayDragging = false;
   final Set<int> _activeTouchPointers = {};
@@ -280,6 +284,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   @override
   void dispose() {
     _appStateRef.flushPendingSaves();
+    _stylusHoverTimer?.cancel();
     _shapeHoldTimer?.cancel();
     _audioPollTimer?.cancel();
     HardwareService.instance.stopAudio();
@@ -3330,9 +3335,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     ..scale(initScale, initScale);
                 }
 
+                final bool stylusBlocksViewport =
+                    !_stylusPanMode && (_isStylusDown || _isStylusHovering);
+
                 final bool allowZoomPan = !_isOverlayDragging &&
                     (_stylusPanMode ||
-                        (!_isStylusDown &&
+                        (!stylusBlocksViewport &&
                             (_activeTouchPointers.length >= 2 ||
                                 appState.readOnlyMode ||
                                 (appState.palmRejectionEnabled &&
@@ -3342,10 +3350,34 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
                 return Listener(
                   behavior: HitTestBehavior.translucent,
+                  onPointerHover: (e) {
+                    if ((e.kind == PointerDeviceKind.stylus ||
+                            e.kind == PointerDeviceKind.invertedStylus) &&
+                        !_stylusPanMode) {
+                      _stylusHoverTimer?.cancel();
+                      _stylusHoverTimer = Timer(
+                        const Duration(milliseconds: 350),
+                        () {
+                          if (mounted && _isStylusHovering) {
+                            setState(() => _isStylusHovering = false);
+                          }
+                        },
+                      );
+                      if (!_isStylusHovering) {
+                        setState(() => _isStylusHovering = true);
+                      }
+                    }
+                  },
                   onPointerDown: (e) {
                     final bool isStylus = e.kind == PointerDeviceKind.stylus ||
                         e.kind == PointerDeviceKind.invertedStylus;
                     if (isStylus) {
+                      if (!_stylusPanMode) {
+                        _lockedMatrixDuringStylus =
+                            _transformController.value.clone();
+                        _lockedWhiteboardMatrixDuringStylus =
+                            _whiteboardTransformController.value.clone();
+                      }
                       if (!_isStylusDown) {
                         setState(() => _isStylusDown = true);
                       }
@@ -3355,6 +3387,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       final int prevLen = _activeTouchPointers.length;
                       _activeTouchPointers.add(e.pointer);
                       if (_activeTouchPointers.length >= 2 && !_isStylusDown) {
+                        _stylusHoverTimer?.cancel();
+                        _isStylusHovering = false;
                         _cancelActiveGesture();
                         if (prevLen < 2) {
                           setState(() {});
@@ -3381,6 +3415,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                   onPointerUp: (e) {
                     if (e.kind == PointerDeviceKind.stylus ||
                         e.kind == PointerDeviceKind.invertedStylus) {
+                      _lockedMatrixDuringStylus = null;
+                      _lockedWhiteboardMatrixDuringStylus = null;
                       if (_isStylusDown || _isDrawingPointerDown) {
                         setState(() {
                           _isStylusDown = false;
@@ -3422,6 +3458,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                   onPointerCancel: (e) {
                     if (e.kind == PointerDeviceKind.stylus ||
                         e.kind == PointerDeviceKind.invertedStylus) {
+                      _lockedMatrixDuringStylus = null;
+                      _lockedWhiteboardMatrixDuringStylus = null;
                       if (_isStylusDown || _isDrawingPointerDown) {
                         setState(() {
                           _isStylusDown = false;
@@ -3462,64 +3500,80 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         constrained: false,
                         minScale: 0.35,
                         maxScale: 4.0,
-                        boundaryMargin: appState.freePaperMovement
-                            ? const EdgeInsets.all(800)
-                            : const EdgeInsets.symmetric(
-                                horizontal: 300,
-                                vertical: 160,
-                              ),
+                        boundaryMargin: const EdgeInsets.all(800),
                         panEnabled: allowZoomPan,
-                        scaleEnabled: !_isOverlayDragging && !_isStylusDown,
+                        scaleEnabled:
+                            !_isOverlayDragging && !stylusBlocksViewport,
                         onInteractionUpdate: (details) {
+                          if (!_stylusPanMode &&
+                              _isStylusDown &&
+                              _lockedMatrixDuringStylus != null) {
+                            _transformController.value =
+                                _lockedMatrixDuringStylus!.clone();
+                            return;
+                          }
+
+                          final m = _transformController.value;
+                          final double scale =
+                              m.getMaxScaleOnAxis().clamp(0.35, 4.0);
+                          final double curTx = m.getTranslation().x;
+                          final double curTy = m.getTranslation().y;
+                          final double contentH =
+                              _totalVerticalContentHeight(notebook);
+                          final double scaledH = contentH * scale;
+                          double maxPageW = 0.0;
+                          for (final p in notebook.pages) {
+                            final pw = PaperMetrics.pageSize(
+                              isLandscape: p.isLandscape,
+                            ).width;
+                            if (pw > maxPageW) maxPageW = pw;
+                          }
+                          final double scaledW = (maxPageW + 48.0) * scale;
+
                           if (details.pointerCount == 1 &&
                               (details.scale - 1.0).abs() < 0.001 &&
                               details.focalPointDelta != Offset.zero) {
+                            // Only boost vertical scroll (3x * slider); keep horizontal pan at natural 1x
                             final double effectiveSpeed = 3.0 *
                                 appState.scrollSpeedMultiplier.clamp(1.0, 10.0);
-                            final double extraFactor = effectiveSpeed - 1.0;
-                            final m = _transformController.value;
-                            final double scale =
-                                m.getMaxScaleOnAxis().clamp(0.35, 4.0);
-                            final double curTx = m.getTranslation().x;
-                            final double curTy = m.getTranslation().y;
-                            final double contentH =
-                                _totalVerticalContentHeight(notebook);
-                            final double scaledH = contentH * scale;
-                            final double marginY =
-                                appState.freePaperMovement ? 800.0 : 160.0;
-                            final double minTy =
-                                math.min(0.0, vpSize.height - scaledH) -
-                                    marginY;
-                            final double maxTy = marginY;
-                            final double nextTy = (curTy +
-                                    details.focalPointDelta.dy * extraFactor)
-                                .clamp(minTy, maxTy)
-                                .toDouble();
+                            final double extraDy =
+                                details.focalPointDelta.dy *
+                                    (effectiveSpeed - 1.0);
+                            final double minTy = appState.freePaperMovement
+                                ? math.min(0.0, vpSize.height - scaledH) - 800.0
+                                : math.min(0.0, vpSize.height - scaledH) -
+                                    120.0;
+                            final double maxTy =
+                                appState.freePaperMovement ? 800.0 : 24.0;
+                            final double nextTy =
+                                (curTy + extraDy).clamp(minTy, maxTy).toDouble();
 
-                            double maxPageW = 0.0;
-                            for (final p in notebook.pages) {
-                              final pw = PaperMetrics.pageSize(
-                                isLandscape: p.isLandscape,
-                              ).width;
-                              if (pw > maxPageW) maxPageW = pw;
-                            }
-                            final double scaledW = (maxPageW + 48.0) * scale;
-                            final double marginX =
-                                appState.freePaperMovement ? 800.0 : 300.0;
-                            double nextTx = curTx;
-                            if (appState.freePaperMovement ||
-                                scaledW > vpSize.width) {
-                              final double minTx =
-                                  math.min(0.0, vpSize.width - scaledW) -
-                                      marginX;
-                              nextTx = (curTx +
-                                      details.focalPointDelta.dx * extraFactor)
-                                  .clamp(minTx, marginX)
-                                  .toDouble();
-                            }
-                            final updated = m.clone()
+                            final double nextTx = appState.freePaperMovement
+                                ? curTx
+                                : (scaledW <= vpSize.width
+                                    ? (vpSize.width - scaledW) * 0.5
+                                    : curTx
+                                        .clamp(vpSize.width - scaledW, 0.0)
+                                        .toDouble());
+
+                            _transformController.value = m.clone()
                               ..setTranslationRaw(nextTx, nextTy, 0.0);
-                            _transformController.value = updated;
+                          } else if (details.pointerCount >= 2 &&
+                              !appState.freePaperMovement) {
+                            final double nextTx = scaledW <= vpSize.width
+                                ? (vpSize.width - scaledW) * 0.5
+                                : curTx
+                                    .clamp(vpSize.width - scaledW, 0.0)
+                                    .toDouble();
+                            final double minTy =
+                                math.min(0.0, vpSize.height - scaledH) - 120.0;
+                            final double nextTy =
+                                curTy.clamp(minTy, 24.0).toDouble();
+                            if ((nextTx - curTx).abs() > 0.5 ||
+                                (nextTy - curTy).abs() > 0.5) {
+                              _transformController.value = m.clone()
+                                ..setTranslationRaw(nextTx, nextTy, 0.0);
+                            }
                           }
                           _updatePullToAddProgress(notebook, vpSize);
                         },
@@ -3532,14 +3586,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         transformationController: _transformController,
                         minScale: 0.35,
                         maxScale: 4.0,
-                        boundaryMargin: appState.freePaperMovement
-                            ? const EdgeInsets.all(800)
-                            : const EdgeInsets.symmetric(
-                                horizontal: 300,
-                                vertical: 160,
-                              ),
+                        boundaryMargin: const EdgeInsets.all(800),
                         panEnabled: allowZoomPan,
-                        scaleEnabled: !_isOverlayDragging && !_isStylusDown,
+                        scaleEnabled:
+                            !_isOverlayDragging && !stylusBlocksViewport,
+                        onInteractionUpdate: (_) {
+                          if (!_stylusPanMode &&
+                              _isStylusDown &&
+                              _lockedMatrixDuringStylus != null) {
+                            _transformController.value =
+                                _lockedMatrixDuringStylus!.clone();
+                          }
+                        },
                         child: _buildHorizontalFlipPages(notebook),
                       ),
 
@@ -3962,9 +4020,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     int pageIndex,
     AppState appState,
   ) {
+    final bool stylusBlocksViewport =
+        !_stylusPanMode && (_isStylusDown || _isStylusHovering);
     final bool allowWhiteboardPanZoom = !_isOverlayDragging &&
         (_stylusPanMode ||
-            (!_isStylusDown &&
+            (!stylusBlocksViewport &&
                 (_pointerDownPositions.length >= 2 ||
                     _activeTouchPointers.length >= 2 ||
                     appState.readOnlyMode ||
@@ -3991,8 +4051,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               maxScale: 4.0,
               boundaryMargin: const EdgeInsets.all(800),
               panEnabled: allowWhiteboardPanZoom,
-              scaleEnabled: allowWhiteboardPanZoom,
+              scaleEnabled: !_isOverlayDragging && !stylusBlocksViewport,
               onInteractionUpdate: (_) {
+                if (!_stylusPanMode &&
+                    _isStylusDown &&
+                    _lockedWhiteboardMatrixDuringStylus != null) {
+                  _whiteboardTransformController.value =
+                      _lockedWhiteboardMatrixDuringStylus!.clone();
+                  return;
+                }
                 final scale = _whiteboardTransformController.value
                     .getMaxScaleOnAxis()
                     .clamp(0.25, 4.0);
