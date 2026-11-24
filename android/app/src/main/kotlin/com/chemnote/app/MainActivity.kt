@@ -13,6 +13,7 @@ import android.media.PlaybackParams
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -29,7 +30,7 @@ import java.io.FileOutputStream
 class MainActivity : FlutterActivity() {
     companion object {
         private const val HARDWARE_CHANNEL = "com.chemnote.app/hardware"
-        private const val STYLUS_BUTTON_DEBOUNCE_MS = 250L
+        private const val STYLUS_BUTTON_DEBOUNCE_MS = 450L
         private const val REQ_RECORD_AUDIO = 4012
         private const val REQ_READ_IMAGES = 4013
         private const val REQ_PICK_GALLERY = 4014
@@ -37,7 +38,9 @@ class MainActivity : FlutterActivity() {
 
     private var hardwareChannel: MethodChannel? = null
     private var lastStylusDoubleTapMs: Long = 0L
+    private var lastStylusTriggerEventTime: Long = -1L
     private var stylusPrimaryButtonDown: Boolean = false
+    private var keyEventHandlesStylusButton: Boolean = false
 
     private var mediaRecorder: MediaRecorder? = null
     private var recordingStartMs: Long = 0L
@@ -508,24 +511,29 @@ class MainActivity : FlutterActivity() {
         return currentDisplay?.refreshRate ?: 60f
     }
 
-    private fun notifyStylusDoubleTap() {
-        val now = System.currentTimeMillis()
+    private fun notifyStylusDoubleTap(eventTimeMs: Long = -1L) {
+        if (eventTimeMs >= 0L && eventTimeMs == lastStylusTriggerEventTime) return
+        val now = SystemClock.uptimeMillis()
         if (now - lastStylusDoubleTapMs < STYLUS_BUTTON_DEBOUNCE_MS) return
         lastStylusDoubleTapMs = now
+        if (eventTimeMs >= 0L) {
+            lastStylusTriggerEventTime = eventTimeMs
+        }
         runOnUiThread {
             hardwareChannel?.invokeMethod("stylus_double_tap", null)
         }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.action == KeyEvent.ACTION_UP) {
-            val isStylusButton =
-                event.keyCode == KeyEvent.KEYCODE_STYLUS_BUTTON_PRIMARY ||
-                    event.keyCode == KeyEvent.KEYCODE_STYLUS_BUTTON_SECONDARY
-            if (isStylusButton) {
-                notifyStylusDoubleTap()
-                return true
+        val isStylusButton =
+            event.keyCode == KeyEvent.KEYCODE_STYLUS_BUTTON_PRIMARY ||
+                event.keyCode == KeyEvent.KEYCODE_STYLUS_BUTTON_SECONDARY
+        if (isStylusButton) {
+            keyEventHandlesStylusButton = true
+            if (event.action == KeyEvent.ACTION_UP && event.repeatCount == 0) {
+                notifyStylusDoubleTap(event.eventTime)
             }
+            return true
         }
         return super.dispatchKeyEvent(event)
     }
@@ -545,10 +553,13 @@ class MainActivity : FlutterActivity() {
             (ev.pointerCount > 0 && ev.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS)
         if (!isStylus) return
 
-        val pressed = (ev.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+        val stylusMask = MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_STYLUS_SECONDARY
+        val pressed = (ev.buttonState and stylusMask) != 0
         if (pressed && !stylusPrimaryButtonDown) {
             stylusPrimaryButtonDown = true
-            notifyStylusDoubleTap()
+            if (!keyEventHandlesStylusButton) {
+                notifyStylusDoubleTap(ev.eventTime)
+            }
         } else if (!pressed && stylusPrimaryButtonDown) {
             stylusPrimaryButtonDown = false
         }

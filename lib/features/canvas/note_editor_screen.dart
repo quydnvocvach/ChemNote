@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
@@ -71,6 +72,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   bool _shapeSnappedLive = false;
   final ValueNotifier<double> _pullAddProgressNotifier = ValueNotifier(0.0);
   final ValueNotifier<int> _visiblePageNotifier = ValueNotifier<int>(0);
+  final ValueNotifier<bool> _isFastScrollingNotifier = ValueNotifier<bool>(false);
+  final Map<String, ValueNotifier<int>> _pageRepaintNotifiers = {};
   final GlobalKey _viewportStackKey = GlobalKey();
   final Map<String, TextEditingController> _stickyControllers = {};
   late PageController _horizontalPageController;
@@ -121,6 +124,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   bool _stylusPanMode = false;
   bool _isOverlayDragging = false;
   final Set<int> _activeTouchPointers = {};
+  DateTime? _lastTouchEventAt;
 
   // Smoothing & M-Pencil 3 curve
   bool _autoNeatenEnabled = true;
@@ -163,11 +167,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   TextEditingController? _activeTextController;
   FocusNode? _activeTextFocusNode;
 
-  // Cached decoded PDF background & full-res ImageElement images
+  // Cached decoded PDF background (1600px + 320px thumbs), ImageElement & page snapshots
   final Map<String, ui.Image> _pdfImageCache = {};
   final Set<String> _loadingPdfPaths = {};
+  final Map<String, ui.Image> _pdfThumbCache = {};
+  final Set<String> _loadingPdfThumbPaths = {};
+  int _activeFullResDecodes = 0;
+  final List<({int pageIdx, String pageId, String path})> _fullResPdfQueue = [];
   final Map<String, ui.Image> _elementImageCache = {};
   final Set<String> _loadingElementImagePaths = {};
+  final Map<String, ui.Image> _pageSnapshotCache = {};
+  final Set<String> _buildingSnapshotPageIds = {};
   bool _isBusyPdf = false;
 
   // Audio Note Recording & Synced Stroke Replay state
@@ -231,6 +241,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _activeNotebookId = widget.notebookId;
     _currentPageIndex = widget.initialPageIndex;
     _visiblePageNotifier.value = _currentPageIndex;
+    _visiblePageNotifier.addListener(_prefetchAdjacentPageImages);
     _horizontalPageController = PageController(initialPage: _currentPageIndex);
     _lassoController.addListener(_onLassoChanged);
 
@@ -281,7 +292,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   @override
   void dispose() {
+    _appStateRef.setStylusDrawingActive(false);
     _appStateRef.flushPendingSaves();
+    _visiblePageNotifier.removeListener(_prefetchAdjacentPageImages);
+    for (final n in _pageRepaintNotifiers.values) {
+      n.dispose();
+    }
+    _pageRepaintNotifiers.clear();
     _shapeHoldTimer?.cancel();
     _audioPollTimer?.cancel();
     HardwareService.instance.stopAudio();
@@ -309,14 +326,22 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _cropDraftNotifier.dispose();
     _pullAddProgressNotifier.dispose();
     _visiblePageNotifier.dispose();
+    _isFastScrollingNotifier.dispose();
     _activeTextController?.dispose();
     _activeTextFocusNode?.dispose();
     for (final img in _pdfImageCache.values) {
       img.dispose();
     }
+    for (final img in _pdfThumbCache.values) {
+      img.dispose();
+    }
     for (final img in _elementImageCache.values) {
       img.dispose();
     }
+    for (final img in _pageSnapshotCache.values) {
+      img.dispose();
+    }
+    _fullResPdfQueue.clear();
     super.dispose();
   }
 
@@ -353,13 +378,38 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _redoFor(snapshot.id).clear();
   }
 
+  ValueNotifier<int> _repaintNotifierForPage(String pageId) =>
+      _pageRepaintNotifiers.putIfAbsent(pageId, () => ValueNotifier<int>(0));
+
+  NotePage _latestPageOr(NotePage fallback) {
+    final nb = _appStateRef.getNotebookById(_activeNotebookId);
+    if (nb == null) return fallback;
+    for (final p in nb.pages) {
+      if (p.id == fallback.id) return p;
+    }
+    return fallback;
+  }
+
+  void _invalidatePageSnapshot(String pageId) {
+    _pageSnapshotCache.remove(pageId)?.dispose();
+  }
+
   Future<void> _commitPage(
     NotePage updatedPage, {
     NotePage? undoSnapshot,
+    bool rebuildEditor = true,
   }) async {
+    _invalidatePageSnapshot(updatedPage.id);
     if (undoSnapshot != null) _pushUndo(undoSnapshot);
-    await context.read<AppState>().updatePage(_activeNotebookId, updatedPage);
-    if (mounted) setState(() => _repaintVersion++);
+    await context.read<AppState>().updatePage(
+          _activeNotebookId,
+          updatedPage,
+          notify: rebuildEditor,
+        );
+    _repaintNotifierForPage(updatedPage.id).value++;
+    if (rebuildEditor && mounted) {
+      setState(() => _repaintVersion++);
+    }
   }
 
   Future<void> _undo(NotePage currentPage) async {
@@ -382,12 +432,22 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     if (mounted) setState(() => _repaintVersion++);
   }
 
-  void _switchNotebookTab(String notebookId) {
+  Future<void> _switchNotebookTab(String notebookId) async {
     if (notebookId == _activeNotebookId) return;
     _commitActiveTextEdit();
+    // Auto-stop and save active audio recording on current page before switching tabs
+    if (_isRecordingAudio) {
+      final curNb = _getNotebook(context, listen: false);
+      final curPage = _getCurrentPage(curNb);
+      if (curPage != null) {
+        await _toggleAudioRecording(curPage);
+      }
+    }
+    if (!mounted) return;
     setState(() {
       _activeNotebookId = notebookId;
       _currentPageIndex = 0;
+      _visiblePageNotifier.value = 0;
       _lassoController.clear();
       _selectedTextId = null;
       _selectedImageId = null;
@@ -464,65 +524,266 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   }
 
   // ===========================================================================
-  // PDF BACKGROUND IMAGE DECODING
+  // TWO-TIER PROGRESSIVE PDF CACHE (320px + 1600px), PRIORITY QUEUE & SNAPSHOTS
   // ===========================================================================
 
-  void _ensurePdfImageLoaded(String? path) {
-    if (path == null || path.isEmpty) return;
-    if (_pdfImageCache.containsKey(path) || _loadingPdfPaths.contains(path)) {
-      return;
+  static const int _maxPdfImageCacheEntries = 8;
+  static const int _maxPdfThumbCacheEntries = 64;
+  static const int _maxElementImageCacheEntries = 16;
+  static const int _maxPageSnapshotCacheEntries = 6;
+  static const int _maxConcurrentFullResDecodes = 2;
+
+  void _onFastScrollingChanged(bool isFast) {
+    if (_isFastScrollingNotifier.value == isFast) return;
+    _isFastScrollingNotifier.value = isFast;
+    if (!isFast) {
+      _prefetchAdjacentPageImages();
+      _drainFullResPdfQueue();
     }
-    _loadingPdfPaths.add(path);
-    _loadPdfImage(path);
   }
 
-  Future<void> _loadPdfImage(String path) async {
+  void _prefetchAdjacentPageImages() {
+    if (!mounted) return;
+    final nb = _appStateRef.getNotebookById(_activeNotebookId);
+    if (nb == null || nb.pages.isEmpty) return;
+    final int center = _visiblePageNotifier.value;
+    final int start = math.max(0, center - 1);
+    final int end = math.min(nb.pages.length - 1, center + 1);
+    for (int i = start; i <= end; i++) {
+      final p = nb.pages[i];
+      _ensurePdfImageLoaded(p.pdfBackgroundPath, pageId: p.id, pageIdx: i);
+      for (final img in p.imageElements) {
+        _ensureElementImageLoaded(img.filePath, pageId: p.id);
+      }
+    }
+  }
+
+  void _notifyImageLoaded(String? pageId) {
+    if (!mounted) return;
+    if (pageId != null) {
+      _repaintNotifierForPage(pageId).value++;
+    } else {
+      for (final n in _pageRepaintNotifiers.values) {
+        n.value++;
+      }
+    }
+  }
+
+  void _ensurePdfThumbLoaded(String? path, {String? pageId}) {
+    if (path == null || path.isEmpty) return;
+    final existing = _pdfThumbCache[path];
+    if (existing != null) {
+      _pdfThumbCache.remove(path);
+      _pdfThumbCache[path] = existing;
+      return;
+    }
+    if (_loadingPdfThumbPaths.contains(path)) return;
+    _loadingPdfThumbPaths.add(path);
+    _loadPdfThumb(path, pageId: pageId);
+  }
+
+  Future<void> _loadPdfThumb(String path, {String? pageId}) async {
     try {
       final file = File(path);
       if (!await file.exists()) return;
       final bytes = await file.readAsBytes();
-      final codec = await ui.instantiateImageCodec(bytes);
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 320);
       final frame = await codec.getNextFrame();
       if (!mounted) {
         frame.image.dispose();
         return;
       }
-      setState(() {
-        _pdfImageCache[path] = frame.image;
-        _repaintVersion++;
-      });
+      while (_pdfThumbCache.length >= _maxPdfThumbCacheEntries) {
+        final oldestKey = _pdfThumbCache.keys.first;
+        _pdfThumbCache.remove(oldestKey)?.dispose();
+      }
+      _pdfThumbCache[path] = frame.image;
+      _notifyImageLoaded(pageId);
+    } catch (_) {
+      // Ignore missing/corrupt thumbnail
+    } finally {
+      _loadingPdfThumbPaths.remove(path);
+    }
+  }
+
+  void _ensurePdfImageLoaded(String? path, {String? pageId, int? pageIdx}) {
+    if (path == null || path.isEmpty) return;
+    // Always kick off fast 320px thumbnail so pages are NEVER blank white!
+    _ensurePdfThumbLoaded(path, pageId: pageId);
+
+    final existing = _pdfImageCache[path];
+    if (existing != null) {
+      // Touch LRU order (move to most-recently-used tail)
+      _pdfImageCache.remove(path);
+      _pdfImageCache[path] = existing;
+      return;
+    }
+    // Defer heavy 1600px full-res decode while user is fast-scrolling (> 500 px/s)
+    if (_isFastScrollingNotifier.value) return;
+    if (_loadingPdfPaths.contains(path)) return;
+
+    final int idx = pageIdx ?? _visiblePageNotifier.value;
+    final String pid = pageId ?? '';
+    if (!_fullResPdfQueue.any((e) => e.path == path)) {
+      _fullResPdfQueue.add((pageIdx: idx, pageId: pid, path: path));
+    }
+    _drainFullResPdfQueue();
+  }
+
+  void _drainFullResPdfQueue() {
+    if (!mounted || _isFastScrollingNotifier.value) return;
+    while (_activeFullResDecodes < _maxConcurrentFullResDecodes &&
+        _fullResPdfQueue.isNotEmpty) {
+      final int visible = _visiblePageNotifier.value;
+      // Pick pending task closest to visible page
+      int bestPos = 0;
+      int bestDist = (_fullResPdfQueue[0].pageIdx - visible).abs();
+      for (int i = 1; i < _fullResPdfQueue.length; i++) {
+        final d = (_fullResPdfQueue[i].pageIdx - visible).abs();
+        if (d < bestDist) {
+          bestDist = d;
+          bestPos = i;
+        }
+      }
+      final task = _fullResPdfQueue.removeAt(bestPos);
+      // Cancel/skip immediately if user already scrolled > 2 pages away!
+      if ((task.pageIdx - visible).abs() > 2) continue;
+      if (_pdfImageCache.containsKey(task.path) ||
+          _loadingPdfPaths.contains(task.path)) {
+        continue;
+      }
+      _loadingPdfPaths.add(task.path);
+      _activeFullResDecodes++;
+      _loadPdfImage(task.path, pageId: task.pageId, pageIdx: task.pageIdx);
+    }
+  }
+
+  Future<void> _loadPdfImage(
+    String path, {
+    String? pageId,
+    int? pageIdx,
+  }) async {
+    try {
+      final int idx = pageIdx ?? _visiblePageNotifier.value;
+      if ((idx - _visiblePageNotifier.value).abs() > 2) return;
+      final file = File(path);
+      if (!await file.exists()) return;
+      final bytes = await file.readAsBytes();
+      if (!mounted || (idx - _visiblePageNotifier.value).abs() > 2) return;
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 1600);
+      final frame = await codec.getNextFrame();
+      if (!mounted || (idx - _visiblePageNotifier.value).abs() > 2) {
+        frame.image.dispose();
+        return;
+      }
+      while (_pdfImageCache.length >= _maxPdfImageCacheEntries) {
+        final oldestKey = _pdfImageCache.keys.first;
+        _pdfImageCache.remove(oldestKey)?.dispose();
+      }
+      _pdfImageCache[path] = frame.image;
+      _notifyImageLoaded(pageId != null && pageId.isNotEmpty ? pageId : null);
     } catch (_) {
       // Ignore missing/corrupt PDF page image
     } finally {
       _loadingPdfPaths.remove(path);
+      _activeFullResDecodes = math.max(0, _activeFullResDecodes - 1);
+      _drainFullResPdfQueue();
     }
   }
 
-  void _ensureElementImageLoaded(String path) {
-    if (path.isEmpty) return;
-    if (_elementImageCache.containsKey(path) ||
-        _loadingElementImagePaths.contains(path)) {
+  void _maybeSchedulePageSnapshot(NotePage page, Size pageSize) {
+    if (page.strokes.length <= 80) return;
+    if (page.id == _activeDrawingPageId ||
+        _isFastScrollingNotifier.value ||
+        page.stickyNotes.isNotEmpty ||
+        _selectedImageId != null ||
+        _lassoController.activePageId == page.id ||
+        _pageSnapshotCache.containsKey(page.id) ||
+        _buildingSnapshotPageIds.contains(page.id)) {
       return;
     }
-    _loadingElementImagePaths.add(path);
-    _loadElementImage(path);
+    _buildingSnapshotPageIds.add(page.id);
+    _buildPageSnapshotAsync(page, pageSize);
   }
 
-  Future<void> _loadElementImage(String path) async {
+  Future<void> _buildPageSnapshotAsync(NotePage page, Size pageSize) async {
+    try {
+      await Future<void>.delayed(Duration.zero);
+      if (!mounted ||
+          page.id == _activeDrawingPageId ||
+          _isFastScrollingNotifier.value) {
+        return;
+      }
+      const double scale = 1.5;
+      final int w = (pageSize.width * scale).round();
+      final int h = (pageSize.height * scale).round();
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      canvas.scale(scale, scale);
+      CanvasPainter(
+        page: page,
+        pdfBackgroundImage: page.pdfBackgroundPath != null
+            ? _pdfImageCache[page.pdfBackgroundPath!]
+            : null,
+        pdfThumbnailImageGetter: () => page.pdfBackgroundPath != null
+            ? _pdfThumbCache[page.pdfBackgroundPath!]
+            : null,
+        elementImageCache: _elementImageCache,
+        drawBackground: true,
+        drawOverlays: true,
+        drawTapes: false,
+      ).paint(canvas, pageSize);
+      final picture = recorder.endRecording();
+      final ui.Image img = await picture.toImage(w, h);
+      picture.dispose();
+      if (!mounted || page.id == _activeDrawingPageId) {
+        img.dispose();
+        return;
+      }
+      while (_pageSnapshotCache.length >= _maxPageSnapshotCacheEntries) {
+        final oldest = _pageSnapshotCache.keys.first;
+        _pageSnapshotCache.remove(oldest)?.dispose();
+      }
+      _pageSnapshotCache[page.id] = img;
+      _repaintNotifierForPage(page.id).value++;
+    } catch (_) {
+      // Fall back to live vector painting
+    } finally {
+      _buildingSnapshotPageIds.remove(page.id);
+    }
+  }
+
+  void _ensureElementImageLoaded(String path, {String? pageId}) {
+    if (path.isEmpty) return;
+    final existing = _elementImageCache[path];
+    if (existing != null) {
+      // Touch LRU order (move to most-recently-used tail)
+      _elementImageCache.remove(path);
+      _elementImageCache[path] = existing;
+      return;
+    }
+    if (_loadingElementImagePaths.contains(path)) return;
+    _loadingElementImagePaths.add(path);
+    _loadElementImage(path, pageId: pageId);
+  }
+
+  Future<void> _loadElementImage(String path, {String? pageId}) async {
     try {
       final file = File(path);
       if (!await file.exists()) return;
       final bytes = await file.readAsBytes();
-      final codec = await ui.instantiateImageCodec(bytes);
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 1600);
       final frame = await codec.getNextFrame();
       if (!mounted) {
         frame.image.dispose();
         return;
       }
-      setState(() {
-        _elementImageCache[path] = frame.image;
-        _repaintVersion++;
-      });
+      while (_elementImageCache.length >= _maxElementImageCacheEntries) {
+        final oldestKey = _elementImageCache.keys.first;
+        _elementImageCache.remove(oldestKey)?.dispose();
+      }
+      _elementImageCache[path] = frame.image;
+      _notifyImageLoaded(pageId);
     } catch (_) {
       // Ignore missing/corrupt image file
     } finally {
@@ -550,17 +811,27 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     // Zero setState() during writing/erasing to prevent UI-thread ANR!
     _currentPageIndex = pageIndex;
     _activeDrawingPageId = page.id;
+    _invalidatePageSnapshot(page.id);
 
     final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus;
     if (isStylusEvent) {
+      // Auto-clear stale touch pointer sets if >2s since last touch event
+      if ((_activeTouchPointers.isNotEmpty ||
+              _pointerDownPositions.isNotEmpty) &&
+          (_lastTouchEventAt == null ||
+              DateTime.now().difference(_lastTouchEventAt!).inMilliseconds >
+                  2000)) {
+        _activeTouchPointers.clear();
+        _pointerDownPositions.clear();
+      }
       _isStylusDown = true;
       // When Stylus-Pan Mode is ON, M-Pencil 3 ONLY scrolls/pans and never draws!
       if (_stylusPanMode) return;
+      _appStateRef.setStylusDrawingActive(true);
     } else if (event.kind == PointerDeviceKind.touch) {
-      _activeTouchPointers.add(event.pointer);
-      if (_activeTouchPointers.length >= 2) {
-        // 2nd finger down -> immediately cancel any partial 1-finger stroke & unlock pinch-zoom
+      // _activeTouchPointers is managed exclusively by the outer viewport Listener (single source of truth).
+      if (_activeTouchPointers.length >= 2 && !_isStylusDown) {
         _cancelActiveGesture();
         return;
       }
@@ -700,12 +971,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
 
     if (_activeTool == EditorTool.eraser) {
-      _pageBeforeGesture = page;
+      final latestPage = _latestPageOr(page);
+      _pageBeforeGesture = latestPage;
       _eraserChangedPage = false;
-      _workingEraseStrokes = List<Stroke>.from(page.strokes);
+      _workingEraseStrokes = List<Stroke>.from(latestPage.strokes);
       _lastEraserPoint = rawPos;
       _eraserCursorNotifier.value = rawPos;
-      _eraseAlongSegment(page, rawPos, rawPos);
+      _eraseAlongSegment(latestPage, rawPos, rawPos);
       return;
     }
 
@@ -856,12 +1128,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   void _handlePointerUp(PointerEvent event, NotePage page) {
     _pointerDownPositions.remove(event.pointer);
-    _activeTouchPointers.remove(event.pointer);
     final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus;
     _shapeHoldTimer?.cancel();
-    if (isStylusEvent) _isStylusDown = false;
-    if (_pointerDownPositions.isEmpty) _isDrawingPointerDown = false;
+    if (isStylusEvent) {
+      _isStylusDown = false;
+      _isDrawingPointerDown = false;
+      _appStateRef.setStylusDrawingActive(false);
+    } else if (_pointerDownPositions.isEmpty) {
+      _isDrawingPointerDown = false;
+    }
 
     // Multi-finger tap Undo/Redo is handled by the top-level viewport Listener
     // so InteractiveViewer never swallows it and it never triggers twice.
@@ -924,9 +1200,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       _lastEraserPoint = null;
       _erasingStrokesNotifier.value = null;
       if (_eraserChangedPage && finalStrokes != null) {
+        final latestPage = _latestPageOr(page);
         _commitPage(
-          page.copyWith(strokes: finalStrokes, updatedAt: DateTime.now()),
-          undoSnapshot: _pageBeforeGesture ?? page,
+          latestPage.copyWith(strokes: finalStrokes, updatedAt: DateTime.now()),
+          undoSnapshot: _pageBeforeGesture ?? latestPage,
+          rebuildEditor: false,
         );
       }
       _pageBeforeGesture = null;
@@ -939,6 +1217,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     if (live != null) {
       _activeStrokeNotifier.value = null;
       final appState = context.read<AppState>();
+      final latestPage = _latestPageOr(page);
 
       // Check Scribble-to-Erase (rapid zig-zag over existing strokes)
       if (appState.scribbleToErase &&
@@ -946,13 +1225,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           live.shapeType == ShapeType.none &&
           StrokeEngine.isScribbleGesture(live.points)) {
         final hitIds = StrokeEngine.findStrokesIntersectedByScribble(
-          page.strokes,
+          latestPage.strokes,
           live.points,
         );
         if (hitIds.isNotEmpty) {
           final remaining =
-              page.strokes.where((s) => !hitIds.contains(s.id)).toList();
-          _commitPage(page.copyWith(strokes: remaining), undoSnapshot: page);
+              latestPage.strokes.where((s) => !hitIds.contains(s.id)).toList();
+          _commitPage(
+            latestPage.copyWith(strokes: remaining),
+            undoSnapshot: latestPage,
+            rebuildEditor: false,
+          );
           return;
         }
       }
@@ -990,8 +1273,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       }
 
       _commitPage(
-        page.copyWith(strokes: [...page.strokes, finalized]),
-        undoSnapshot: page,
+        latestPage.copyWith(strokes: [...latestPage.strokes, finalized]),
+        undoSnapshot: latestPage,
+        rebuildEditor: false,
       );
     }
   }
@@ -3216,9 +3500,27 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 return Listener(
                   behavior: HitTestBehavior.translucent,
                   onPointerDown: (e) {
+                    final bool isStylus = e.kind == PointerDeviceKind.stylus ||
+                        e.kind == PointerDeviceKind.invertedStylus;
+                    if (isStylus) {
+                      if ((_activeTouchPointers.isNotEmpty ||
+                              _pointerDownPositions.isNotEmpty) &&
+                          (_lastTouchEventAt == null ||
+                              DateTime.now()
+                                      .difference(_lastTouchEventAt!)
+                                      .inMilliseconds >
+                                  2000)) {
+                        _activeTouchPointers.clear();
+                        _pointerDownPositions.clear();
+                      }
+                      return;
+                    }
                     if (e.kind == PointerDeviceKind.touch) {
+                      _lastTouchEventAt = DateTime.now();
+                      // A1: Ignore large resting palm contacts
+                      if (e.radiusMajor > 24.0 || e.size > 0.30) return;
                       _activeTouchPointers.add(e.pointer);
-                      if (_activeTouchPointers.length >= 2) {
+                      if (_activeTouchPointers.length >= 2 && !_isStylusDown) {
                         _cancelActiveGesture();
                       }
                       if (_tapTouchStarts.isEmpty) {
@@ -3232,17 +3534,29 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     }
                   },
                   onPointerMove: (e) {
-                    if (e.kind != PointerDeviceKind.touch || _tapMovedTooFar) {
-                      return;
-                    }
+                    if (e.kind != PointerDeviceKind.touch) return;
+                    _lastTouchEventAt = DateTime.now();
+                    if (_tapMovedTooFar) return;
                     final start = _tapTouchStarts[e.pointer];
                     if (start != null && (e.position - start).distance > 18.0) {
                       _tapMovedTooFar = true;
                     }
                   },
                   onPointerUp: (e) {
+                    if (e.kind == PointerDeviceKind.stylus ||
+                        e.kind == PointerDeviceKind.invertedStylus) {
+                      _isStylusDown = false;
+                      _isDrawingPointerDown = false;
+                      _appStateRef.setStylusDrawingActive(false);
+                      return;
+                    }
                     if (e.kind != PointerDeviceKind.touch) return;
+                    _lastTouchEventAt = DateTime.now();
                     _activeTouchPointers.remove(e.pointer);
+                    _pointerDownPositions.remove(e.pointer);
+                    if (_activeTouchPointers.isEmpty && !_isStylusDown) {
+                      _isDrawingPointerDown = false;
+                    }
                     _tapTouchStarts.remove(e.pointer);
                     if (_tapTouchStarts.isEmpty && _tapTouchStartTime != null) {
                       final elapsed = DateTime.now()
@@ -3266,8 +3580,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     }
                   },
                   onPointerCancel: (e) {
+                    if (e.kind == PointerDeviceKind.stylus ||
+                        e.kind == PointerDeviceKind.invertedStylus) {
+                      _isStylusDown = false;
+                      _isDrawingPointerDown = false;
+                      _appStateRef.setStylusDrawingActive(false);
+                      return;
+                    }
                     if (e.kind != PointerDeviceKind.touch) return;
+                    _lastTouchEventAt = DateTime.now();
                     _activeTouchPointers.remove(e.pointer);
+                    _pointerDownPositions.remove(e.pointer);
+                    if (_activeTouchPointers.isEmpty && !_isStylusDown) {
+                      _isDrawingPointerDown = false;
+                    }
                     _tapTouchStarts.remove(e.pointer);
                     if (_tapTouchStarts.isEmpty) {
                       _tapTouchStartTime = null;
@@ -3280,25 +3606,57 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     children: [
                     if (currentPage.isInfiniteWhiteboard ||
                         notebook.isWhiteboard)
-                      _buildInfiniteWhiteboardView(
-                        notebook,
-                        currentPage,
-                        currentIdx,
-                        appState,
+                      Positioned.fill(
+                        child: _buildInfiniteWhiteboardView(
+                          notebook,
+                          currentPage,
+                          currentIdx,
+                          appState,
+                        ),
                       )
                     else if (appState.verticalContinuousScroll)
-                      () {
-                        double maxPageW = 0.0;
-                        for (final p in notebook.pages) {
-                          final pw =
-                              PaperMetrics.pageSize(isLandscape: p.isLandscape)
-                                  .width;
-                          if (pw > maxPageW) maxPageW = pw;
-                        }
-                        final double contentW = maxPageW + 48.0;
-                        final double contentH =
-                            _totalVerticalContentHeight(notebook);
-                        return _StylusSafePanZoomViewport(
+                      Positioned.fill(
+                        child: () {
+                          double maxPageW = 0.0;
+                          for (final p in notebook.pages) {
+                            final pw =
+                                PaperMetrics.pageSize(isLandscape: p.isLandscape)
+                                    .width;
+                            if (pw > maxPageW) maxPageW = pw;
+                          }
+                          final double contentW = maxPageW + 48.0;
+                          final double contentH =
+                              _totalVerticalContentHeight(notebook);
+                          return _StylusSafePanZoomViewport(
+                            controller: _transformController,
+                            stylusPanMode: _stylusPanMode,
+                            allowSingleFingerPan: _stylusPanMode ||
+                                appState.readOnlyMode ||
+                                appState.palmRejectionEnabled ||
+                                _activeTool == EditorTool.panZoom,
+                            locked: _isOverlayDragging,
+                            minScale: 0.5,
+                            maxScale: 4.0,
+                            scrollSpeedMultiplier:
+                                appState.scrollSpeedMultiplier,
+                            viewportSize: vpSize,
+                            contentWidth: contentW,
+                            contentHeight: contentH,
+                            isWhiteboard: false,
+                            freePaperMovement: appState.freePaperMovement,
+                            unconstrainedChild: true,
+                            onInteractionUpdate: () =>
+                                _updatePullToAddProgress(notebook, vpSize),
+                            onInteractionEnd: () =>
+                                _finishPullToAddIfReady(notebook),
+                            onFastScrollingChanged: _onFastScrollingChanged,
+                            child: _buildVerticalContinuousPages(notebook),
+                          );
+                        }(),
+                      )
+                    else
+                      Positioned.fill(
+                        child: _StylusSafePanZoomViewport(
                           controller: _transformController,
                           stylusPanMode: _stylusPanMode,
                           allowSingleFingerPan: _stylusPanMode ||
@@ -3310,35 +3668,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                           maxScale: 4.0,
                           scrollSpeedMultiplier: appState.scrollSpeedMultiplier,
                           viewportSize: vpSize,
-                          contentWidth: contentW,
-                          contentHeight: contentH,
+                          contentWidth: vpSize.width,
+                          contentHeight: vpSize.height,
                           isWhiteboard: false,
-                          unconstrainedChild: true,
-                          onInteractionUpdate: () =>
-                              _updatePullToAddProgress(notebook, vpSize),
-                          onInteractionEnd: () =>
-                              _finishPullToAddIfReady(notebook),
-                          child: _buildVerticalContinuousPages(notebook),
-                        );
-                      }()
-                    else
-                      _StylusSafePanZoomViewport(
-                        controller: _transformController,
-                        stylusPanMode: _stylusPanMode,
-                        allowSingleFingerPan: _stylusPanMode ||
-                            appState.readOnlyMode ||
-                            appState.palmRejectionEnabled ||
-                            _activeTool == EditorTool.panZoom,
-                        locked: _isOverlayDragging,
-                        minScale: 0.5,
-                        maxScale: 4.0,
-                        scrollSpeedMultiplier: appState.scrollSpeedMultiplier,
-                        viewportSize: vpSize,
-                        contentWidth: vpSize.width,
-                        contentHeight: vpSize.height,
-                        isWhiteboard: false,
-                        unconstrainedChild: false,
-                        child: _buildHorizontalFlipPages(notebook),
+                          freePaperMovement: appState.freePaperMovement,
+                          unconstrainedChild: false,
+                          child: _buildHorizontalFlipPages(notebook),
+                        ),
                       ),
 
                     // Pull-down-to-add-new-page animated spring pill (vertical continuous mode)
@@ -3774,36 +4110,39 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
         return Stack(
           children: [
-            _StylusSafePanZoomViewport(
-              controller: _whiteboardTransformController,
-              stylusPanMode: _stylusPanMode,
-              allowSingleFingerPan: _stylusPanMode ||
-                  appState.readOnlyMode ||
-                  appState.palmRejectionEnabled ||
-                  _activeTool == EditorTool.panZoom,
-              locked: _isOverlayDragging,
-              minScale: 0.25,
-              maxScale: 4.0,
-              scrollSpeedMultiplier: appState.scrollSpeedMultiplier,
-              viewportSize: viewportSize,
-              contentWidth: PaperMetrics.whiteboardSize.width,
-              contentHeight: PaperMetrics.whiteboardSize.height,
-              isWhiteboard: true,
-              unconstrainedChild: true,
-              onInteractionUpdate: () {
-                final scale = _whiteboardTransformController.value
-                    .getMaxScaleOnAxis()
-                    .clamp(0.25, 4.0);
-                if ((scale - _whiteboardZoomNotifier.value).abs() > 0.015) {
-                  _whiteboardZoomNotifier.value = scale;
-                }
-              },
-              child: _buildSinglePageCanvas(
-                notebook,
-                page.isInfiniteWhiteboard
-                    ? page
-                    : page.copyWith(isInfiniteWhiteboard: true),
-                pageIndex,
+            Positioned.fill(
+              child: _StylusSafePanZoomViewport(
+                controller: _whiteboardTransformController,
+                stylusPanMode: _stylusPanMode,
+                allowSingleFingerPan: _stylusPanMode ||
+                    appState.readOnlyMode ||
+                    appState.palmRejectionEnabled ||
+                    _activeTool == EditorTool.panZoom,
+                locked: _isOverlayDragging,
+                minScale: 0.25,
+                maxScale: 4.0,
+                scrollSpeedMultiplier: appState.scrollSpeedMultiplier,
+                viewportSize: viewportSize,
+                contentWidth: PaperMetrics.whiteboardSize.width,
+                contentHeight: PaperMetrics.whiteboardSize.height,
+                isWhiteboard: true,
+                freePaperMovement: appState.freePaperMovement,
+                unconstrainedChild: true,
+                onInteractionUpdate: () {
+                  final scale = _whiteboardTransformController.value
+                      .getMaxScaleOnAxis()
+                      .clamp(0.25, 4.0);
+                  if ((scale - _whiteboardZoomNotifier.value).abs() > 0.015) {
+                    _whiteboardZoomNotifier.value = scale;
+                  }
+                },
+                child: _buildSinglePageCanvas(
+                  notebook,
+                  page.isInfiniteWhiteboard
+                      ? page
+                      : page.copyWith(isInfiniteWhiteboard: true),
+                  pageIndex,
+                ),
               ),
             ),
             // Floating bottom-right Về tâm (Center) + Zoom % pill
@@ -3997,14 +4336,19 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     NotePage page,
     int pageIndex,
   ) {
-    _ensurePdfImageLoaded(page.pdfBackgroundPath);
+    _ensurePdfImageLoaded(
+      page.pdfBackgroundPath,
+      pageId: page.id,
+      pageIdx: pageIndex,
+    );
     for (final img in page.imageElements) {
-      _ensureElementImageLoaded(img.filePath);
+      _ensureElementImageLoaded(img.filePath, pageId: page.id);
     }
     final pageSize = PaperMetrics.pageSize(
       isLandscape: page.isLandscape,
       isInfiniteWhiteboard: page.isInfiniteWhiteboard,
     );
+    _maybeSchedulePageSnapshot(page, pageSize);
     final bool isActivePage = pageIndex == _currentPageIndex;
     final bool isLassoOwner = _lassoController.activePageId == page.id;
 
@@ -4050,9 +4394,19 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       size: pageSize,
                       painter: CanvasPainter(
                         page: page,
+                        pageGetter: () => _latestPageOr(page),
                         pdfBackgroundImage: page.pdfBackgroundPath != null
                             ? _pdfImageCache[page.pdfBackgroundPath!]
                             : null,
+                        pdfBackgroundImageGetter: () =>
+                            page.pdfBackgroundPath != null
+                                ? _pdfImageCache[page.pdfBackgroundPath!]
+                                : null,
+                        pdfThumbnailImageGetter: () =>
+                            page.pdfBackgroundPath != null
+                                ? _pdfThumbCache[page.pdfBackgroundPath!]
+                                : null,
+                        snapshotImageGetter: () => _pageSnapshotCache[page.id],
                         elementImageCache: _elementImageCache,
                         lassoSelection: isLassoOwner
                             ? _lassoController.selection
@@ -4063,6 +4417,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         lassoDragOffset:
                             isLassoOwner ? _lassoDragOffsetNotifier : null,
                         erasingStrokesNotifier: _erasingStrokesNotifier,
+                        pageRepaintListenable: _repaintNotifierForPage(page.id),
                         hiddenImageId: _selectedImageId,
                         playingAudioId: _playingAudioId,
                         playingAudioTimeMs: _playingAudioId != null
@@ -4078,7 +4433,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                   ),
                 ),
 
-                // Layer 2 (144Hz Live Ink Overlay in its own RepaintBoundary — Zero Widget Rebuilds)
+                // Layer 2 (144Hz Live Ink Overlay — ALWAYS mounted on every visible page in ±2 window!)
                 Positioned.fill(
                   child: Listener(
                     behavior: HitTestBehavior.opaque,
@@ -4087,22 +4442,30 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     onPointerMove: (e) => _handlePointerMove(e, page),
                     onPointerUp: (e) => _handlePointerUp(e, page),
                     onPointerCancel: (e) => _handlePointerUp(e, page),
-                    child: (_activeDrawingPageId == page.id || isActivePage)
-                        ? RepaintBoundary(
-                            child: CustomPaint(
-                              size: pageSize,
-                              painter: ActiveStrokePainter(
-                                activeStroke: _activeStrokeNotifier,
-                                eraserCursor: _eraserCursorNotifier,
-                                lassoPath: _lassoPathNotifier,
-                                tapeDraftRect: _tapeDraftNotifier,
-                                isDarkPaper:
-                                    page.paperColor == PaperColorType.dark,
-                                eraserRadius: _eraserRadius,
-                              ),
-                            ),
-                          )
-                        : const SizedBox.expand(),
+                    child: RepaintBoundary(
+                      child: CustomPaint(
+                        size: pageSize,
+                        painter: _PageActiveStrokePainter(
+                          pageId: page.id,
+                          getActivePageId: () => _activeDrawingPageId,
+                          repaint: Listenable.merge([
+                            _activeStrokeNotifier,
+                            _eraserCursorNotifier,
+                            _lassoPathNotifier,
+                            _tapeDraftNotifier,
+                          ]),
+                          delegate: ActiveStrokePainter(
+                            activeStroke: _activeStrokeNotifier,
+                            eraserCursor: _eraserCursorNotifier,
+                            lassoPath: _lassoPathNotifier,
+                            tapeDraftRect: _tapeDraftNotifier,
+                            isDarkPaper:
+                                page.paperColor == PaperColorType.dark,
+                            eraserRadius: _eraserRadius,
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
 
@@ -4136,6 +4499,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                             size: pageSize,
                             painter: CanvasPainter(
                               page: page,
+                              pageGetter: () => _latestPageOr(page),
                               elementImageCache: _elementImageCache,
                               lassoSelection: isLassoOwner
                                   ? _lassoController.selection
@@ -4147,6 +4511,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                   ? _lassoDragOffsetNotifier
                                   : null,
                               erasingStrokesNotifier: _erasingStrokesNotifier,
+                              pageRepaintListenable:
+                                  _repaintNotifierForPage(page.id),
                               hiddenImageId: _selectedImageId,
                               playingAudioId: _playingAudioId,
                               playingAudioTimeMs: _playingAudioId != null
@@ -4169,26 +4535,46 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               ];
             }(),
 
-            // Interactive Image Overlays (8 handles; 6-button Pill rendered as outer Stack sibling below)
-            for (final img in page.imageElements) _buildImageOverlay(page, img),
+            // Heavy interactive overlays hidden during >500 px/s fast scrolling for locked 144Hz!
+            if (page.imageElements.isNotEmpty ||
+                page.attachmentElements.isNotEmpty ||
+                page.stencilElements.isNotEmpty ||
+                page.textElements.isNotEmpty ||
+                page.tapeElements.isNotEmpty)
+              Positioned.fill(
+                child: ValueListenableBuilder<bool>(
+                  valueListenable: _isFastScrollingNotifier,
+                  builder: (_, isFast, child) =>
+                      isFast ? const SizedBox.shrink() : child!,
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      // Interactive Image Overlays (8 handles; 6-button Pill rendered as outer Stack sibling below)
+                      for (final img in page.imageElements)
+                        _buildImageOverlay(page, img),
 
-            // Interactive Attachment Cards (DOC/PPT/PDF/Files)
-            for (final att in page.attachmentElements)
-              _buildAttachmentOverlay(page, att),
+                      // Interactive Attachment Cards (DOC/PPT/PDF/Files)
+                      for (final att in page.attachmentElements)
+                        _buildAttachmentOverlay(page, att),
 
-            // Interactive Stencil Overlays
-            for (final st in page.stencilElements)
-              _buildStencilOverlay(page, st),
+                      // Interactive Stencil Overlays
+                      for (final st in page.stencilElements)
+                        _buildStencilOverlay(page, st),
 
-            // Interactive Text Overlays (zero-lag local controller + 144fps drag)
-            for (final txt in page.textElements) _buildTextOverlay(page, txt),
+                      // Interactive Text Overlays (zero-lag local controller + 144fps drag)
+                      for (final txt in page.textElements)
+                        _buildTextOverlay(page, txt),
 
-            // 100% Opaque & Deletable Study Tape Overlays (ABOVE all strokes!)
-            for (final tape in page.tapeElements)
-              _buildStudyTapeOverlay(
-                page,
-                tape,
-                context.read<AppState>().readOnlyMode,
+                      // 100% Opaque & Deletable Study Tape Overlays (ABOVE all strokes!)
+                      for (final tape in page.tapeElements)
+                        _buildStudyTapeOverlay(
+                          page,
+                          tape,
+                          context.read<AppState>().readOnlyMode,
+                        ),
+                    ],
+                  ),
+                ),
               ),
 
             // 6-Button Floating Image Action Pill (Direct sibling in outer Stack so hit-testing works 100%!)
@@ -6748,9 +7134,11 @@ class _StylusSafePanZoomViewport extends StatefulWidget {
   final double contentWidth;
   final double contentHeight;
   final bool isWhiteboard;
+  final bool freePaperMovement;
   final bool unconstrainedChild;
   final VoidCallback? onInteractionUpdate;
   final VoidCallback? onInteractionEnd;
+  final ValueChanged<bool>? onFastScrollingChanged;
   final Widget child;
 
   const _StylusSafePanZoomViewport({
@@ -6765,9 +7153,11 @@ class _StylusSafePanZoomViewport extends StatefulWidget {
     required this.contentWidth,
     required this.contentHeight,
     required this.isWhiteboard,
+    this.freePaperMovement = false,
     required this.unconstrainedChild,
     this.onInteractionUpdate,
     this.onInteractionEnd,
+    this.onFastScrollingChanged,
     required this.child,
   });
 
@@ -6776,10 +7166,19 @@ class _StylusSafePanZoomViewport extends StatefulWidget {
       _StylusSafePanZoomViewportState();
 }
 
-class _StylusSafePanZoomViewportState
-    extends State<_StylusSafePanZoomViewport> {
+class _StylusSafePanZoomViewportState extends State<_StylusSafePanZoomViewport>
+    with SingleTickerProviderStateMixin {
   double _startScale = 1.0;
   Offset _lastFocal = Offset.zero;
+  int _lastPointerCount = 0;
+
+  late final AnimationController _flingController;
+  double _lastFlingDist = 0.0;
+  double _flingDirX = 0.0;
+  double _flingDirY = 0.0;
+  DateTime? _lastMotionSampleAt;
+  bool _isFastScrolling = false;
+  Timer? _fastScrollIdleTimer;
 
   static const Set<PointerDeviceKind> _touchOnlyDevices = {
     PointerDeviceKind.touch,
@@ -6794,7 +7193,151 @@ class _StylusSafePanZoomViewportState
     PointerDeviceKind.trackpad,
   };
 
+  void _setFastScrolling(bool value) {
+    if (_isFastScrolling == value) return;
+    _isFastScrolling = value;
+    widget.onFastScrollingChanged?.call(value);
+  }
+
+  void _scheduleFastScrollStop() {
+    _fastScrollIdleTimer?.cancel();
+    _fastScrollIdleTimer = Timer(const Duration(milliseconds: 110), () {
+      if (mounted) _setFastScrolling(false);
+    });
+  }
+
+  void _recordMotionSpeed(double deltaPx) {
+    final now = DateTime.now();
+    final prev = _lastMotionSampleAt;
+    _lastMotionSampleAt = now;
+    if (prev == null) return;
+    final int dtMs = math.max(1, now.difference(prev).inMilliseconds);
+    final double speedPxPerSec = (deltaPx * 1000.0) / dtMs;
+    if (speedPxPerSec > 500.0) {
+      _fastScrollIdleTimer?.cancel();
+      _setFastScrolling(true);
+    } else if (speedPxPerSec < 120.0 && _isFastScrolling) {
+      _scheduleFastScrollStop();
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _flingController = AnimationController.unbounded(vsync: this)
+      ..addListener(_onFlingTick);
+  }
+
+  @override
+  void dispose() {
+    _fastScrollIdleTimer?.cancel();
+    _flingController.removeListener(_onFlingTick);
+    _flingController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant _StylusSafePanZoomViewport oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.freePaperMovement != widget.freePaperMovement ||
+        oldWidget.viewportSize != widget.viewportSize) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final Matrix4 cur = widget.controller.value;
+        final double scale =
+            cur.getMaxScaleOnAxis().clamp(widget.minScale, widget.maxScale);
+        final Offset clamped = _clampTranslation(
+          cur.getTranslation().x,
+          cur.getTranslation().y,
+          scale,
+        );
+        if ((clamped.dx - cur.getTranslation().x).abs() > 0.5 ||
+            (clamped.dy - cur.getTranslation().y).abs() > 0.5) {
+          widget.controller.value = Matrix4.identity()
+            ..translate(clamped.dx, clamped.dy)
+            ..scale(scale, scale);
+          widget.onInteractionUpdate?.call();
+        }
+      });
+    }
+  }
+
+  /// Clamps translation according to `isWhiteboard` and `freePaperMovement`:
+  /// - Whiteboard: free panning as-is.
+  /// - `freePaperMovement == false`: dead-centered horizontally when unzoomed,
+  ///   clamped to page edges when zoomed; vertical bounded to `[minTy, 24.0]`.
+  /// - `freePaperMovement == true`: 4-way free movement with dark viewport padding.
+  Offset _clampTranslation(double tx, double ty, double scale) {
+    if (widget.isWhiteboard || widget.viewportSize.width <= 0) {
+      return Offset(tx, ty);
+    }
+
+    final double scaledW = widget.contentWidth * scale;
+    final double scaledH = widget.contentHeight * scale;
+
+    if (!widget.freePaperMovement) {
+      final double clampedTx = scaledW <= widget.viewportSize.width
+          ? (widget.viewportSize.width - scaledW) * 0.5
+          : tx.clamp(widget.viewportSize.width - scaledW, 0.0).toDouble();
+      final double minTy =
+          math.min(0.0, widget.viewportSize.height - scaledH) - 100.0;
+      final double clampedTy = ty.clamp(minTy, 24.0).toDouble();
+      return Offset(clampedTx, clampedTy);
+    }
+
+    final double padX = widget.viewportSize.width * 0.45;
+    final double padTop = widget.viewportSize.height * 0.40;
+    final double padBottom = widget.viewportSize.height * 0.45;
+    final double rawMinTx = widget.viewportSize.width - scaledW - padX;
+    final double rawMaxTx = padX;
+    final double clampedTx = tx
+        .clamp(math.min(rawMinTx, rawMaxTx), math.max(rawMinTx, rawMaxTx))
+        .toDouble();
+    final double minTy =
+        math.min(0.0, widget.viewportSize.height - scaledH) - padBottom;
+    final double clampedTy = ty.clamp(minTy, padTop).toDouble();
+    return Offset(clampedTx, clampedTy);
+  }
+
+  void _onFlingTick() {
+    if (!mounted || widget.locked) {
+      _flingController.stop();
+      return;
+    }
+    final double curDist = _flingController.value;
+    final double deltaDist = curDist - _lastFlingDist;
+    _lastFlingDist = curDist;
+    if (deltaDist.abs() < 0.01) return;
+
+    final Matrix4 cur = widget.controller.value;
+    final double scale =
+        cur.getMaxScaleOnAxis().clamp(widget.minScale, widget.maxScale);
+    final double curTx = cur.getTranslation().x;
+    final double curTy = cur.getTranslation().y;
+    final Offset next = _clampTranslation(
+      curTx + _flingDirX * deltaDist,
+      curTy + _flingDirY * deltaDist,
+      scale,
+    );
+
+    if ((next.dx - curTx).abs() < 0.05 && (next.dy - curTy).abs() < 0.05) {
+      _flingController.stop();
+      _scheduleFastScrollStop();
+      return;
+    }
+
+    _recordMotionSpeed(deltaDist.abs());
+    widget.controller.value = Matrix4.identity()
+      ..translate(next.dx, next.dy)
+      ..scale(scale, scale);
+    widget.onInteractionUpdate?.call();
+  }
+
   void _onScaleStart(ScaleStartDetails details) {
+    _flingController.stop();
+    _fastScrollIdleTimer?.cancel();
+    _lastMotionSampleAt = DateTime.now();
+    _lastPointerCount = details.pointerCount;
     _startScale = widget.controller.value
         .getMaxScaleOnAxis()
         .clamp(widget.minScale, widget.maxScale);
@@ -6803,6 +7346,7 @@ class _StylusSafePanZoomViewportState
 
   void _onScaleUpdate(ScaleUpdateDetails details) {
     if (widget.locked) return;
+    _lastPointerCount = details.pointerCount;
     if (!widget.allowSingleFingerPan && details.pointerCount < 2) {
       _lastFocal = details.localFocalPoint;
       return;
@@ -6826,37 +7370,46 @@ class _StylusSafePanZoomViewportState
       final double mult = widget.scrollSpeedMultiplier.clamp(0.8, 3.0);
       newTx = curTx + focalDelta.dx * mult;
       newTy = curTy + focalDelta.dy * mult;
+      _recordMotionSpeed(focalDelta.distance * mult);
     } else {
       newScale =
           (_startScale * details.scale).clamp(widget.minScale, widget.maxScale);
       final double ratio = curScale > 0.0001 ? (newScale / curScale) : 1.0;
       newTx = focal.dx - (focal.dx - curTx) * ratio + focalDelta.dx;
       newTy = focal.dy - (focal.dy - curTy) * ratio + focalDelta.dy;
+      _recordMotionSpeed(focalDelta.distance);
     }
 
-    // Lock horizontal scroll when not zoomed in wider than viewport (zero sideways drift!)
-    if (!widget.isWhiteboard && widget.viewportSize.width > 0) {
-      final double scaledW = widget.contentWidth * newScale;
-      if (scaledW <= widget.viewportSize.width + 2.0) {
-        newTx = (widget.viewportSize.width - scaledW) * 0.5;
-      } else {
-        final double minTx = widget.viewportSize.width - scaledW;
-        newTx = newTx.clamp(minTx, 0.0);
-      }
-
-      final double scaledH = widget.contentHeight * newScale;
-      final double minTy = math.min(0.0, widget.viewportSize.height - scaledH);
-      newTy = newTy.clamp(minTy - 140.0, 20.0);
-    }
-
+    final Offset clamped = _clampTranslation(newTx, newTy, newScale);
     widget.controller.value = Matrix4.identity()
-      ..translate(newTx, newTy)
+      ..translate(clamped.dx, clamped.dy)
       ..scale(newScale, newScale);
     widget.onInteractionUpdate?.call();
   }
 
   void _onScaleEnd(ScaleEndDetails details) {
     widget.onInteractionEnd?.call();
+    if (widget.locked ||
+        (!widget.allowSingleFingerPan && _lastPointerCount < 2)) {
+      _scheduleFastScrollStop();
+      return;
+    }
+
+    final Offset vel = details.velocity.pixelsPerSecond;
+    final double rawSpeed = vel.distance;
+    if (rawSpeed > 120.0) {
+      _flingDirX = vel.dx / rawSpeed;
+      _flingDirY = vel.dy / rawSpeed;
+      _lastFlingDist = 0.0;
+      final double mult = widget.scrollSpeedMultiplier.clamp(0.8, 3.0);
+      final double launchSpeed = (rawSpeed * mult).clamp(0.0, 4200.0);
+      if (launchSpeed > 500.0) _setFastScrolling(true);
+      _flingController
+          .animateWith(FrictionSimulation(0.05, 0.0, launchSpeed))
+          .whenCompleteOrCancel(_scheduleFastScrollStop);
+    } else {
+      _scheduleFastScrollStop();
+    }
   }
 
   @override
@@ -6869,10 +7422,11 @@ class _StylusSafePanZoomViewportState
         key: ValueKey<bool>(widget.stylusPanMode),
         behavior: HitTestBehavior.translucent,
         gestures: <Type, GestureRecognizerFactory>{
-          ScaleGestureRecognizer:
-              GestureRecognizerFactoryWithHandlers<ScaleGestureRecognizer>(
-            () => ScaleGestureRecognizer(supportedDevices: devices),
-            (ScaleGestureRecognizer instance) {
+          _PalmSafeScaleGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<
+                  _PalmSafeScaleGestureRecognizer>(
+            () => _PalmSafeScaleGestureRecognizer(supportedDevices: devices),
+            (_PalmSafeScaleGestureRecognizer instance) {
               instance
                 ..onStart = _onScaleStart
                 ..onUpdate = _onScaleUpdate
@@ -6887,20 +7441,62 @@ class _StylusSafePanZoomViewportState
             alignment: Alignment.topLeft,
             child: child,
           ),
-          // UnconstrainedBox + explicit SizedBox preserves full hit-testing across all pages!
+          // Fixed-size OverflowBox prevents zoom-out rightward shift while keeping full hit-testing!
           child: widget.unconstrainedChild
-              ? UnconstrainedBox(
+              ? OverflowBox(
+                  minWidth: widget.contentWidth,
+                  maxWidth: widget.contentWidth,
+                  minHeight: widget.contentHeight,
+                  maxHeight: widget.contentHeight,
                   alignment: Alignment.topLeft,
-                  clipBehavior: Clip.none,
-                  child: SizedBox(
-                    width: widget.contentWidth,
-                    height: widget.contentHeight,
-                    child: widget.child,
-                  ),
+                  child: widget.child,
                 )
               : widget.child,
         ),
       ),
     );
+  }
+}
+
+/// Palm-safe [ScaleGestureRecognizer] that rejects resting palm touch contacts
+/// (`radiusMajor > 24.0 || size > 0.30`) before they enter the gesture arena.
+class _PalmSafeScaleGestureRecognizer extends ScaleGestureRecognizer {
+  _PalmSafeScaleGestureRecognizer({super.supportedDevices});
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    if (event.kind == PointerDeviceKind.touch &&
+        (event.radiusMajor > 24.0 || event.size > 0.30)) {
+      return;
+    }
+    super.addAllowedPointer(event);
+  }
+}
+
+/// Page-scoped wrapper around [ActiveStrokePainter] so every visible page in the
+/// ±2 virtualization window always keeps its live ink layer mounted without
+/// needing `setState()` when moving the stylus to a newly scrolled-to page.
+class _PageActiveStrokePainter extends CustomPainter {
+  final String pageId;
+  final String? Function() getActivePageId;
+  final ActiveStrokePainter delegate;
+
+  _PageActiveStrokePainter({
+    required this.pageId,
+    required this.getActivePageId,
+    required Listenable repaint,
+    required this.delegate,
+  }) : super(repaint: repaint);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (getActivePageId() != pageId) return;
+    delegate.paint(canvas, size);
+  }
+
+  @override
+  bool shouldRepaint(covariant _PageActiveStrokePainter oldDelegate) {
+    return oldDelegate.pageId != pageId ||
+        delegate.shouldRepaint(oldDelegate.delegate);
   }
 }

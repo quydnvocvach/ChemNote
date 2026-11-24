@@ -160,16 +160,16 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.5.2 with APK
+      - name: Publish Release v3.6.0 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.5.2
-          name: ChemNote Pro v3.5.2 (Hotfix Nhận bút M-Pencil 3, Khóa cuộn ngang & Chống văng app nhiều trang)
+          tag_name: v3.6.0
+          name: ChemNote Pro v3.6.0 (Chuẩn mực 144Hz MatePad 11.5"S — M-Pencil 3 & Đồng bộ Assets)
           body: |
-            ### ChemNote Pro v3.5.2 — Bản sửa nóng ổn định tuyệt đối cho Huawei MatePad 11.5"S!
-            - **Sửa triệt để lỗi không nhận bút cảm ứng M-Pencil 3:** Thay `OverflowBox` bằng `UnconstrainedBox` + `SizedBox` giúp hit-test chính xác 100% ở mọi mức zoom/cuộn và luôn nhận sự kiện bút cảm ứng trực tiếp không bị lọc nhầm.
-            - **Khóa cứng cuộn ngang khi chưa zoom to:** Khi trang đang vừa màn hình, chỉ cuộn dọc mượt mà theo trục đứng (căn giữa tuyệt đối, không trôi ngang); chỉ cho phép kéo ngang khi đã zoom phóng to hoặc dùng Bảng trắng vô cực.
-            - **Ảo hóa trang (±2 trang hiển thị) chống lag & văng app (OOM):** Chỉ cấp phát GPU texture cho tối đa 5 trang quanh trang đang xem, giữ RAM/VRAM nhẹ tênh dù sổ tay có hàng chục/hàng trăm trang!
+            ### ChemNote Pro v3.6.0 — Bản nâng cấp toàn diện hiệu năng 144Hz & độ ổn định cho Huawei MatePad 11.5"S!
+            - **Sửa triệt để lỗi đơ/mất bút cảm ứng sau khi cuộn ngón tay & Chống tỳ tay chuẩn mực:** Gắn `ActiveStrokePainter` trên mọi trang hiển thị, tự làm sạch bộ đếm chạm ngón tay, hạ độ trễ hover xuống `280ms`, chống chạm lòng bàn tay ngay trong `ScaleGestureRecognizer`, và chống kích đúp phím thân bút M-Pencil 3 (`450ms`).
+            - **Khung trang & Zoom/Fling siêu mượt 144Hz:** Sửa lệch trang khi thu nhỏ, nối hoàn chỉnh tùy chọn "Chuyển động giấy tự do", khóa tâm zoom 2 ngón + quán tính `FrictionSimulation`, và cô lập vẽ lại từng trang (`_pageRepaintNotifiers`) + LRU cache ảnh/PDF (`targetWidth: 1600`).
+            - **An toàn dữ liệu & Đồng bộ đa thiết bị:** Tự động lưu ngay khi ẩn app (`WidgetsBindingObserver`), dọn tệp mồ côi khi xóa vĩnh viễn sổ, hỗ trợ Lasso cho Giấy nhớ & Tệp đính kèm, tự dừng ghi âm an toàn khi đổi tab, tùy chọn tắt/bật tự xuất PDF khi đồng bộ (tự bỏ qua sổ >30 trang), và đồng bộ tăng dần thư mục `ChemNote_Backups/Assets/` trên Google Drive!
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

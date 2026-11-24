@@ -10,6 +10,8 @@ class LassoSelection {
   final Set<String> textIds;
   final Set<String> imageIds;
   final Set<String> tapeIds;
+  final Set<String> stickyNoteIds;
+  final Set<String> attachmentIds;
 
   const LassoSelection({
     this.strokeIds = const {},
@@ -17,6 +19,8 @@ class LassoSelection {
     this.textIds = const {},
     this.imageIds = const {},
     this.tapeIds = const {},
+    this.stickyNoteIds = const {},
+    this.attachmentIds = const {},
   });
 
   bool get isEmpty =>
@@ -24,7 +28,9 @@ class LassoSelection {
       stencilIds.isEmpty &&
       textIds.isEmpty &&
       imageIds.isEmpty &&
-      tapeIds.isEmpty;
+      tapeIds.isEmpty &&
+      stickyNoteIds.isEmpty &&
+      attachmentIds.isEmpty;
 
   bool get isNotEmpty => !isEmpty;
 
@@ -33,7 +39,9 @@ class LassoSelection {
       stencilIds.length +
       textIds.length +
       imageIds.length +
-      tapeIds.length;
+      tapeIds.length +
+      stickyNoteIds.length +
+      attachmentIds.length;
 
   LassoSelection copyWith({
     Set<String>? strokeIds,
@@ -41,6 +49,8 @@ class LassoSelection {
     Set<String>? textIds,
     Set<String>? imageIds,
     Set<String>? tapeIds,
+    Set<String>? stickyNoteIds,
+    Set<String>? attachmentIds,
   }) {
     return LassoSelection(
       strokeIds: strokeIds ?? this.strokeIds,
@@ -48,6 +58,8 @@ class LassoSelection {
       textIds: textIds ?? this.textIds,
       imageIds: imageIds ?? this.imageIds,
       tapeIds: tapeIds ?? this.tapeIds,
+      stickyNoteIds: stickyNoteIds ?? this.stickyNoteIds,
+      attachmentIds: attachmentIds ?? this.attachmentIds,
     );
   }
 }
@@ -59,6 +71,8 @@ class LassoClipboard {
   final List<TextElement> texts;
   final List<ImageElement> images;
   final List<TapeElement> tapes;
+  final List<StickyNoteElement> stickyNotes;
+  final List<AttachmentElement> attachments;
 
   const LassoClipboard({
     this.strokes = const [],
@@ -66,6 +80,8 @@ class LassoClipboard {
     this.texts = const [],
     this.images = const [],
     this.tapes = const [],
+    this.stickyNotes = const [],
+    this.attachments = const [],
   });
 
   bool get isEmpty =>
@@ -73,7 +89,9 @@ class LassoClipboard {
       stencils.isEmpty &&
       texts.isEmpty &&
       images.isEmpty &&
-      tapes.isEmpty;
+      tapes.isEmpty &&
+      stickyNotes.isEmpty &&
+      attachments.isEmpty;
 
   bool get isNotEmpty => !isEmpty;
 }
@@ -134,6 +152,8 @@ class LassoController extends ChangeNotifier {
     final selectedTexts = <String>{};
     final selectedImages = <String>{};
     final selectedTapes = <String>{};
+    final selectedStickyNotes = <String>{};
+    final selectedAttachments = <String>{};
 
     for (final stroke in page.strokes) {
       if (stroke.points.isEmpty) continue;
@@ -189,12 +209,30 @@ class LassoController extends ChangeNotifier {
       }
     }
 
+    for (final sticky in page.stickyNotes) {
+      final double sw = sticky.isCollapsed ? math.min(sticky.width, 210.0) : sticky.width;
+      final double sh = sticky.isCollapsed ? 40.0 : sticky.height;
+      final center = Offset(sticky.x + sw * 0.5, sticky.y + sh * 0.5);
+      if (isPointInPolygon(center, _lassoPath)) {
+        selectedStickyNotes.add(sticky.id);
+      }
+    }
+
+    for (final att in page.attachmentElements) {
+      final center = Offset(att.x + att.width * 0.5, att.y + att.height * 0.5);
+      if (isPointInPolygon(center, _lassoPath)) {
+        selectedAttachments.add(att.id);
+      }
+    }
+
     _selection = LassoSelection(
       strokeIds: selectedStrokes,
       stencilIds: selectedStencils,
       textIds: selectedTexts,
       imageIds: selectedImages,
       tapeIds: selectedTapes,
+      stickyNoteIds: selectedStickyNotes,
+      attachmentIds: selectedAttachments,
     );
 
     _lassoPath.clear();
@@ -288,6 +326,18 @@ class LassoController extends ChangeNotifier {
       includeRect(tape.x, tape.y, tape.width, tape.height);
     }
 
+    for (final sticky in page.stickyNotes) {
+      if (!sel.stickyNoteIds.contains(sticky.id)) continue;
+      final double sw = sticky.isCollapsed ? math.min(sticky.width, 210.0) : sticky.width;
+      final double sh = sticky.isCollapsed ? 40.0 : sticky.height;
+      includeRect(sticky.x, sticky.y, sw, sh);
+    }
+
+    for (final att in page.attachmentElements) {
+      if (!sel.attachmentIds.contains(att.id)) continue;
+      includeRect(att.x, att.y, att.width, att.height);
+    }
+
     if (!minX.isFinite || !minY.isFinite) return null;
     return Rect.fromLTRB(minX, minY, maxX, maxY).inflate(8.0);
   }
@@ -310,6 +360,12 @@ class LassoController extends ChangeNotifier {
           .toList(),
       tapes: page.tapeElements
           .where((tp) => _selection.tapeIds.contains(tp.id))
+          .toList(),
+      stickyNotes: page.stickyNotes
+          .where((sn) => _selection.stickyNoteIds.contains(sn.id))
+          .toList(),
+      attachments: page.attachmentElements
+          .where((att) => _selection.attachmentIds.contains(att.id))
           .toList(),
     );
     notifyListeners();
@@ -334,6 +390,8 @@ class LassoController extends ChangeNotifier {
     final newTextIds = <String>{};
     final newImageIds = <String>{};
     final newTapeIds = <String>{};
+    final newStickyNoteIds = <String>{};
+    final newAttachmentIds = <String>{};
 
     final addedStrokes = _clipboard.strokes.map((s) {
       final id = idGenerator();
@@ -370,12 +428,31 @@ class LassoController extends ChangeNotifier {
       return tp.copyWith(id: id, x: tp.x + offset.dx, y: tp.y + offset.dy);
     }).toList();
 
+    final addedStickyNotes = _clipboard.stickyNotes.map((sn) {
+      final id = idGenerator();
+      newStickyNoteIds.add(id);
+      return sn.copyWith(
+        id: id,
+        x: sn.x + offset.dx,
+        y: sn.y + offset.dy,
+        updatedAt: DateTime.now(),
+      );
+    }).toList();
+
+    final addedAttachments = _clipboard.attachments.map((att) {
+      final id = idGenerator();
+      newAttachmentIds.add(id);
+      return att.copyWith(id: id, x: att.x + offset.dx, y: att.y + offset.dy);
+    }).toList();
+
     final updatedPage = page.copyWith(
       strokes: [...page.strokes, ...addedStrokes],
       stencilElements: [...page.stencilElements, ...addedStencils],
       textElements: [...page.textElements, ...addedTexts],
       imageElements: [...page.imageElements, ...addedImages],
       tapeElements: [...page.tapeElements, ...addedTapes],
+      stickyNotes: [...page.stickyNotes, ...addedStickyNotes],
+      attachmentElements: [...page.attachmentElements, ...addedAttachments],
       updatedAt: DateTime.now(),
     );
 
@@ -386,6 +463,8 @@ class LassoController extends ChangeNotifier {
       textIds: newTextIds,
       imageIds: newImageIds,
       tapeIds: newTapeIds,
+      stickyNoteIds: newStickyNoteIds,
+      attachmentIds: newAttachmentIds,
     );
     _selectionBounds = computeBounds(updatedPage, _selection);
     notifyListeners();
@@ -425,12 +504,24 @@ class LassoController extends ChangeNotifier {
       return tp.copyWith(x: tp.x + delta.dx, y: tp.y + delta.dy);
     }).toList();
 
+    final updatedStickyNotes = page.stickyNotes.map((sn) {
+      if (!_selection.stickyNoteIds.contains(sn.id)) return sn;
+      return sn.copyWith(x: sn.x + delta.dx, y: sn.y + delta.dy);
+    }).toList();
+
+    final updatedAttachments = page.attachmentElements.map((att) {
+      if (!_selection.attachmentIds.contains(att.id)) return att;
+      return att.copyWith(x: att.x + delta.dx, y: att.y + delta.dy);
+    }).toList();
+
     final updatedPage = page.copyWith(
       strokes: updatedStrokes,
       stencilElements: updatedStencils,
       textElements: updatedTexts,
       imageElements: updatedImages,
       tapeElements: updatedTapes,
+      stickyNotes: updatedStickyNotes,
+      attachmentElements: updatedAttachments,
       updatedAt: DateTime.now(),
     );
 
@@ -503,12 +594,34 @@ class LassoController extends ChangeNotifier {
       );
     }).toList();
 
+    final updatedStickyNotes = page.stickyNotes.map((sn) {
+      if (!_selection.stickyNoteIds.contains(sn.id)) return sn;
+      return sn.copyWith(
+        x: origin.dx + (sn.x - origin.dx) * clampedScale,
+        y: origin.dy + (sn.y - origin.dy) * clampedScale,
+        width: math.max(140.0, sn.width * clampedScale),
+        height: math.max(110.0, sn.height * clampedScale),
+      );
+    }).toList();
+
+    final updatedAttachments = page.attachmentElements.map((att) {
+      if (!_selection.attachmentIds.contains(att.id)) return att;
+      return att.copyWith(
+        x: origin.dx + (att.x - origin.dx) * clampedScale,
+        y: origin.dy + (att.y - origin.dy) * clampedScale,
+        width: math.max(140.0, att.width * clampedScale),
+        height: math.max(48.0, att.height * clampedScale),
+      );
+    }).toList();
+
     final updatedPage = page.copyWith(
       strokes: updatedStrokes,
       stencilElements: updatedStencils,
       textElements: updatedTexts,
       imageElements: updatedImages,
       tapeElements: updatedTapes,
+      stickyNotes: updatedStickyNotes,
+      attachmentElements: updatedAttachments,
       updatedAt: DateTime.now(),
     );
 
@@ -645,6 +758,12 @@ class LassoController extends ChangeNotifier {
           .toList(),
       tapeElements: page.tapeElements
           .where((tp) => !_selection.tapeIds.contains(tp.id))
+          .toList(),
+      stickyNotes: page.stickyNotes
+          .where((sn) => !_selection.stickyNoteIds.contains(sn.id))
+          .toList(),
+      attachmentElements: page.attachmentElements
+          .where((att) => !_selection.attachmentIds.contains(att.id))
           .toList(),
       updatedAt: DateTime.now(),
     );

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
@@ -69,6 +70,7 @@ class GoogleDriveService {
   static const String appFolderName = 'ChemNote_Backups';
   static const String jsonFolderName = 'JSON';
   static const String pdfFolderName = 'PDF';
+  static const String assetsFolderName = 'Assets';
   static const String _driveFilesBase =
       'https://www.googleapis.com/drive/v3/files';
   static const String _driveUploadBase =
@@ -81,10 +83,13 @@ class GoogleDriveService {
   String? _cachedFolderId;
   String? _cachedJsonFolderId;
   String? _cachedPdfFolderId;
+  String? _cachedAssetsFolderId;
 
   // Kho lưu trữ mô phỏng trong bộ nhớ khi hoạt động ở Chế độ Demo.
   final Map<String, Notebook> _demoRemoteStore = <String, Notebook>{};
   final Map<String, Uint8List> _demoRemotePdfStore = <String, Uint8List>{};
+  final Map<String, Uint8List> _demoRemoteAssetStore = <String, Uint8List>{};
+  final Map<String, String> _demoRemoteAssetIds = <String, String>{};
 
   /// Làm sạch tên sổ tay cho Google Drive (giữ nguyên tiếng Việt có dấu, loại ký tự cấm).
   static String _sanitizeDriveTitle(String title) {
@@ -171,6 +176,153 @@ class GoogleDriveService {
     _cachedPdfFolderId =
         await _ensureFolder(name: pdfFolderName, parentId: rootId);
     return _cachedPdfFolderId!;
+  }
+
+  /// Tìm hoặc tạo thư mục con `ChemNote_Backups/Assets` chứa ảnh & trang PDF nền đồng bộ tăng dần.
+  Future<String> ensureAssetsFolder() async {
+    if (_authService.isDemoMode) {
+      _cachedAssetsFolderId = 'demo_folder_chemnote_assets';
+      return _cachedAssetsFolderId!;
+    }
+    if (_cachedAssetsFolderId != null && _cachedAssetsFolderId!.isNotEmpty) {
+      return _cachedAssetsFolderId!;
+    }
+    final rootId = await ensureAppFolder();
+    _cachedAssetsFolderId =
+        await _ensureFolder(name: assetsFolderName, parentId: rootId);
+    return _cachedAssetsFolderId!;
+  }
+
+  /// Liệt kê các tệp tài nguyên hiện có trong `ChemNote_Backups/Assets/` dạng `fileName -> driveFileId`.
+  Future<Map<String, String>> listRemoteAssetFiles() async {
+    if (_authService.isDemoMode) {
+      return Map<String, String>.from(_demoRemoteAssetIds);
+    }
+
+    final assetsFolderId = await ensureAssetsFolder();
+    final headers = await _authHeaders();
+    final result = <String, String>{};
+    String? pageToken;
+
+    do {
+      final uri = Uri.parse(_driveFilesBase).replace(
+        queryParameters: <String, String>{
+          'q': "'$assetsFolderId' in parents and trashed = false",
+          'spaces': 'drive',
+          'fields': 'nextPageToken, files(id, name)',
+          'pageSize': '500',
+          if (pageToken != null) 'pageToken': pageToken,
+        },
+      );
+      final response = await _httpClient.get(uri, headers: headers);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw GoogleDriveException(
+          'Không thể liệt kê thư mục Assets trên Drive (${response.statusCode}).',
+          statusCode: response.statusCode,
+        );
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final files = data['files'] as List<dynamic>? ?? const [];
+      for (final raw in files) {
+        final map = raw as Map<String, dynamic>;
+        final id = map['id'] as String?;
+        final name = map['name'] as String?;
+        if (id != null && name != null && name.isNotEmpty) {
+          result[name] = id;
+        }
+      }
+      pageToken = data['nextPageToken'] as String?;
+    } while (pageToken != null && pageToken.isNotEmpty);
+
+    return result;
+  }
+
+  /// Tải lên tệp tài nguyên (ảnh / trang PDF nền) vào `ChemNote_Backups/Assets/` nếu chưa có trên Drive.
+  /// Trả về `driveFileId` nếu vừa tải lên, hoặc `null` nếu đã tồn tại / tệp cục bộ không có.
+  Future<String?> uploadAssetFileIfMissing(
+    File localFile,
+    String fileName,
+    Set<String> existingNames,
+  ) async {
+    if (fileName.isEmpty || existingNames.contains(fileName)) {
+      return null;
+    }
+    if (!await localFile.exists()) {
+      return null;
+    }
+
+    final bytes = await localFile.readAsBytes();
+    if (bytes.isEmpty) return null;
+
+    if (_authService.isDemoMode) {
+      final id = 'demo_asset_$fileName';
+      _demoRemoteAssetIds[fileName] = id;
+      _demoRemoteAssetStore[id] = bytes;
+      existingNames.add(fileName);
+      return id;
+    }
+
+    final assetsFolderId = await ensureAssetsFolder();
+    final mimeType = _inferAssetMimeType(fileName);
+    final metadata = <String, dynamic>{
+      'name': fileName,
+      'mimeType': mimeType,
+      'parents': <String>[assetsFolderId],
+    };
+
+    final driveId = await _multipartUploadBytes(
+      metadata: metadata,
+      contentBytes: bytes,
+      contentMimeType: mimeType,
+      existingFileId: null,
+      errorLabel: 'tài nguyên "$fileName"',
+    );
+    existingNames.add(fileName);
+    return driveId;
+  }
+
+  /// Tải xuống tệp tài nguyên nhị phân từ `ChemNote_Backups/Assets/` về đường dẫn cục bộ `destPath`.
+  Future<File> downloadAssetFile(String driveFileId, String destPath) async {
+    final destFile = File(destPath);
+    if (!await destFile.parent.exists()) {
+      await destFile.parent.create(recursive: true);
+    }
+
+    if (_authService.isDemoMode) {
+      final bytes = _demoRemoteAssetStore[driveFileId];
+      if (bytes == null) {
+        throw const GoogleDriveException(
+          'Không tìm thấy tệp tài nguyên trong bộ nhớ Demo.',
+          statusCode: 404,
+        );
+      }
+      await destFile.writeAsBytes(bytes, flush: true);
+      return destFile;
+    }
+
+    final uri = Uri.parse('$_driveFilesBase/$driveFileId').replace(
+      queryParameters: const <String, String>{'alt': 'media'},
+    );
+    final response = await _httpClient.get(uri, headers: await _authHeaders());
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw GoogleDriveException(
+        'Không thể tải tệp tài nguyên từ Drive (${response.statusCode}).',
+        statusCode: response.statusCode,
+      );
+    }
+
+    await destFile.writeAsBytes(response.bodyBytes, flush: true);
+    return destFile;
+  }
+
+  String _inferAssetMimeType(String fileName) {
+    final lower = fileName.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.pdf')) return 'application/pdf';
+    return 'application/octet-stream';
   }
 
   Future<String> _ensureFolder({
@@ -486,5 +638,6 @@ class GoogleDriveService {
     _cachedFolderId = null;
     _cachedJsonFolderId = null;
     _cachedPdfFolderId = null;
+    _cachedAssetsFolderId = null;
   }
 }

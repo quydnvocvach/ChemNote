@@ -55,6 +55,11 @@ class PdfImportService {
   /// Độ phân giải mặc định 132 DPI: sắc nét khi đọc slide/giáo trình nhưng nhanh hơn 2.5–3× so với 200+ DPI.
   static const double defaultPdfDpi = 132.0;
 
+  /// Đường dẫn chuẩn cho ảnh thu nhỏ (thumbnail) đi kèm trang PDF đã kết xuất.
+  /// Giữ `importPdfBytes` 1 lượt raster 132 DPI cực nhanh; editor giải mã thumbnail `targetWidth: 320` trực tiếp từ PNG gốc (< 3ms).
+  static String thumbnailPathForPdfPage(String pageImagePath) =>
+      '$pageImagePath.thumb.png';
+
   final Uuid _uuid;
   final Directory? _overrideBaseDir;
 

@@ -88,6 +88,7 @@ class AppState extends ChangeNotifier {
   int _foregroundSyncMinutes = 15; // 0 (thủ công), 5, 15, 45, 120
   int _idleSyncDays = 1; // 0 (tắt), 1, 3, 5
   bool _wifiOnlySync = true;
+  bool _autoExportPdfOnSync = true;
 
   // Chế độ Khoá lòng bàn tay (Chống tỳ tay: Bút viết, 1 ngón tay cuộn trang)
   bool _palmRejectionEnabled = true;
@@ -167,6 +168,7 @@ class AppState extends ChangeNotifier {
   int get foregroundSyncMinutes => _foregroundSyncMinutes;
   int get idleSyncDays => _idleSyncDays;
   bool get wifiOnlySync => _wifiOnlySync;
+  bool get autoExportPdfOnSync => _autoExportPdfOnSync;
   bool get palmRejectionEnabled => _palmRejectionEnabled;
   bool get readOnlyMode => _readOnlyMode;
 
@@ -285,6 +287,13 @@ class AppState extends ChangeNotifier {
     _persistPrefsMap();
   }
 
+  void setAutoExportPdfOnSync(bool value) {
+    if (_autoExportPdfOnSync == value) return;
+    _autoExportPdfOnSync = value;
+    notifyListeners();
+    _persistPrefsMap();
+  }
+
   void _persistPrefsMap() {
     unawaited(
       _storage.savePenPrefs({
@@ -303,6 +312,7 @@ class AppState extends ChangeNotifier {
         'foregroundSyncMinutes': _foregroundSyncMinutes,
         'idleSyncDays': _idleSyncDays,
         'wifiOnlySync': _wifiOnlySync,
+        'autoExportPdfOnSync': _autoExportPdfOnSync,
       }),
     );
   }
@@ -633,6 +643,8 @@ class AppState extends ChangeNotifier {
         _idleSyncDays =
             (penPrefs['idleSyncDays'] as num?)?.toInt() ?? _idleSyncDays;
         _wifiOnlySync = penPrefs['wifiOnlySync'] as bool? ?? _wifiOnlySync;
+        _autoExportPdfOnSync =
+            penPrefs['autoExportPdfOnSync'] as bool? ?? _autoExportPdfOnSync;
       }
     } finally {
       _isLoading = false;
@@ -802,12 +814,26 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<void> deleteNotebook(String notebookId) async {
+  Future<void> deleteNotebook(
+    String notebookId, {
+    bool cleanupOrphans = true,
+  }) async {
     _openNotebookIds.remove(notebookId);
+    _pendingSaveTimers.remove(notebookId)?.cancel();
+    _pendingSaveNotebooks.remove(notebookId);
     _notebooks = _notebooks.where((n) => n.id != notebookId).toList();
     await _storage.deleteNotebookFile(notebookId);
     notifyListeners();
     onNotebookDeletedForSync?.call(notebookId);
+    if (cleanupOrphans) {
+      unawaited(
+        _storage.cleanupOrphanAssets(
+          _notebooks,
+          customStickers: _customStickers,
+          customCovers: _customCoverPaths,
+        ),
+      );
+    }
   }
 
   Future<void> toggleFavorite(String notebookId) async {
@@ -853,7 +879,14 @@ class AppState extends ChangeNotifier {
     final trashedIds =
         _notebooks.where((n) => n.isTrashed).map((n) => n.id).toList();
     for (final id in trashedIds) {
-      await deleteNotebook(id);
+      await deleteNotebook(id, cleanupOrphans: false);
+    }
+    if (trashedIds.isNotEmpty) {
+      await _storage.cleanupOrphanAssets(
+        _notebooks,
+        customStickers: _customStickers,
+        customCovers: _customCoverPaths,
+      );
     }
   }
 
@@ -944,7 +977,17 @@ class AppState extends ChangeNotifier {
     return reindexed[targetIndex];
   }
 
-  Future<void> updatePage(String notebookId, NotePage page) async {
+  bool _isStylusDrawingActive = false;
+
+  void setStylusDrawingActive(bool active) {
+    _isStylusDrawingActive = active;
+  }
+
+  Future<void> updatePage(
+    String notebookId,
+    NotePage page, {
+    bool notify = true,
+  }) async {
     final notebook = getNotebookById(notebookId);
     if (notebook == null) return;
     final now = DateTime.now();
@@ -961,7 +1004,9 @@ class AppState extends ChangeNotifier {
     );
     _notebooks =
         _notebooks.map((n) => n.id == updated.id ? updated : n).toList();
-    notifyListeners();
+    if (notify) {
+      notifyListeners();
+    }
     _scheduleDebouncedNotebookSave(updated);
   }
 
@@ -971,6 +1016,13 @@ class AppState extends ChangeNotifier {
     _pendingSaveTimers[notebook.id] = Timer(
       const Duration(milliseconds: 1500),
       () {
+        if (_isStylusDrawingActive) {
+          final latest = _pendingSaveNotebooks[notebook.id];
+          if (latest != null) {
+            _scheduleDebouncedNotebookSave(latest);
+          }
+          return;
+        }
         _pendingSaveTimers.remove(notebook.id);
         final pending = _pendingSaveNotebooks.remove(notebook.id);
         if (pending != null) {

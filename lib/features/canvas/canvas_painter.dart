@@ -19,13 +19,18 @@ import 'stroke_engine.dart';
 /// 7. Lasso selection bounding box
 class CanvasPainter extends CustomPainter {
   final NotePage page;
+  final NotePage Function()? pageGetter;
   final ui.Image? pdfBackgroundImage;
+  final ui.Image? Function()? pdfBackgroundImageGetter;
+  final ui.Image? Function()? pdfThumbnailImageGetter;
+  final ui.Image? Function()? snapshotImageGetter;
   final Map<String, ui.Image> elementImageCache;
   final LassoSelection lassoSelection;
   final Rect? lassoSelectionBounds;
   final ValueListenable<Offset>? lassoDragOffset;
   final ValueListenable<({String pageId, List<Stroke> strokes})?>?
       erasingStrokesNotifier;
+  final Listenable? pageRepaintListenable;
   final String? hiddenImageId;
   final String? playingAudioId;
   final int? playingAudioTimeMs;
@@ -38,12 +43,17 @@ class CanvasPainter extends CustomPainter {
 
   CanvasPainter({
     required this.page,
+    this.pageGetter,
     this.pdfBackgroundImage,
+    this.pdfBackgroundImageGetter,
+    this.pdfThumbnailImageGetter,
+    this.snapshotImageGetter,
     this.elementImageCache = const {},
     this.lassoSelection = const LassoSelection(),
     this.lassoSelectionBounds,
     this.lassoDragOffset,
     this.erasingStrokesNotifier,
+    this.pageRepaintListenable,
     this.hiddenImageId,
     this.playingAudioId,
     this.playingAudioTimeMs,
@@ -57,6 +67,7 @@ class CanvasPainter extends CustomPainter {
           repaint: Listenable.merge([
             if (lassoDragOffset != null) lassoDragOffset,
             if (erasingStrokesNotifier != null) erasingStrokesNotifier,
+            if (pageRepaintListenable != null) pageRepaintListenable,
           ]),
         );
 
@@ -68,34 +79,68 @@ class CanvasPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    final NotePage currentPage = pageGetter?.call() ?? page;
+
+    // Fast-path: Raster snapshot for idle stroke-heavy pages (< 0.2ms single GPU drawImageRect!)
+    final bool canUseSnapshot = drawBackground &&
+        drawOverlays &&
+        hiddenImageId == null &&
+        lassoSelection.isEmpty &&
+        erasingStrokesNotifier?.value?.pageId != currentPage.id &&
+        playingAudioId == null;
+    if (canUseSnapshot) {
+      final ui.Image? snapshot = snapshotImageGetter?.call();
+      if (snapshot != null) {
+        canvas.drawImageRect(
+          snapshot,
+          Rect.fromLTWH(
+            0,
+            0,
+            snapshot.width.toDouble(),
+            snapshot.height.toDouble(),
+          ),
+          Offset.zero & size,
+          Paint()..filterQuality = FilterQuality.medium,
+        );
+        return;
+      }
+    }
+
+    final ui.Image? pdfBg =
+        pdfBackgroundImageGetter?.call() ?? pdfBackgroundImage;
+    final ui.Image? pdfThumb =
+        pdfBg == null ? pdfThumbnailImageGetter?.call() : null;
+
     // 1. Paper template layer (A4 or seamless Infinite Whiteboard)
     if (drawBackground) {
       PaperTemplatePainter(
-        templateType: page.templateType,
-        paperColor: page.paperColor,
-        isLandscape: page.isLandscape,
-        isInfiniteWhiteboard: page.isInfiniteWhiteboard,
+        templateType: currentPage.templateType,
+        paperColor: currentPage.paperColor,
+        isLandscape: currentPage.isLandscape,
+        isInfiniteWhiteboard: currentPage.isInfiniteWhiteboard,
       ).paint(canvas, size);
 
-      // 2. Optional PDF page background image
-      if (pdfBackgroundImage != null) {
-        _paintPdfBackground(canvas, size, pdfBackgroundImage!);
+      // 2. Optional PDF page background image (full-res 1600px, or instant 320px thumbnail fallback!)
+      if (pdfBg != null) {
+        _paintPdfBackground(canvas, size, pdfBg, quality: FilterQuality.medium);
+      } else if (pdfThumb != null) {
+        _paintPdfBackground(canvas, size, pdfThumb, quality: FilterQuality.low);
       }
     }
 
     // 3. Chronological Z-Index Layering across Images, Stencils, Highlighters & Pen Strokes
     // Tie-break order for legacy zIndex == 0: 0=image, 1=highlighter, 2=stencil, 3=ink
-    final bool isDarkPaper = page.paperColor == PaperColorType.dark;
+    final bool isDarkPaper = currentPage.paperColor == PaperColorType.dark;
     final items = <({int z, int tie, int seq, Object item})>[];
     int seq = 0;
 
     final erasingOverride = erasingStrokesNotifier?.value;
     final List<Stroke> activeStrokes =
-        (erasingOverride != null && erasingOverride.pageId == page.id)
+        (erasingOverride != null && erasingOverride.pageId == currentPage.id)
             ? erasingOverride.strokes
-            : page.strokes;
+            : currentPage.strokes;
 
-    for (final img in page.imageElements) {
+    for (final img in currentPage.imageElements) {
       if (_inZRange(img.zIndex)) {
         items.add((z: img.zIndex, tie: 0, seq: seq++, item: img));
       }
@@ -106,7 +151,7 @@ class CanvasPainter extends CustomPainter {
         items.add((z: stroke.zIndex, tie: tie, seq: seq++, item: stroke));
       }
     }
-    for (final stencil in page.stencilElements) {
+    for (final stencil in currentPage.stencilElements) {
       if (_inZRange(stencil.zIndex)) {
         items.add((z: stencil.zIndex, tie: 2, seq: seq++, item: stencil));
       }
@@ -186,7 +231,7 @@ class CanvasPainter extends CustomPainter {
     if (drawOverlays) {
       // 4. Study Tape elements (100% opaque in thumbnails/static pass; interactive widget handles live editor)
       if (drawTapes) {
-        for (final tape in page.tapeElements) {
+        for (final tape in currentPage.tapeElements) {
           paintStudyTape(
             canvas,
             tape,
@@ -205,7 +250,12 @@ class CanvasPainter extends CustomPainter {
     }
   }
 
-  void _paintPdfBackground(Canvas canvas, Size size, ui.Image image) {
+  void _paintPdfBackground(
+    Canvas canvas,
+    Size size,
+    ui.Image image, {
+    FilterQuality quality = FilterQuality.medium,
+  }) {
     final src = Rect.fromLTWH(
       0,
       0,
@@ -222,7 +272,7 @@ class CanvasPainter extends CustomPainter {
       image,
       src,
       dst,
-      Paint()..filterQuality = FilterQuality.medium,
+      Paint()..filterQuality = quality,
     );
   }
 

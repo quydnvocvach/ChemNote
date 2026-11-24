@@ -170,7 +170,7 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
 
   Future<void> _handleSyncNow() async {
     final syncManager = context.read<SyncManager>();
-    await syncManager.syncNow();
+    await syncManager.syncNow(isManualSync: true);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(syncManager.statusMessage)),
@@ -769,6 +769,19 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
             onChanged: syncManager.setWifiOnlySync,
           ),
           const Divider(height: 1),
+          SwitchListTile(
+            secondary: Icon(
+              Icons.picture_as_pdf_outlined,
+              color: colorScheme.primary,
+            ),
+            title: const Text('Tự động xuất PDF khi đồng bộ'),
+            subtitle: const Text(
+              'Tự bỏ qua sổ trên 30 trang khi đồng bộ nền để tránh nóng máy.',
+            ),
+            value: syncManager.autoExportPdfOnSync,
+            onChanged: syncManager.setAutoExportPdfOnSync,
+          ),
+          const Divider(height: 1),
           Padding(
             padding: const EdgeInsets.all(14),
             child: Row(
@@ -785,7 +798,7 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Cấu trúc sao lưu kép trên Google Drive:',
+                        'Cấu trúc sao lưu trên Google Drive:',
                         style: theme.textTheme.labelMedium?.copyWith(
                           fontWeight: FontWeight.w600,
                         ),
@@ -793,7 +806,8 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
                       const SizedBox(height: 4),
                       Text(
                         '• ChemNote_Backups/JSON — bản sao lưu đầy đủ để khôi phục & chỉnh sửa.\n'
-                        '• ChemNote_Backups/PDF — bản PDF vector nhẹ đặt tên theo tiêu đề ghi chú để xem nhanh trên mọi thiết bị.',
+                        '• ChemNote_Backups/PDF — bản PDF vector nhẹ đặt tên theo tiêu đề ghi chú.\n'
+                        '• ChemNote_Backups/Assets — ảnh & trang PDF nền đồng bộ tăng dần giữa các máy.',
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: colorScheme.onSurfaceVariant,
                           height: 1.4,

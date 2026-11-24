@@ -1,10 +1,14 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../core/models/drawing_elements.dart';
+import '../../core/models/note_page.dart';
 import '../../core/models/notebook.dart';
 import '../../core/providers/app_state.dart';
 import '../pdf/pdf_export_service.dart';
@@ -76,6 +80,9 @@ class SyncManager extends ChangeNotifier {
 
   static const String _kLastSyncedAt = 'chemnote_last_synced_at';
 
+  /// Ngưỡng số trang tối đa cho phép tự động xuất PDF khi đồng bộ nền (tránh nóng máy trên Kirin).
+  static const int maxBackgroundPdfPages = 30;
+
   AppState? _appState;
   final GoogleAuthService _authService;
   late final GoogleDriveService _driveService;
@@ -101,6 +108,7 @@ class SyncManager extends ChangeNotifier {
   int _fallbackForegroundSyncMinutes = 15;
   int _fallbackIdleSyncDays = 1;
   bool _fallbackWifiOnlySync = true;
+  bool _fallbackAutoExportPdfOnSync = true;
 
   final Set<String> _pendingUploadIds = <String>{};
   final Map<String, Notebook> _pendingSnapshots = <String, Notebook>{};
@@ -132,6 +140,10 @@ class SyncManager extends ChangeNotifier {
 
   /// Chỉ tự động đồng bộ qua Wi-Fi để tiết kiệm pin & dữ liệu di động.
   bool get wifiOnlySync => _appState?.wifiOnlySync ?? _fallbackWifiOnlySync;
+
+  /// Tự động xuất & tải lên bản PDF vector khi đồng bộ (tự bỏ qua sổ > 30 trang khi đồng bộ nền).
+  bool get autoExportPdfOnSync =>
+      _appState?.autoExportPdfOnSync ?? _fallbackAutoExportPdfOnSync;
 
   /// Kiểm tra điều kiện mạng hiện tại có cho phép tự động đồng bộ hay không.
   bool get canAutoSyncOnCurrentNetwork =>
@@ -310,6 +322,18 @@ class SyncManager extends ChangeNotifier {
         _hasPendingChanges()) {
       unawaited(syncNow());
     }
+  }
+
+  /// Bật/tắt tự động xuất PDF khi đồng bộ Google Drive.
+  void setAutoExportPdfOnSync(bool enabled) {
+    _fallbackAutoExportPdfOnSync = enabled;
+    _appState?.setAutoExportPdfOnSync(enabled);
+    _addLog(
+      enabled
+          ? 'Đã bật tự động xuất PDF khi đồng bộ (bỏ qua sổ > $maxBackgroundPdfPages trang khi đồng bộ nền).'
+          : 'Đã tắt tự động xuất PDF khi đồng bộ (chỉ sao lưu JSON & tài nguyên).',
+    );
+    notifyListeners();
   }
 
   void _rescheduleForegroundTimer() {
@@ -542,8 +566,8 @@ class SyncManager extends ChangeNotifier {
     }
   }
 
-  /// Đồng bộ hai chiều ngay lập tức giữa máy và Google Drive (`JSON/` + `PDF/`).
-  Future<void> syncNow() async {
+  /// Đồng bộ hai chiều ngay lập tức giữa máy và Google Drive (`JSON/`, `PDF/`, `Assets/`).
+  Future<void> syncNow({bool isManualSync = false}) async {
     if (_isSyncing) return;
 
     if (!isSignedIn) {
@@ -561,13 +585,21 @@ class SyncManager extends ChangeNotifier {
     }
 
     _isSyncing = true;
-    _statusMessage = 'Đang đồng bộ JSON & PDF với Google Drive...';
+    _statusMessage = 'Đang đồng bộ với Google Drive...';
     notifyListeners();
 
     try {
       await _driveService.ensureAppFolder();
       await _driveService.ensureJsonFolder();
-      await _driveService.ensurePdfFolder();
+      if (autoExportPdfOnSync) {
+        await _driveService.ensurePdfFolder();
+      }
+      Map<String, String> remoteAssets = <String, String>{};
+      try {
+        await _driveService.ensureAssetsFolder();
+        remoteAssets = await _driveService.listRemoteAssetFiles();
+      } catch (_) {}
+      final remoteAssetNames = remoteAssets.keys.toSet();
 
       // 1. Xử lý các yêu cầu xóa tệp trên Drive
       for (final driveId in List<String>.from(_pendingDeleteDriveIds)) {
@@ -596,15 +628,22 @@ class SyncManager extends ChangeNotifier {
 
       for (final local in localNotebooks) {
         final remoteMeta = remoteByNotebookId.remove(local.id);
+        final needsPdfBackfill = autoExportPdfOnSync &&
+            local.drivePdfFileId == null &&
+            (isManualSync || local.pages.length <= maxBackgroundPdfPages);
         final needsUpload = _pendingUploadIds.contains(local.id) ||
             local.syncStatus == SyncStatus.pendingUpload ||
             local.syncStatus == SyncStatus.localOnly ||
             local.driveFileId == null ||
-            local.drivePdfFileId == null;
+            needsPdfBackfill;
 
         if (remoteMeta == null) {
           if (needsUpload) {
-            await _uploadSingleNotebook(local);
+            await _uploadSingleNotebook(
+              local,
+              isManualSync: isManualSync,
+              remoteAssetNames: remoteAssetNames,
+            );
             uploadedCount++;
           }
           continue;
@@ -630,7 +669,11 @@ class SyncManager extends ChangeNotifier {
             resolution.conflictBackupCopy!,
             markPendingSync: false,
           );
-          await _uploadSingleNotebook(resolution.conflictBackupCopy!);
+          await _uploadSingleNotebook(
+            resolution.conflictBackupCopy!,
+            isManualSync: isManualSync,
+            remoteAssetNames: remoteAssetNames,
+          );
           conflictCopies++;
           _addLog(
             'Phát hiện xung đột ở "${local.title}" — đã tạo bản sao dự phòng.',
@@ -638,17 +681,29 @@ class SyncManager extends ChangeNotifier {
         }
 
         if (resolution.winner == ConflictWinner.local) {
-          await _uploadSingleNotebook(resolution.resolvedNotebook);
+          await _uploadSingleNotebook(
+            resolution.resolvedNotebook,
+            isManualSync: isManualSync,
+            remoteAssetNames: remoteAssetNames,
+          );
           uploadedCount++;
         } else if (resolution.winner == ConflictWinner.remote) {
-          await _appState?.upsertNotebookFromSync(resolution.resolvedNotebook);
+          final hydrated = await _hydrateMissingAssets(
+            resolution.resolvedNotebook,
+            remoteAssets,
+          );
+          await _appState?.upsertNotebookFromSync(hydrated);
           _pendingUploadIds.remove(local.id);
           _pendingSnapshots.remove(local.id);
           downloadedCount++;
         } else {
-          // Nếu bản cục bộ chưa có PDF trên Drive, tải bù PDF vector một lần.
-          if (local.drivePdfFileId == null) {
-            await _uploadSingleNotebook(resolution.resolvedNotebook);
+          // Nếu bản cục bộ chưa có PDF trên Drive và được phép xuất PDF, tải bù một lần.
+          if (needsPdfBackfill) {
+            await _uploadSingleNotebook(
+              resolution.resolvedNotebook,
+              isManualSync: isManualSync,
+              remoteAssetNames: remoteAssetNames,
+            );
             uploadedCount++;
           } else {
             await _appState?.updateNotebookSyncStatus(
@@ -664,17 +719,21 @@ class SyncManager extends ChangeNotifier {
         }
       }
 
-      // 4. Tải về các sổ tay mới chỉ tồn tại trên Google Drive
+      // 4. Tải về các sổ tay mới chỉ tồn tại trên Google Drive (kèm tài nguyên ảnh/PDF nền)
       for (final meta in remoteByNotebookId.values) {
         final remoteNotebook =
             await _driveService.downloadNotebook(meta.driveFileId);
-        await _appState?.upsertNotebookFromSync(remoteNotebook);
+        final hydrated = await _hydrateMissingAssets(
+          remoteNotebook,
+          remoteAssets,
+        );
+        await _appState?.upsertNotebookFromSync(hydrated);
         downloadedCount++;
       }
 
       await _setLastSyncedAt(DateTime.now());
       _statusMessage =
-          'Đồng bộ xong: ↑$uploadedCount tải lên (JSON + PDF), ↓$downloadedCount tải về'
+          'Đồng bộ xong: ↑$uploadedCount tải lên, ↓$downloadedCount tải về'
           '${conflictCopies > 0 ? ', $conflictCopies bản sao xung đột' : ''}';
       _addLog(_statusMessage);
     } catch (e) {
@@ -686,24 +745,41 @@ class SyncManager extends ChangeNotifier {
     }
   }
 
-  Future<void> _uploadSingleNotebook(Notebook notebook) async {
+  Future<void> _uploadSingleNotebook(
+    Notebook notebook, {
+    required bool isManualSync,
+    required Set<String> remoteAssetNames,
+  }) async {
     await _appState?.updateNotebookSyncStatus(notebook.id, SyncStatus.syncing);
     try {
-      // 1. Tạo & tải lên PDF vector gọn nhẹ vào ChemNote_Backups/PDF/
+      // 1. Đồng bộ tăng dần các ảnh & trang PDF nền còn thiếu vào ChemNote_Backups/Assets/
+      await _uploadNotebookAssetsIfMissing(notebook, remoteAssetNames);
+
+      // 2. Tạo & tải lên PDF vector vào ChemNote_Backups/PDF/ (có chốt bảo vệ nhiệt cho đồng bộ nền)
       String? drivePdfFileId = notebook.drivePdfFileId;
-      try {
-        final pdfBytes =
-            await _pdfExportService.buildNotebookPdfBytes(notebook);
-        drivePdfFileId =
-            await _driveService.uploadNotebookPdf(notebook, pdfBytes);
-      } catch (pdfErr) {
+      final shouldExportPdf = autoExportPdfOnSync &&
+          (isManualSync || notebook.pages.length <= maxBackgroundPdfPages);
+      if (shouldExportPdf) {
+        try {
+          final pdfBytes =
+              await _pdfExportService.buildNotebookPdfBytes(notebook);
+          drivePdfFileId =
+              await _driveService.uploadNotebookPdf(notebook, pdfBytes);
+        } catch (pdfErr) {
+          _addLog(
+            'Cảnh báo: Chưa xuất được PDF cho "${notebook.title}" ($pdfErr); vẫn tiếp tục sao lưu JSON.',
+            isError: true,
+          );
+        }
+      } else if (autoExportPdfOnSync &&
+          !isManualSync &&
+          notebook.pages.length > maxBackgroundPdfPages) {
         _addLog(
-          'Cảnh báo: Chưa xuất được PDF cho "${notebook.title}" ($pdfErr); vẫn tiếp tục sao lưu JSON.',
-          isError: true,
+          'Bỏ qua xuất PDF nền cho "${notebook.title}" (${notebook.pages.length} trang > $maxBackgroundPdfPages) để tránh nóng máy.',
         );
       }
 
-      // 2. Tải lên tệp JSON đầy đủ (kèm drivePdfFileId mới nhất) vào ChemNote_Backups/JSON/
+      // 3. Tải lên tệp JSON đầy đủ (kèm drivePdfFileId mới nhất) vào ChemNote_Backups/JSON/
       final notebookWithPdfId = notebook.copyWith(
         drivePdfFileId: drivePdfFileId,
       );
@@ -723,7 +799,126 @@ class SyncManager extends ChangeNotifier {
     }
   }
 
-  /// Khôi phục toàn bộ sổ tay từ thư mục `ChemNote_Backups/JSON/` trên Google Drive về máy.
+  Future<void> _uploadNotebookAssetsIfMissing(
+    Notebook notebook,
+    Set<String> remoteAssetNames,
+  ) async {
+    for (final page in notebook.pages) {
+      final pdfBg = page.pdfBackgroundPath;
+      if (pdfBg != null && pdfBg.isNotEmpty) {
+        final name = _basename(pdfBg);
+        try {
+          await _driveService.uploadAssetFileIfMissing(
+            File(pdfBg),
+            name,
+            remoteAssetNames,
+          );
+        } catch (_) {}
+      }
+      for (final img in page.imageElements) {
+        if (img.filePath.isEmpty) continue;
+        final name = _basename(img.filePath);
+        try {
+          await _driveService.uploadAssetFileIfMissing(
+            File(img.filePath),
+            name,
+            remoteAssetNames,
+          );
+        } catch (_) {}
+      }
+    }
+  }
+
+  Future<Notebook> _hydrateMissingAssets(
+    Notebook notebook,
+    Map<String, String> remoteAssets,
+  ) async {
+    if (remoteAssets.isEmpty) return notebook;
+
+    Directory? rootDir;
+    Future<Directory> resolveRootDir() async {
+      if (rootDir != null) return rootDir!;
+      if (_appState != null) {
+        rootDir = await _appState!.storage.getRootDirectory();
+      } else {
+        final docs = await getApplicationDocumentsDirectory();
+        rootDir = Directory('${docs.path}${Platform.pathSeparator}chemnote');
+      }
+      return rootDir!;
+    }
+
+    var changed = false;
+    final updatedPages = <NotePage>[];
+
+    for (final page in notebook.pages) {
+      var pageChanged = false;
+      var pdfBgPath = page.pdfBackgroundPath;
+
+      if (pdfBgPath != null &&
+          pdfBgPath.isNotEmpty &&
+          !await File(pdfBgPath).exists()) {
+        final name = _basename(pdfBgPath);
+        final driveId = remoteAssets[name];
+        if (driveId != null) {
+          try {
+            final root = await resolveRootDir();
+            final localDest =
+                '${root.path}${Platform.pathSeparator}pdfs${Platform.pathSeparator}$name';
+            if (!await File(localDest).exists()) {
+              await _driveService.downloadAssetFile(driveId, localDest);
+            }
+            pdfBgPath = localDest;
+            pageChanged = true;
+          } catch (_) {}
+        }
+      }
+
+      var imagesChanged = false;
+      final updatedImages = <ImageElement>[];
+      for (final img in page.imageElements) {
+        if (img.filePath.isNotEmpty && !await File(img.filePath).exists()) {
+          final name = _basename(img.filePath);
+          final driveId = remoteAssets[name];
+          if (driveId != null) {
+            try {
+              final root = await resolveRootDir();
+              final localDest =
+                  '${root.path}${Platform.pathSeparator}images${Platform.pathSeparator}$name';
+              if (!await File(localDest).exists()) {
+                await _driveService.downloadAssetFile(driveId, localDest);
+              }
+              updatedImages.add(img.copyWith(filePath: localDest));
+              imagesChanged = true;
+              continue;
+            } catch (_) {}
+          }
+        }
+        updatedImages.add(img);
+      }
+
+      if (pageChanged || imagesChanged) {
+        changed = true;
+        updatedPages.add(
+          page.copyWith(
+            pdfBackgroundPath: pdfBgPath,
+            imageElements: imagesChanged ? updatedImages : page.imageElements,
+          ),
+        );
+      } else {
+        updatedPages.add(page);
+      }
+    }
+
+    return changed ? notebook.copyWith(pages: updatedPages) : notebook;
+  }
+
+  String _basename(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    final idx = normalized.lastIndexOf('/');
+    return idx >= 0 ? normalized.substring(idx + 1) : normalized;
+  }
+
+  /// Khôi phục toàn bộ sổ tay từ thư mục `ChemNote_Backups/JSON/` (kèm ảnh/PDF nền từ `Assets/`).
   /// Trả về số lượng sổ tay đã khôi phục.
   Future<int> restoreFromDrive() async {
     if (_isSyncing) return 0;
@@ -742,21 +937,31 @@ class SyncManager extends ChangeNotifier {
     }
 
     _isSyncing = true;
-    _statusMessage = 'Đang khôi phục sổ tay từ Google Drive...';
+    _statusMessage = 'Đang khôi phục sổ tay & tài nguyên từ Google Drive...';
     notifyListeners();
 
     var restoredCount = 0;
     try {
       await _driveService.ensureAppFolder();
       await _driveService.ensureJsonFolder();
+      Map<String, String> remoteAssets = <String, String>{};
+      try {
+        await _driveService.ensureAssetsFolder();
+        remoteAssets = await _driveService.listRemoteAssetFiles();
+      } catch (_) {}
+
       final remoteList = await _driveService.listRemoteNotebooks();
 
       for (final meta in remoteList) {
         final remoteNotebook =
             await _driveService.downloadNotebook(meta.driveFileId);
-        await _appState?.upsertNotebookFromSync(remoteNotebook);
-        _pendingUploadIds.remove(remoteNotebook.id);
-        _pendingSnapshots.remove(remoteNotebook.id);
+        final hydrated = await _hydrateMissingAssets(
+          remoteNotebook,
+          remoteAssets,
+        );
+        await _appState?.upsertNotebookFromSync(hydrated);
+        _pendingUploadIds.remove(hydrated.id);
+        _pendingSnapshots.remove(hydrated.id);
         restoredCount++;
       }
 

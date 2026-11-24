@@ -34,7 +34,7 @@ class PalmRejectionFilter {
 
   bool get isStylusRecentlyActive {
     if (_lastStylusEventTime == null) return false;
-    return DateTime.now().difference(_lastStylusEventTime!).inMilliseconds < 1400;
+    return DateTime.now().difference(_lastStylusEventTime!).inMilliseconds < 280;
   }
 
   /// Returns true if the incoming pointer event should be accepted for drawing.

@@ -286,4 +286,68 @@ class LocalStorageService {
   }
 
   Future<Directory> getExportDirectory() => _getSubdirectory('exports');
+
+  /// Dọn dẹp các tệp tài nguyên mồ côi trong `images`, `pdfs`, `audio`, `attachments`
+  /// không còn được tham chiếu bởi bất kỳ sổ tay nào (giữ nguyên toàn bộ sổ trong Thùng rác).
+  Future<int> cleanupOrphanAssets(
+    List<Notebook> allNotebooks, {
+    List<String> customStickers = const [],
+    List<String> customCovers = const [],
+  }) async {
+    try {
+      final referenced = <String>{};
+      void addPath(String? raw) {
+        if (raw == null || raw.trim().isEmpty) return;
+        referenced.add(File(raw).absolute.path);
+      }
+
+      for (final path in customStickers) {
+        addPath(path);
+      }
+      for (final path in customCovers) {
+        addPath(path);
+      }
+      for (final notebook in allNotebooks) {
+        addPath(notebook.customCoverImagePath);
+        for (final page in notebook.pages) {
+          if (page.pdfBackgroundPath != null &&
+              page.pdfBackgroundPath!.trim().isNotEmpty) {
+            addPath(page.pdfBackgroundPath);
+            addPath('${page.pdfBackgroundPath}.thumb.png');
+          }
+          for (final img in page.imageElements) {
+            addPath(img.filePath);
+          }
+          for (final att in page.attachmentElements) {
+            addPath(att.filePath);
+          }
+          for (final rec in page.audioRecordings) {
+            addPath(rec.filePath);
+          }
+        }
+      }
+
+      final root = await getRootDirectory();
+      const subfolders = ['images', 'pdfs', 'audio', 'attachments'];
+      int deletedCount = 0;
+      for (final sub in subfolders) {
+        final dir = Directory('${root.path}${Platform.pathSeparator}$sub');
+        if (!await dir.exists()) continue;
+        await for (final entity in dir.list(recursive: true, followLinks: false)) {
+          if (entity is File) {
+            final absPath = entity.absolute.path;
+            if (!referenced.contains(absPath)) {
+              try {
+                await entity.delete();
+                deletedCount++;
+              } catch (_) {}
+            }
+          }
+        }
+      }
+      return deletedCount;
+    } catch (_) {
+      return 0;
+    }
+  }
 }

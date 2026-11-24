@@ -275,8 +275,10 @@ class PdfExportService {
                       ),
                     ),
 
-                  // 7. Giấy nhớ dán (Sticky Notes — thẻ pastel mở rộng hoặc viên thuốc thu gọn)
-                  for (final note in page.stickyNotes)
+                  // 7. Giấy nhớ dán (Sticky Notes — sắp xếp theo zIndex, thẻ pastel hoặc viên thuốc thu gọn)
+                  for (final note in (List<StickyNoteElement>.from(
+                    page.stickyNotes,
+                  )..sort((a, b) => a.zIndex.compareTo(b.zIndex))))
                     _buildStickyNoteCard(
                       note,
                       scaleX,

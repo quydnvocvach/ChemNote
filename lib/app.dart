@@ -20,7 +20,7 @@ class ChemNoteApp extends StatefulWidget {
   State<ChemNoteApp> createState() => _ChemNoteAppState();
 }
 
-class _ChemNoteAppState extends State<ChemNoteApp> {
+class _ChemNoteAppState extends State<ChemNoteApp> with WidgetsBindingObserver {
   late final AppState _appState;
   late final SyncManager _syncManager;
   late final bool _ownsAppState;
@@ -29,6 +29,7 @@ class _ChemNoteAppState extends State<ChemNoteApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _ownsAppState = widget.appState == null;
     _ownsSyncManager = widget.syncManager == null;
 
@@ -47,7 +48,16 @@ class _ChemNoteAppState extends State<ChemNoteApp> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused) {
+      _appState.flushPendingSaves();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     if (_ownsSyncManager) {
       _syncManager.dispose();
     }
