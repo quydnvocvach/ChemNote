@@ -4238,7 +4238,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                               cropTop: draft.top,
                               cropRight: draft.right,
                               cropBottom: draft.bottom,
-                              clipPolygon: const [],
+                              freehandClipPath: const [],
                             )
                           : e)
                       .toList();
@@ -4767,7 +4767,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                       cropTop: img.cropTop,
                                       cropRight: img.cropRight,
                                       cropBottom: img.cropBottom,
-                                      clipPolygon: img.clipPolygon,
+                                      freehandClipPath: img.freehandClipPath,
                                     ),
                                   )
                                 : (file.existsSync()
@@ -5900,7 +5900,7 @@ class _SelectedImagePainter extends CustomPainter {
   final double cropTop;
   final double cropRight;
   final double cropBottom;
-  final List<double> clipPolygon;
+  final List<StrokePoint> freehandClipPath;
   final Rect? dimOutsideRect;
 
   const _SelectedImagePainter({
@@ -5909,7 +5909,7 @@ class _SelectedImagePainter extends CustomPainter {
     required this.cropTop,
     required this.cropRight,
     required this.cropBottom,
-    this.clipPolygon = const [],
+    this.freehandClipPath = const [],
     this.dimOutsideRect,
   });
 
@@ -5924,13 +5924,16 @@ class _SelectedImagePainter extends CustomPainter {
     );
 
     canvas.save();
-    if (clipPolygon.length >= 6) {
-      final path = Path();
-      path.moveTo(clipPolygon[0] * size.width, clipPolygon[1] * size.height);
-      for (int i = 2; i + 1 < clipPolygon.length; i += 2) {
+    if (freehandClipPath.length >= 3) {
+      final path = Path()
+        ..moveTo(
+          freehandClipPath.first.x * size.width,
+          freehandClipPath.first.y * size.height,
+        );
+      for (int i = 1; i < freehandClipPath.length; i++) {
         path.lineTo(
-          clipPolygon[i] * size.width,
-          clipPolygon[i + 1] * size.height,
+          freehandClipPath[i].x * size.width,
+          freehandClipPath[i].y * size.height,
         );
       }
       path.close();
@@ -5967,7 +5970,7 @@ class _SelectedImagePainter extends CustomPainter {
         oldDelegate.cropTop != cropTop ||
         oldDelegate.cropRight != cropRight ||
         oldDelegate.cropBottom != cropBottom ||
-        oldDelegate.clipPolygon != clipPolygon ||
+        oldDelegate.freehandClipPath != freehandClipPath ||
         oldDelegate.dimOutsideRect != dimOutsideRect;
   }
 }
