@@ -110,6 +110,10 @@ class AppState extends ChangeNotifier {
   Future<void> Function(Notebook notebook)? onNotebookChangedForSync;
   Future<void> Function(String notebookId)? onNotebookDeletedForSync;
 
+  // Debounce lưu đĩa cho các thay đổi trang liên tiếp (tránh nghẽn luồng UI / ANR khi viết nhanh)
+  final Map<String, Timer> _pendingSaveTimers = {};
+  final Map<String, Notebook> _pendingSaveNotebooks = {};
+
   AppState({
     LocalStorageService? storage,
     Uuid? uuid,
@@ -943,11 +947,62 @@ class AppState extends ChangeNotifier {
   Future<void> updatePage(String notebookId, NotePage page) async {
     final notebook = getNotebookById(notebookId);
     if (notebook == null) return;
-    final updatedPage = page.copyWith(updatedAt: DateTime.now());
+    final now = DateTime.now();
+    final updatedPage = page.copyWith(updatedAt: now);
     final pages = notebook.pages
         .map((p) => p.id == updatedPage.id ? updatedPage : p)
         .toList();
-    await updateNotebook(notebook.copyWith(pages: pages));
+    final updated = notebook.copyWith(
+      pages: pages,
+      updatedAt: now,
+      syncStatus: notebook.syncStatus != SyncStatus.localOnly
+          ? SyncStatus.pendingUpload
+          : notebook.syncStatus,
+    );
+    _notebooks =
+        _notebooks.map((n) => n.id == updated.id ? updated : n).toList();
+    notifyListeners();
+    _scheduleDebouncedNotebookSave(updated);
+  }
+
+  void _scheduleDebouncedNotebookSave(Notebook notebook) {
+    _pendingSaveNotebooks[notebook.id] = notebook;
+    _pendingSaveTimers[notebook.id]?.cancel();
+    _pendingSaveTimers[notebook.id] = Timer(
+      const Duration(milliseconds: 1500),
+      () {
+        _pendingSaveTimers.remove(notebook.id);
+        final pending = _pendingSaveNotebooks.remove(notebook.id);
+        if (pending != null) {
+          unawaited(_storage.saveNotebook(pending));
+          onNotebookChangedForSync?.call(pending);
+        }
+      },
+    );
+  }
+
+  /// Ghi ngay toàn bộ các sổ tay đang chờ debounce xuống đĩa (gọi khi thoát trình ghi chú / tạm dừng app).
+  Future<void> flushPendingSaves() async {
+    for (final timer in _pendingSaveTimers.values) {
+      timer.cancel();
+    }
+    _pendingSaveTimers.clear();
+    if (_pendingSaveNotebooks.isEmpty) return;
+    final batch = List<Notebook>.from(_pendingSaveNotebooks.values);
+    _pendingSaveNotebooks.clear();
+    for (final nb in batch) {
+      await _storage.saveNotebook(nb);
+      onNotebookChangedForSync?.call(nb);
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final timer in _pendingSaveTimers.values) {
+      timer.cancel();
+    }
+    _pendingSaveTimers.clear();
+    super.dispose();
   }
 
   Future<void> deletePage(String notebookId, String pageId) async {

@@ -89,6 +89,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   bool _verticalCenteredOnce = false;
 
   // Active notebook & page state
+  late final AppState _appStateRef;
   late String _activeNotebookId;
   int _currentPageIndex = 0;
   String? _activeDrawingPageId;
@@ -233,6 +234,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
     // Restore user's last-used writing tool, color, size, opacity, smoothing & eraser size
     final appState = context.read<AppState>();
+    _appStateRef = appState;
     _lastPenTool = _editorToolFromStrokeTool(appState.lastPenTool);
     _activeTool = _lastPenTool;
     _penColor = Color(appState.lastPenColorValue);
@@ -277,6 +279,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   @override
   void dispose() {
+    _appStateRef.flushPendingSaves();
     _shapeHoldTimer?.cancel();
     _audioPollTimer?.cancel();
     HardwareService.instance.stopAudio();
@@ -540,15 +543,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     NotePage page,
     int pageIndex,
   ) {
-    if (_currentPageIndex != pageIndex) {
-      setState(() => _currentPageIndex = pageIndex);
-    }
+    // Zero setState() during writing/erasing to prevent UI-thread ANR!
+    _currentPageIndex = pageIndex;
     _activeDrawingPageId = page.id;
 
     final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus;
     if (isStylusEvent) {
-      if (!_isStylusDown) setState(() => _isStylusDown = true);
+      _isStylusDown = true;
       // When Stylus-Pan Mode is ON, M-Pencil 3 ONLY scrolls/pans and never draws!
       if (_stylusPanMode) return;
     } else if (event.kind == PointerDeviceKind.touch) {
@@ -556,7 +558,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       if (_activeTouchPointers.length >= 2) {
         // 2nd finger down -> immediately cancel any partial 1-finger stroke & unlock pinch-zoom
         _cancelActiveGesture();
-        setState(() {});
         return;
       }
     }
@@ -638,7 +639,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         _commitPage(page.copyWith(tapeElements: updatedTapes));
         return;
       }
-      if (!_isDrawingPointerDown) setState(() => _isDrawingPointerDown = true);
+      _isDrawingPointerDown = true;
       _tapeDragStart = rawPos;
       _tapeDraftNotifier.value = Rect.fromPoints(rawPos, rawPos);
       return;
@@ -647,7 +648,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     // Laser Pointer: lock viewport pan while laser pointer is held down
     if (_activeTool == EditorTool.laserPointer) {
       if (!_palmFilter.shouldAccept(event)) return;
-      if (!_isDrawingPointerDown) setState(() => _isDrawingPointerDown = true);
+      _isDrawingPointerDown = true;
       _laserController.addPoint(rawPos);
       return;
     }
@@ -660,9 +661,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
     if (!_palmFilter.shouldAccept(event)) return;
 
-    if (!_isDrawingPointerDown) {
-      setState(() => _isDrawingPointerDown = true);
-    }
+    _isDrawingPointerDown = true;
 
     // Clear overlay selections when starting a stroke on empty paper
     if (_selectedTextId != null ||
@@ -850,12 +849,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus;
     _shapeHoldTimer?.cancel();
-    if (isStylusEvent && _isStylusDown) {
-      setState(() => _isStylusDown = false);
-    }
-    if (_pointerDownPositions.isEmpty && _isDrawingPointerDown) {
-      setState(() => _isDrawingPointerDown = false);
-    }
+    if (isStylusEvent) _isStylusDown = false;
+    if (_pointerDownPositions.isEmpty) _isDrawingPointerDown = false;
 
     // Multi-finger tap Undo/Redo is handled by the top-level viewport Listener
     // so InteractiveViewer never swallows it and it never triggers twice.
@@ -998,9 +993,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _tapeDraftNotifier.value = null;
     _lassoDragOffsetNotifier.value = Offset.zero;
     _tapeDragStart = null;
-    if (_isDrawingPointerDown) {
-      setState(() => _isDrawingPointerDown = false);
-    }
+    _isDrawingPointerDown = false;
   }
 
   void _scheduleShapeHoldTimer() {
@@ -3193,14 +3186,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                   behavior: HitTestBehavior.translucent,
                   onPointerDown: (e) {
                     if (e.kind == PointerDeviceKind.touch) {
-                      final prevCount = _activeTouchPointers.length;
                       _activeTouchPointers.add(e.pointer);
                       if (_activeTouchPointers.length >= 2) {
                         _cancelActiveGesture();
-                      }
-                      if (prevCount == 0 ||
-                          (_activeTouchPointers.length >= 2 && prevCount < 2)) {
-                        setState(() {});
                       }
                       if (_tapTouchStarts.isEmpty) {
                         _tapTouchStartTime = DateTime.now();
@@ -3224,7 +3212,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                   onPointerUp: (e) {
                     if (e.kind != PointerDeviceKind.touch) return;
                     _activeTouchPointers.remove(e.pointer);
-                    if (_activeTouchPointers.isEmpty) setState(() {});
                     _tapTouchStarts.remove(e.pointer);
                     if (_tapTouchStarts.isEmpty && _tapTouchStartTime != null) {
                       final elapsed = DateTime.now()
@@ -3250,7 +3237,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                   onPointerCancel: (e) {
                     if (e.kind != PointerDeviceKind.touch) return;
                     _activeTouchPointers.remove(e.pointer);
-                    if (_activeTouchPointers.isEmpty) setState(() {});
                     _tapTouchStarts.remove(e.pointer);
                     if (_tapTouchStarts.isEmpty) {
                       _tapTouchStartTime = null;
@@ -3270,52 +3256,37 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         appState,
                       )
                     else if (appState.verticalContinuousScroll)
-                      InteractiveViewer(
-                        transformationController: _transformController,
-                        constrained: false,
+                      _StylusSafePanZoomViewport(
+                        controller: _transformController,
+                        stylusPanMode: _stylusPanMode,
+                        allowSingleFingerPan: _stylusPanMode ||
+                            appState.readOnlyMode ||
+                            appState.palmRejectionEnabled ||
+                            _activeTool == EditorTool.panZoom,
+                        locked: _isOverlayDragging,
                         minScale: 0.5,
                         maxScale: 4.0,
-                        boundaryMargin: const EdgeInsets.all(200),
-                        panEnabled: allowZoomPan,
-                        scaleEnabled: allowZoomPan,
-                        onInteractionUpdate: (details) {
-                          // Apply user's scrollSpeedMultiplier (0.8x..3.0x) to 1-finger vertical pan
-                          final mult = appState.scrollSpeedMultiplier;
-                          if (details.pointerCount == 1 &&
-                              (mult - 1.0).abs() > 0.02 &&
-                              details.focalPointDelta.dy != 0.0) {
-                            final extraDy =
-                                details.focalPointDelta.dy * (mult - 1.0);
-                            final m = _transformController.value.clone();
-                            final scale = m.getMaxScaleOnAxis().clamp(0.5, 4.0);
-                            final tx = m.getTranslation().x;
-                            final curTy = m.getTranslation().y;
-                            final totalH = _totalVerticalContentHeight(notebook);
-                            final minTy = math.min(
-                              0.0,
-                              vpSize.height - totalH * scale - 160.0,
-                            );
-                            final nextTy = (curTy + extraDy).clamp(minTy, 200.0);
-                            _transformController.value = Matrix4.identity()
-                              ..translate(tx, nextTy)
-                              ..scale(scale, scale);
-                          }
-                          _updatePullToAddProgress(notebook, vpSize);
-                        },
-                        onInteractionEnd: (_) =>
+                        scrollSpeedMultiplier: appState.scrollSpeedMultiplier,
+                        unconstrainedChild: true,
+                        onInteractionUpdate: () =>
+                            _updatePullToAddProgress(notebook, vpSize),
+                        onInteractionEnd: () =>
                             _finishPullToAddIfReady(notebook),
                         child: _buildVerticalContinuousPages(notebook),
                       )
                     else
-                      InteractiveViewer(
-                        transformationController: _transformController,
+                      _StylusSafePanZoomViewport(
+                        controller: _transformController,
+                        stylusPanMode: _stylusPanMode,
+                        allowSingleFingerPan: _stylusPanMode ||
+                            appState.readOnlyMode ||
+                            appState.palmRejectionEnabled ||
+                            _activeTool == EditorTool.panZoom,
+                        locked: _isOverlayDragging,
                         minScale: 0.5,
                         maxScale: 4.0,
-                        boundaryMargin: EdgeInsets.all(
-                          appState.freePaperMovement ? 200 : 24,
-                        ),
-                        panEnabled: allowZoomPan,
-                        scaleEnabled: allowZoomPan,
+                        scrollSpeedMultiplier: appState.scrollSpeedMultiplier,
+                        unconstrainedChild: false,
                         child: _buildHorizontalFlipPages(notebook),
                       ),
 
@@ -3752,15 +3723,19 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
         return Stack(
           children: [
-            InteractiveViewer(
-              transformationController: _whiteboardTransformController,
-              constrained: false,
+            _StylusSafePanZoomViewport(
+              controller: _whiteboardTransformController,
+              stylusPanMode: _stylusPanMode,
+              allowSingleFingerPan: _stylusPanMode ||
+                  appState.readOnlyMode ||
+                  appState.palmRejectionEnabled ||
+                  _activeTool == EditorTool.panZoom,
+              locked: _isOverlayDragging,
               minScale: 0.25,
               maxScale: 4.0,
-              boundaryMargin: const EdgeInsets.all(800),
-              panEnabled: allowWhiteboardPanZoom,
-              scaleEnabled: allowWhiteboardPanZoom,
-              onInteractionUpdate: (_) {
+              scrollSpeedMultiplier: appState.scrollSpeedMultiplier,
+              unconstrainedChild: true,
+              onInteractionUpdate: () {
                 final scale = _whiteboardTransformController.value
                     .getMaxScaleOnAxis()
                     .clamp(0.25, 4.0);
@@ -6661,6 +6636,157 @@ class _DraggableTextBoxOverlayState extends State<_DraggableTextBoxOverlay> {
           ),
         );
       },
+    );
+  }
+}
+
+/// Bulletproof Stylus-Safe Pan/Zoom Viewport using [RawGestureDetector] +
+/// [ScaleGestureRecognizer] with explicit `supportedDevices`:
+/// - When `stylusPanMode == false`: `PointerDeviceKind.stylus` and
+///   `PointerDeviceKind.invertedStylus` are 100% EXCLUDED before `pointerDown`
+///   ever enters the gesture arena -> M-Pencil 3 NEVER scrolls/pans the page!
+/// - When `stylusPanMode == true`: M-Pencil 3 scrolls/pans cleanly and never draws.
+/// - Zero `setState()` needed on pen-down/pen-up -> ZERO ANR during rapid writing!
+class _StylusSafePanZoomViewport extends StatefulWidget {
+  final TransformationController controller;
+  final bool stylusPanMode;
+  final bool allowSingleFingerPan;
+  final bool locked;
+  final double minScale;
+  final double maxScale;
+  final double scrollSpeedMultiplier;
+  final bool unconstrainedChild;
+  final VoidCallback? onInteractionUpdate;
+  final VoidCallback? onInteractionEnd;
+  final Widget child;
+
+  const _StylusSafePanZoomViewport({
+    required this.controller,
+    required this.stylusPanMode,
+    required this.allowSingleFingerPan,
+    required this.locked,
+    required this.minScale,
+    required this.maxScale,
+    required this.scrollSpeedMultiplier,
+    required this.unconstrainedChild,
+    this.onInteractionUpdate,
+    this.onInteractionEnd,
+    required this.child,
+  });
+
+  @override
+  State<_StylusSafePanZoomViewport> createState() =>
+      _StylusSafePanZoomViewportState();
+}
+
+class _StylusSafePanZoomViewportState
+    extends State<_StylusSafePanZoomViewport> {
+  double _startScale = 1.0;
+  Offset _lastFocal = Offset.zero;
+
+  static const Set<PointerDeviceKind> _touchOnlyDevices = {
+    PointerDeviceKind.touch,
+    PointerDeviceKind.trackpad,
+  };
+
+  static const Set<PointerDeviceKind> _allPanDevices = {
+    PointerDeviceKind.touch,
+    PointerDeviceKind.stylus,
+    PointerDeviceKind.invertedStylus,
+    PointerDeviceKind.mouse,
+    PointerDeviceKind.trackpad,
+  };
+
+  void _onScaleStart(ScaleStartDetails details) {
+    _startScale = widget.controller.value
+        .getMaxScaleOnAxis()
+        .clamp(widget.minScale, widget.maxScale);
+    _lastFocal = details.localFocalPoint;
+  }
+
+  void _onScaleUpdate(ScaleUpdateDetails details) {
+    if (widget.locked) return;
+    if (!widget.allowSingleFingerPan && details.pointerCount < 2) {
+      _lastFocal = details.localFocalPoint;
+      return;
+    }
+
+    final Offset focal = details.localFocalPoint;
+    final Offset focalDelta = focal - _lastFocal;
+    _lastFocal = focal;
+
+    final Matrix4 cur = widget.controller.value;
+    final double curScale =
+        cur.getMaxScaleOnAxis().clamp(widget.minScale, widget.maxScale);
+    final double curTx = cur.getTranslation().x;
+    final double curTy = cur.getTranslation().y;
+
+    double newScale = curScale;
+    double newTx = curTx;
+    double newTy = curTy;
+
+    if (details.pointerCount == 1) {
+      final double mult = widget.scrollSpeedMultiplier.clamp(0.8, 3.0);
+      newTx = curTx + focalDelta.dx * mult;
+      newTy = curTy + focalDelta.dy * mult;
+    } else {
+      newScale =
+          (_startScale * details.scale).clamp(widget.minScale, widget.maxScale);
+      final double ratio = curScale > 0.0001 ? (newScale / curScale) : 1.0;
+      newTx = focal.dx - (focal.dx - curTx) * ratio + focalDelta.dx;
+      newTy = focal.dy - (focal.dy - curTy) * ratio + focalDelta.dy;
+    }
+
+    widget.controller.value = Matrix4.identity()
+      ..translate(newTx, newTy)
+      ..scale(newScale, newScale);
+    widget.onInteractionUpdate?.call();
+  }
+
+  void _onScaleEnd(ScaleEndDetails details) {
+    widget.onInteractionEnd?.call();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final Set<PointerDeviceKind> devices =
+        widget.stylusPanMode ? _allPanDevices : _touchOnlyDevices;
+
+    return ClipRect(
+      child: RawGestureDetector(
+        key: ValueKey<bool>(widget.stylusPanMode),
+        behavior: HitTestBehavior.translucent,
+        gestures: <Type, GestureRecognizerFactory>{
+          ScaleGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<ScaleGestureRecognizer>(
+            () => ScaleGestureRecognizer(supportedDevices: devices),
+            (ScaleGestureRecognizer instance) {
+              instance
+                ..onStart = _onScaleStart
+                ..onUpdate = _onScaleUpdate
+                ..onEnd = _onScaleEnd;
+            },
+          ),
+        },
+        child: ValueListenableBuilder<Matrix4>(
+          valueListenable: widget.controller,
+          builder: (_, matrix, child) => Transform(
+            transform: matrix,
+            alignment: Alignment.topLeft,
+            child: child,
+          ),
+          child: widget.unconstrainedChild
+              ? OverflowBox(
+                  minWidth: 0,
+                  maxWidth: double.infinity,
+                  minHeight: 0,
+                  maxHeight: double.infinity,
+                  alignment: Alignment.topLeft,
+                  child: widget.child,
+                )
+              : widget.child,
+        ),
+      ),
     );
   }
 }

@@ -1,13 +1,15 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/drawing_elements.dart';
 import '../models/folder.dart';
 import '../models/notebook.dart';
+
+String _encodeNotebookJson(Map<String, dynamic> data) => jsonEncode(data);
 
 class LocalStorageService {
   final Directory? _overrideBaseDir;
@@ -235,8 +237,8 @@ class LocalStorageService {
 
   Future<void> saveNotebook(Notebook notebook) async {
     final file = await _getNotebookFile(notebook.id);
-    final encoded = jsonEncode(notebook.toJson());
-    await file.writeAsString(encoded, flush: true);
+    final encoded = await compute(_encodeNotebookJson, notebook.toJson());
+    await file.writeAsString(encoded);
   }
 
   Future<void> saveNotebooks(List<Notebook> notebooks) async {

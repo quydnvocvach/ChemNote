@@ -160,17 +160,15 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.5.0 with APK
+      - name: Publish Release v3.5.1 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.5.0
-          name: ChemNote Pro v3.5.0 (Huawei MatePad 11.5"S & Android)
+          tag_name: v3.5.1
+          name: ChemNote Pro v3.5.1 (Hotfix Chống đơ ANR & Khóa cuộn bút M-Pencil 3)
           body: |
-            ### ChemNote Pro v3.5.0 — Đồng bộ Drive 2 thư mục (JSON + PDF), Lướt trang siêu mượt & Bảng màu 30 sắc!
-            - **Đồng bộ Google Drive 2 thư mục (`ChemNote_Backups/JSON/` + `ChemNote_Backups/PDF/`):** Khôi phục đăng nhập `FlutterWebAuth2` ổn định trên MatePad, đặt tên file PDF bắt đầu bằng tên sổ tay, lịch đồng bộ tiết kiệm pin (5/15/45/120 phút, đồng bộ nền 1/3/5 ngày, Chỉ qua Wi-Fi).
-            - **Lướt trang siêu mượt & Tùy chỉnh tốc độ (`0.8× -> 3.0×`):** Thanh kéo nhanh số trang bên phải, nhảy trang tức thì khi chạm thumbnail trong Danh sách trang.
-            - **Nút Cuộn bằng bút (Stylus Pan) cạnh Khoá lòng bàn tay** + sửa triệt để Băng che học tập (Study Tape) & chế độ 1 ngón viết / 2 ngón zoom khi tắt Khoá lòng bàn tay.
-            - **Sticky Note trong suốt (nhìn xuyên xuống bài)** + gỡ hậu tố `(X nét)`, **8 tay nắm ảnh `48×48 px` nhạy như Huawei Notes**, và **Bảng 30 màu chọn 1 chạm** trong hộp Bút & Bút dạ quang!
+            ### ChemNote Pro v3.5.1 — Bản sửa nóng (Hotfix) cực mượt cho Huawei MatePad 11.5"S!
+            - **Sửa triệt để lỗi đơ/ANR ("ChemNote hiện không phản hồi") khi viết nhanh:** Lưu đĩa bất đồng bộ theo cơ chế debounce `1500ms` kết hợp mã hóa JSON trên Background Isolate (`compute`), loại bỏ 100% `setState` trong vòng đời viết bút, không còn đồng bộ PDF gây nghẽn lúc đang viết!
+            - **Khóa tuyệt đối hiện tượng bút M-Pencil 3 lướt nhầm trang:** Tách cứng `supportedDevices` ở tầng `ScaleGestureRecognizer` — bút cảm ứng chỉ viết (trừ khi bật nút Cuộn bằng bút), 1 ngón tay cuộn & 2 ngón phóng to mượt 144Hz.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

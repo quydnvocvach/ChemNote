@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../core/models/notebook.dart';
@@ -54,13 +55,15 @@ class SyncManager extends ChangeNotifier {
     GoogleAuthService? authService,
     GoogleDriveService? driveService,
     PdfExportService? pdfExportService,
+    FlutterSecureStorage? secureStorage,
     Connectivity? connectivity,
     Uuid? uuid,
-    this.debounceDuration = const Duration(seconds: 3),
+    this.debounceDuration = const Duration(seconds: 45),
     bool attachConnectivityListener = true,
   })  : _appState = appState,
         _authService = authService ?? GoogleAuthService(),
         _pdfExportService = pdfExportService ?? PdfExportService(),
+        _secureStorage = secureStorage ?? const FlutterSecureStorage(),
         _connectivity = connectivity ?? Connectivity(),
         _uuid = uuid ?? const Uuid(),
         _attachConnectivityListener = attachConnectivityListener {
@@ -71,10 +74,13 @@ class SyncManager extends ChangeNotifier {
     }
   }
 
+  static const String _kLastSyncedAt = 'chemnote_last_synced_at';
+
   AppState? _appState;
   final GoogleAuthService _authService;
   late final GoogleDriveService _driveService;
   final PdfExportService _pdfExportService;
+  final FlutterSecureStorage _secureStorage;
   final Connectivity _connectivity;
   final Uuid _uuid;
   final Duration debounceDuration;
@@ -142,9 +148,16 @@ class SyncManager extends ChangeNotifier {
     };
   }
 
-  /// Khởi tạo phiên đăng nhập đã lưu, bắt đầu theo dõi mạng và lịch đồng bộ tiết kiệm pin.
+  /// Khởi tạo phiên đăng nhập đã lưu, khôi phục mốc `lastSyncedAt`, theo dõi mạng và lịch đồng bộ tiết kiệm pin.
   Future<void> initialize() async {
     await _authService.loadSavedSession();
+    try {
+      final savedSyncIso = await _secureStorage.read(key: _kLastSyncedAt);
+      if (savedSyncIso != null && savedSyncIso.isNotEmpty) {
+        _lastSyncedAt = DateTime.tryParse(savedSyncIso);
+      }
+    } catch (_) {}
+
     if (_authService.isSignedIn) {
       _statusMessage = _authService.isDemoMode
           ? 'Đang dùng Chế độ Demo ngoại tuyến'
@@ -379,43 +392,47 @@ class SyncManager extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Xếp hàng tải lên sổ tay sau khi chỉnh sửa, có gom nhóm (debounce).
+  /// Xếp hàng tải lên sổ tay sau khi chỉnh sửa mà KHÔNG kích hoạt đồng bộ/tạo PDF tức thì
+  /// khi người dùng đang viết tay (tránh ANR & tiết kiệm pin; đợi chu kỳ `foregroundSyncMinutes`).
   void queueNotebookUpload(Notebook notebook) {
+    final wasAlreadyPending = _pendingUploadIds.contains(notebook.id);
     _pendingUploadIds.add(notebook.id);
     _pendingSnapshots[notebook.id] = notebook;
 
     if (!_autoSyncEnabled || !isSignedIn) {
-      notifyListeners();
+      if (!wasAlreadyPending) notifyListeners();
       return;
     }
 
     if (!_isOnline && !isDemoMode) {
       _statusMessage =
           'Đang ngoại tuyến — đã xếp hàng ${_pendingUploadIds.length} sổ tay';
-      notifyListeners();
+      if (!wasAlreadyPending) notifyListeners();
       return;
     }
 
     if (wifiOnlySync && !_isOnWifi && !isDemoMode) {
       _statusMessage =
           'Đang chờ Wi-Fi — đã xếp hàng ${_pendingUploadIds.length} sổ tay';
-      notifyListeners();
+      if (!wasAlreadyPending) notifyListeners();
       return;
     }
 
-    // Nếu người dùng chọn chu kỳ thủ công (0), không tự động kích hoạt ngay sau khi sửa.
+    // Nếu người dùng chọn chu kỳ thủ công (0), chỉ xếp hàng chờ bấm "Đồng bộ ngay".
     if (foregroundSyncMinutes == 0) {
-      notifyListeners();
+      if (!wasAlreadyPending) notifyListeners();
       return;
     }
 
-    _debounceTimer?.cancel();
-    _debounceTimer = Timer(debounceDuration, () {
-      if (canAutoSyncOnCurrentNetwork) {
-        unawaited(syncNow());
-      }
-    });
-    notifyListeners();
+    // Đảm bảo bộ đếm chu kỳ tiết kiệm pin (`foregroundSyncMinutes`) đang chạy,
+    // tuyệt đối không gọi `syncNow()` / dựng PDF giữa lúc đang viết tay!
+    if (_foregroundTimer == null) {
+      _rescheduleForegroundTimer();
+    }
+
+    if (!wasAlreadyPending) {
+      notifyListeners();
+    }
   }
 
   /// Xếp hàng xóa tệp sổ tay (cả JSON và PDF) trên Google Drive nếu đã từng đồng bộ.
@@ -469,11 +486,13 @@ class SyncManager extends ChangeNotifier {
     }
 
     final localIsNewer = local.updatedAt.isAfter(remote.updatedAt);
-    final bothChangedSinceLastSync = lastSyncedAt != null
-        ? (local.updatedAt.isAfter(lastSyncedAt) &&
-            remote.updatedAt.isAfter(lastSyncedAt))
-        : (local.syncStatus == SyncStatus.pendingUpload &&
-            local.driveFileId != null);
+    // Chỉ tạo bản sao xung đột khi CÓ mốc `lastSyncedAt` đã biết VÀ cả hai phía đều sửa
+    // sau mốc đó ít nhất 5 giây (tránh lệch đồng hồ Drive hoặc tạo bản sao thừa sau khi khởi động lại).
+    final bothChangedSinceLastSync = lastSyncedAt != null &&
+        local.updatedAt.isAfter(lastSyncedAt.add(const Duration(seconds: 5))) &&
+        remote.updatedAt
+            .isAfter(lastSyncedAt.add(const Duration(seconds: 5))) &&
+        local.updatedAt != remote.updatedAt;
 
     if (localIsNewer) {
       Notebook? backup;
@@ -653,7 +672,7 @@ class SyncManager extends ChangeNotifier {
         downloadedCount++;
       }
 
-      _lastSyncedAt = DateTime.now();
+      await _setLastSyncedAt(DateTime.now());
       _statusMessage =
           'Đồng bộ xong: ↑$uploadedCount tải lên (JSON + PDF), ↓$downloadedCount tải về'
           '${conflictCopies > 0 ? ', $conflictCopies bản sao xung đột' : ''}';
@@ -741,7 +760,7 @@ class SyncManager extends ChangeNotifier {
         restoredCount++;
       }
 
-      _lastSyncedAt = DateTime.now();
+      await _setLastSyncedAt(DateTime.now());
       _statusMessage = restoredCount > 0
           ? 'Đã khôi phục $restoredCount sổ tay từ Google Drive.'
           : 'Không tìm thấy bản sao lưu nào trên Google Drive.';
@@ -755,6 +774,16 @@ class SyncManager extends ChangeNotifier {
     }
 
     return restoredCount;
+  }
+
+  Future<void> _setLastSyncedAt(DateTime time) async {
+    _lastSyncedAt = time;
+    try {
+      await _secureStorage.write(
+        key: _kLastSyncedAt,
+        value: time.toIso8601String(),
+      );
+    } catch (_) {}
   }
 
   void _addLog(String message, {bool isError = false}) {
