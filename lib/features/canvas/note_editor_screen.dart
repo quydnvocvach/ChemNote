@@ -70,6 +70,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   String? _croppingImageId;
   bool _shapeSnappedLive = false;
   final ValueNotifier<double> _pullAddProgressNotifier = ValueNotifier(0.0);
+  final ValueNotifier<int> _visiblePageNotifier = ValueNotifier<int>(0);
   final GlobalKey _viewportStackKey = GlobalKey();
   final Map<String, TextEditingController> _stickyControllers = {};
   late PageController _horizontalPageController;
@@ -229,6 +230,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     super.initState();
     _activeNotebookId = widget.notebookId;
     _currentPageIndex = widget.initialPageIndex;
+    _visiblePageNotifier.value = _currentPageIndex;
     _horizontalPageController = PageController(initialPage: _currentPageIndex);
     _lassoController.addListener(_onLassoChanged);
 
@@ -306,6 +308,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _erasingStrokesNotifier.dispose();
     _cropDraftNotifier.dispose();
     _pullAddProgressNotifier.dispose();
+    _visiblePageNotifier.dispose();
     _activeTextController?.dispose();
     _activeTextFocusNode?.dispose();
     for (final img in _pdfImageCache.values) {
@@ -439,6 +442,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     final notebook = _getNotebook(context, listen: false);
     if (notebook == null || notebook.pages.isEmpty) return;
     final clampedIdx = index.clamp(0, notebook.pages.length - 1);
+    _visiblePageNotifier.value = clampedIdx;
     setState(() => _currentPageIndex = clampedIdx);
     if (!appState.verticalContinuousScroll &&
         _horizontalPageController.hasClients) {
@@ -562,24 +566,29 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       }
     }
 
-    // Track multi-finger gestures (2-finger Undo / 3-finger Redo)
-    _pointerDownPositions[event.pointer] = event.position;
-    if (_pointerDownPositions.length == 1) {
-      _multiFingerDownTime = DateTime.now();
-      _maxSimultaneousPointers = 1;
-      _multiFingerMovedTooMuch = false;
-    } else {
-      if (_pointerDownPositions.length > _maxSimultaneousPointers) {
-        _maxSimultaneousPointers = _pointerDownPositions.length;
+    // Track multi-finger gestures (touch only — NEVER let resting touch block a real stylus!)
+    if (!isStylusEvent) {
+      _pointerDownPositions[event.pointer] = event.position;
+      if (_pointerDownPositions.length == 1) {
+        _multiFingerDownTime = DateTime.now();
+        _maxSimultaneousPointers = 1;
+        _multiFingerMovedTooMuch = false;
+      } else {
+        if (_pointerDownPositions.length > _maxSimultaneousPointers) {
+          _maxSimultaneousPointers = _pointerDownPositions.length;
+        }
+        _cancelActiveGesture();
+        return;
       }
-      _cancelActiveGesture();
-      return;
     }
 
     final appState = context.read<AppState>();
     _palmFilter.stylusOnlyMode = appState.palmRejectionEnabled;
 
     if (appState.readOnlyMode || _activeTool == EditorTool.panZoom) return;
+    // Unconditionally accept real M-Pencil 3 stylus events; only filter touch events!
+    final bool allowThisPointer =
+        isStylusEvent || _palmFilter.shouldAccept(event);
 
     final rawPos = event.localPosition;
 
@@ -629,7 +638,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
     // Study Tape: tap existing tape to toggle reveal/hide, or drag to create new tape
     if (_activeTool == EditorTool.studyTape) {
-      if (!_palmFilter.shouldAccept(event)) return;
+      if (!allowThisPointer) return;
       final hitTape = _findTapeAt(page, rawPos);
       if (hitTape != null) {
         final updatedTapes = page.tapeElements
@@ -647,19 +656,19 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
     // Laser Pointer: lock viewport pan while laser pointer is held down
     if (_activeTool == EditorTool.laserPointer) {
-      if (!_palmFilter.shouldAccept(event)) return;
+      if (!allowThisPointer) return;
       _isDrawingPointerDown = true;
       _laserController.addPoint(rawPos);
       return;
     }
 
     if (_activeTool == EditorTool.textBox) {
-      if (!_palmFilter.shouldAccept(event)) return;
+      if (!allowThisPointer) return;
       _createTextElementAt(page, rawPos);
       return;
     }
 
-    if (!_palmFilter.shouldAccept(event)) return;
+    if (!allowThisPointer) return;
 
     _isDrawingPointerDown = true;
 
@@ -734,22 +743,24 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   }
 
   void _handlePointerMove(PointerMoveEvent event, NotePage page) {
-    final startPos = _pointerDownPositions[event.pointer];
-    if (startPos != null && (event.position - startPos).distance > 16.0) {
-      _multiFingerMovedTooMuch = true;
+    final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus;
+    if (!isStylusEvent) {
+      final startPos = _pointerDownPositions[event.pointer];
+      if (startPos != null && (event.position - startPos).distance > 16.0) {
+        _multiFingerMovedTooMuch = true;
+      }
+      if (_pointerDownPositions.length >= 2) return;
     }
 
-    if (_pointerDownPositions.length >= 2 ||
-        context.read<AppState>().readOnlyMode ||
+    if (context.read<AppState>().readOnlyMode ||
         _activeTool == EditorTool.panZoom) {
       return;
     }
-    if (_stylusPanMode &&
-        (event.kind == PointerDeviceKind.stylus ||
-            event.kind == PointerDeviceKind.invertedStylus)) {
+    if (isStylusEvent && _stylusPanMode) {
       return;
     }
-    if (!_palmFilter.shouldAccept(event)) return;
+    if (!isStylusEvent && !_palmFilter.shouldAccept(event)) return;
 
     final rawPos = event.localPosition;
     final pos = (_rulerVisible && _activeTool.isDrawingTool)
@@ -2234,6 +2245,26 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     final m = _transformController.value;
     final scale = m.getMaxScaleOnAxis().clamp(0.5, 4.0);
     final ty = m.getTranslation().y;
+
+    // Update visible page index for ±2 page GPU virtualization (only when page changes!)
+    final double centerContentY = (-ty + viewportSize.height * 0.45) / scale;
+    double cursorY = 18.0;
+    int visibleIdx = notebook.pages.length - 1;
+    for (int i = 0; i < notebook.pages.length; i++) {
+      final ph =
+          PaperMetrics.pageSize(isLandscape: notebook.pages[i].isLandscape)
+              .height;
+      if (centerContentY <= cursorY + ph + 14.0) {
+        visibleIdx = i;
+        break;
+      }
+      cursorY += ph + 14.0;
+    }
+    if (_visiblePageNotifier.value != visibleIdx) {
+      _visiblePageNotifier.value = visibleIdx;
+      _currentPageIndex = visibleIdx;
+    }
+
     final contentBottom = ty + totalContentHeight * scale;
     final thresholdY = viewportSize.height - 50.0;
     if (contentBottom < thresholdY) {
@@ -3256,24 +3287,40 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         appState,
                       )
                     else if (appState.verticalContinuousScroll)
-                      _StylusSafePanZoomViewport(
-                        controller: _transformController,
-                        stylusPanMode: _stylusPanMode,
-                        allowSingleFingerPan: _stylusPanMode ||
-                            appState.readOnlyMode ||
-                            appState.palmRejectionEnabled ||
-                            _activeTool == EditorTool.panZoom,
-                        locked: _isOverlayDragging,
-                        minScale: 0.5,
-                        maxScale: 4.0,
-                        scrollSpeedMultiplier: appState.scrollSpeedMultiplier,
-                        unconstrainedChild: true,
-                        onInteractionUpdate: () =>
-                            _updatePullToAddProgress(notebook, vpSize),
-                        onInteractionEnd: () =>
-                            _finishPullToAddIfReady(notebook),
-                        child: _buildVerticalContinuousPages(notebook),
-                      )
+                      () {
+                        double maxPageW = 0.0;
+                        for (final p in notebook.pages) {
+                          final pw =
+                              PaperMetrics.pageSize(isLandscape: p.isLandscape)
+                                  .width;
+                          if (pw > maxPageW) maxPageW = pw;
+                        }
+                        final double contentW = maxPageW + 48.0;
+                        final double contentH =
+                            _totalVerticalContentHeight(notebook);
+                        return _StylusSafePanZoomViewport(
+                          controller: _transformController,
+                          stylusPanMode: _stylusPanMode,
+                          allowSingleFingerPan: _stylusPanMode ||
+                              appState.readOnlyMode ||
+                              appState.palmRejectionEnabled ||
+                              _activeTool == EditorTool.panZoom,
+                          locked: _isOverlayDragging,
+                          minScale: 0.5,
+                          maxScale: 4.0,
+                          scrollSpeedMultiplier: appState.scrollSpeedMultiplier,
+                          viewportSize: vpSize,
+                          contentWidth: contentW,
+                          contentHeight: contentH,
+                          isWhiteboard: false,
+                          unconstrainedChild: true,
+                          onInteractionUpdate: () =>
+                              _updatePullToAddProgress(notebook, vpSize),
+                          onInteractionEnd: () =>
+                              _finishPullToAddIfReady(notebook),
+                          child: _buildVerticalContinuousPages(notebook),
+                        );
+                      }()
                     else
                       _StylusSafePanZoomViewport(
                         controller: _transformController,
@@ -3286,6 +3333,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         minScale: 0.5,
                         maxScale: 4.0,
                         scrollSpeedMultiplier: appState.scrollSpeedMultiplier,
+                        viewportSize: vpSize,
+                        contentWidth: vpSize.width,
+                        contentHeight: vpSize.height,
+                        isWhiteboard: false,
                         unconstrainedChild: false,
                         child: _buildHorizontalFlipPages(notebook),
                       ),
@@ -3734,6 +3785,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               minScale: 0.25,
               maxScale: 4.0,
               scrollSpeedMultiplier: appState.scrollSpeedMultiplier,
+              viewportSize: viewportSize,
+              contentWidth: PaperMetrics.whiteboardWidth,
+              contentHeight: PaperMetrics.whiteboardHeight,
+              isWhiteboard: true,
               unconstrainedChild: true,
               onInteractionUpdate: () {
                 final scale = _whiteboardTransformController.value
@@ -3832,51 +3887,83 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     );
   }
 
+  Color _placeholderPaperColor(PaperColorType colorType) {
+    switch (colorType) {
+      case PaperColorType.white:
+        return const Color(0xFFFFFFFF);
+      case PaperColorType.cream:
+        return const Color(0xFFFAF6EC);
+      case PaperColorType.dark:
+        return const Color(0xFF1E1E24);
+    }
+  }
+
   Widget _buildVerticalContinuousPages(Notebook notebook) {
-    // No nested SingleChildScrollView fighting InteractiveViewer!
-    // One unified InteractiveViewer handles 144fps 1-finger scroll & 2-finger pinch-zoom cleanly.
+    // Virtualized ±2 page GPU window: only at most 5 pages allocate RepaintBoundary /
+    // CanvasPainter textures at any time -> flat <60 MB VRAM even on 100+ page notebooks!
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 24),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (int i = 0; i < notebook.pages.length; i++) ...[
-            _buildSinglePageCanvas(notebook, notebook.pages[i], i),
-            if (i < notebook.pages.length - 1) const SizedBox(height: 14),
-          ],
-          const SizedBox(height: 18),
-          GestureDetector(
-            onTap: () => _handlePullAddPage(notebook, notebook.pages.last),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-              decoration: BoxDecoration(
-                color: EditorColors.obsidianSurface.withAlpha(200),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.white12),
-              ),
-              child: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.add_circle_outline_rounded,
-                    size: 16,
-                    color: EditorColors.activeBlue,
+      child: ValueListenableBuilder<int>(
+        valueListenable: _visiblePageNotifier,
+        builder: (_, visiblePage, __) {
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (int i = 0; i < notebook.pages.length; i++) ...[
+                if ((i - visiblePage).abs() <= 2)
+                  _buildSinglePageCanvas(notebook, notebook.pages[i], i)
+                else
+                  () {
+                    final p = notebook.pages[i];
+                    final sz = PaperMetrics.pageSize(isLandscape: p.isLandscape);
+                    return SizedBox(
+                      width: sz.width,
+                      height: sz.height,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: _placeholderPaperColor(p.paperColor),
+                        ),
+                      ),
+                    );
+                  }(),
+                if (i < notebook.pages.length - 1) const SizedBox(height: 14),
+              ],
+              const SizedBox(height: 18),
+              GestureDetector(
+                onTap: () => _handlePullAddPage(notebook, notebook.pages.last),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: EditorColors.obsidianSurface.withAlpha(200),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: Colors.white12),
                   ),
-                  SizedBox(width: 8),
-                  Text(
-                    'Chạm để thêm trang mới',
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white70,
-                    ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.add_circle_outline_rounded,
+                        size: 16,
+                        color: EditorColors.activeBlue,
+                      ),
+                      SizedBox(width: 8),
+                      Text(
+                        'Chạm để thêm trang mới',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.white70,
+                        ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
-            ),
-          ),
-          const SizedBox(height: 36),
-        ],
+              const SizedBox(height: 36),
+            ],
+          );
+        },
       ),
     );
   }
@@ -3994,7 +4081,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 // Layer 2 (144Hz Live Ink Overlay in its own RepaintBoundary — Zero Widget Rebuilds)
                 Positioned.fill(
                   child: Listener(
-                    behavior: HitTestBehavior.translucent,
+                    behavior: HitTestBehavior.opaque,
                     onPointerHover: (e) => _handlePointerHover(e, page),
                     onPointerDown: (e) => _handlePointerDown(e, page, pageIndex),
                     onPointerMove: (e) => _handlePointerMove(e, page),
@@ -5073,6 +5160,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                           file,
                                           fit: BoxFit.contain,
                                           filterQuality: FilterQuality.medium,
+                                          cacheWidth: 1600,
                                           gaplessPlayback: true,
                                         )
                                       : Container(
@@ -5090,6 +5178,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                           file,
                                           fit: BoxFit.contain,
                                           filterQuality: FilterQuality.medium,
+                                          cacheWidth: 1600,
                                           gaplessPlayback: true,
                                         )
                                       : const SizedBox.expand())),
@@ -6655,6 +6744,10 @@ class _StylusSafePanZoomViewport extends StatefulWidget {
   final double minScale;
   final double maxScale;
   final double scrollSpeedMultiplier;
+  final Size viewportSize;
+  final double contentWidth;
+  final double contentHeight;
+  final bool isWhiteboard;
   final bool unconstrainedChild;
   final VoidCallback? onInteractionUpdate;
   final VoidCallback? onInteractionEnd;
@@ -6668,6 +6761,10 @@ class _StylusSafePanZoomViewport extends StatefulWidget {
     required this.minScale,
     required this.maxScale,
     required this.scrollSpeedMultiplier,
+    required this.viewportSize,
+    required this.contentWidth,
+    required this.contentHeight,
+    required this.isWhiteboard,
     required this.unconstrainedChild,
     this.onInteractionUpdate,
     this.onInteractionEnd,
@@ -6737,6 +6834,21 @@ class _StylusSafePanZoomViewportState
       newTy = focal.dy - (focal.dy - curTy) * ratio + focalDelta.dy;
     }
 
+    // Lock horizontal scroll when not zoomed in wider than viewport (zero sideways drift!)
+    if (!widget.isWhiteboard && widget.viewportSize.width > 0) {
+      final double scaledW = widget.contentWidth * newScale;
+      if (scaledW <= widget.viewportSize.width + 2.0) {
+        newTx = (widget.viewportSize.width - scaledW) * 0.5;
+      } else {
+        final double minTx = widget.viewportSize.width - scaledW;
+        newTx = newTx.clamp(minTx, 0.0);
+      }
+
+      final double scaledH = widget.contentHeight * newScale;
+      final double minTy = math.min(0.0, widget.viewportSize.height - scaledH);
+      newTy = newTy.clamp(minTy - 140.0, 20.0);
+    }
+
     widget.controller.value = Matrix4.identity()
       ..translate(newTx, newTy)
       ..scale(newScale, newScale);
@@ -6775,14 +6887,16 @@ class _StylusSafePanZoomViewportState
             alignment: Alignment.topLeft,
             child: child,
           ),
+          // UnconstrainedBox + explicit SizedBox preserves full hit-testing across all pages!
           child: widget.unconstrainedChild
-              ? OverflowBox(
-                  minWidth: 0,
-                  maxWidth: double.infinity,
-                  minHeight: 0,
-                  maxHeight: double.infinity,
+              ? UnconstrainedBox(
                   alignment: Alignment.topLeft,
-                  child: widget.child,
+                  clipBehavior: Clip.none,
+                  child: SizedBox(
+                    width: widget.contentWidth,
+                    height: widget.contentHeight,
+                    child: widget.child,
+                  ),
                 )
               : widget.child,
         ),

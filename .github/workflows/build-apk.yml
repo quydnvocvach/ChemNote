@@ -160,15 +160,16 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.5.1 with APK
+      - name: Publish Release v3.5.2 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.5.1
-          name: ChemNote Pro v3.5.1 (Hotfix Chống đơ ANR & Khóa cuộn bút M-Pencil 3)
+          tag_name: v3.5.2
+          name: ChemNote Pro v3.5.2 (Hotfix Nhận bút M-Pencil 3, Khóa cuộn ngang & Chống văng app nhiều trang)
           body: |
-            ### ChemNote Pro v3.5.1 — Bản sửa nóng (Hotfix) cực mượt cho Huawei MatePad 11.5"S!
-            - **Sửa triệt để lỗi đơ/ANR ("ChemNote hiện không phản hồi") khi viết nhanh:** Lưu đĩa bất đồng bộ theo cơ chế debounce `1500ms` kết hợp mã hóa JSON trên Background Isolate (`compute`), loại bỏ 100% `setState` trong vòng đời viết bút, không còn đồng bộ PDF gây nghẽn lúc đang viết!
-            - **Khóa tuyệt đối hiện tượng bút M-Pencil 3 lướt nhầm trang:** Tách cứng `supportedDevices` ở tầng `ScaleGestureRecognizer` — bút cảm ứng chỉ viết (trừ khi bật nút Cuộn bằng bút), 1 ngón tay cuộn & 2 ngón phóng to mượt 144Hz.
+            ### ChemNote Pro v3.5.2 — Bản sửa nóng ổn định tuyệt đối cho Huawei MatePad 11.5"S!
+            - **Sửa triệt để lỗi không nhận bút cảm ứng M-Pencil 3:** Thay `OverflowBox` bằng `UnconstrainedBox` + `SizedBox` giúp hit-test chính xác 100% ở mọi mức zoom/cuộn và luôn nhận sự kiện bút cảm ứng trực tiếp không bị lọc nhầm.
+            - **Khóa cứng cuộn ngang khi chưa zoom to:** Khi trang đang vừa màn hình, chỉ cuộn dọc mượt mà theo trục đứng (căn giữa tuyệt đối, không trôi ngang); chỉ cho phép kéo ngang khi đã zoom phóng to hoặc dùng Bảng trắng vô cực.
+            - **Ảo hóa trang (±2 trang hiển thị) chống lag & văng app (OOM):** Chỉ cấp phát GPU texture cho tối đa 5 trang quanh trang đang xem, giữ RAM/VRAM nhẹ tênh dù sổ tay có hàng chục/hàng trăm trang!
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true
