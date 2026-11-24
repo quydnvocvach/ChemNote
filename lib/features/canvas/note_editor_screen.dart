@@ -123,11 +123,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   bool _rulerVisible = false;
   final RulerState _rulerState = RulerState();
 
-  // Gesture tracking (including 2-finger Undo / 3-finger Redo)
+  // Gesture tracking (top-level 2-finger Undo / 3-finger Redo)
   final Map<int, Offset> _pointerDownPositions = {};
   DateTime? _multiFingerDownTime;
   int _maxSimultaneousPointers = 0;
   bool _multiFingerMovedTooMuch = false;
+  final Map<int, Offset> _tapTouchStarts = {};
+  DateTime? _tapTouchStartTime;
+  int _tapMaxTouchCount = 0;
+  bool _tapMovedTooFar = false;
   bool _isDraggingLassoSelection = false;
   Offset? _lastLassoDragPos;
   Offset? _tapeDragStart;
@@ -174,6 +178,39 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   double get _effectiveOpacity =>
       _activeTool == EditorTool.highlighter ? _highlighterOpacity : _penOpacity;
 
+  EditorTool _editorToolFromStrokeTool(ToolType t) {
+    switch (t) {
+      case ToolType.fountainPen:
+        return EditorTool.fountainPen;
+      case ToolType.ballpointPen:
+        return EditorTool.ballpointPen;
+      case ToolType.pencil:
+        return EditorTool.pencil;
+      case ToolType.brushPen:
+        return EditorTool.brushPen;
+      case ToolType.highlighter:
+        return EditorTool.highlighter;
+    }
+  }
+
+  void _persistPenPrefs() {
+    if (!mounted) return;
+    context.read<AppState>().updatePenPrefs(
+          lastPenTool: _lastPenTool.toStrokeToolType(),
+          // ignore: deprecated_member_use
+          lastPenColorValue: _penColor.value,
+          lastPenWidth: _penWidth,
+          lastPenOpacity: _penOpacity,
+          lastPressureSensitivity: _pressureSensitivity,
+          lastSmoothingEnabled: _autoNeatenEnabled,
+          lastSmoothingStrength: _smoothingStrength,
+          // ignore: deprecated_member_use
+          lastHighlighterColorValue: _highlighterColor.value,
+          lastHighlighterWidth: _highlighterWidth,
+          lastEraserRadius: _eraserRadius,
+        );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -181,6 +218,21 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _currentPageIndex = widget.initialPageIndex;
     _horizontalPageController = PageController(initialPage: _currentPageIndex);
     _lassoController.addListener(_onLassoChanged);
+
+    // Restore user's last-used writing tool, color, size, opacity, smoothing & eraser size
+    final appState = context.read<AppState>();
+    _lastPenTool = _editorToolFromStrokeTool(appState.lastPenTool);
+    _activeTool = _lastPenTool;
+    _penColor = Color(appState.lastPenColorValue);
+    _penWidth = appState.lastPenWidth;
+    _penOpacity = appState.lastPenOpacity;
+    _pressureSensitivity = appState.lastPressureSensitivity;
+    _autoNeatenEnabled = appState.lastSmoothingEnabled;
+    _smoothingStrength = appState.lastSmoothingStrength;
+    _highlighterColor = Color(appState.lastHighlighterColorValue);
+    _highlighterWidth = appState.lastHighlighterWidth;
+    _eraserRadius = appState.lastEraserRadius;
+    _palmFilter.stylusOnlyMode = appState.palmRejectionEnabled;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -527,6 +579,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           _penColor = sampled;
         }
       });
+      _persistPenPrefs();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           duration: Duration(milliseconds: 1100),
@@ -733,21 +786,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       setState(() => _isDrawingPointerDown = false);
     }
 
-    // Check 2-finger tap Undo / 3-finger tap Redo when all fingers lift
-    if (_pointerDownPositions.isEmpty &&
-        _maxSimultaneousPointers >= 2 &&
-        !_multiFingerMovedTooMuch &&
-        _multiFingerDownTime != null) {
-      final elapsed =
-          DateTime.now().difference(_multiFingerDownTime!).inMilliseconds;
-      final appState = context.read<AppState>();
-      if (appState.quickGesturesEnabled && elapsed < 300) {
-        if (_maxSimultaneousPointers == 2) {
-          _undo(page);
-        } else if (_maxSimultaneousPointers >= 3) {
-          _redo(page);
-        }
-      }
+    // Multi-finger tap Undo/Redo is handled by the top-level viewport Listener
+    // so InteractiveViewer never swallows it and it never triggers twice.
+    if (_pointerDownPositions.isEmpty && _maxSimultaneousPointers >= 2) {
       _maxSimultaneousPointers = 0;
       return;
     }
@@ -2548,6 +2589,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 if (_activeTool != EditorTool.lasso) _lassoController.clear();
                 if (_activeTool != EditorTool.image) _selectedImageId = null;
               });
+              if (_activeTool.isPenFamily) _persistPenPrefs();
             },
             onOpenPenPopover: () => showPenSettingsSheet(
               context: context,
@@ -2561,17 +2603,23 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               pressureSensitivity: _pressureSensitivity,
               autoNeaten: _autoNeatenEnabled,
               smoothingStrength: _smoothingStrength,
-              onSelectPen: (p) => setState(() {
-                _lastPenTool = p;
-                _activeTool = p;
-              }),
-              onSelectColor: (c) => setState(() {
-                if (_activeTool == EditorTool.highlighter) {
-                  _highlighterColor = c;
-                } else {
-                  _penColor = c;
-                }
-              }),
+              onSelectPen: (p) {
+                setState(() {
+                  _lastPenTool = p;
+                  _activeTool = p;
+                });
+                _persistPenPrefs();
+              },
+              onSelectColor: (c) {
+                setState(() {
+                  if (_activeTool == EditorTool.highlighter) {
+                    _highlighterColor = c;
+                  } else {
+                    _penColor = c;
+                  }
+                });
+                _persistPenPrefs();
+              },
               onPickEyedropper: () {
                 setState(() => _eyedropperActive = true);
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -2585,13 +2633,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 context: context,
                 isHighlighter: _activeTool == EditorTool.highlighter,
                 currentColor: _effectiveColor,
-                onSelectColor: (c) => setState(() {
-                  if (_activeTool == EditorTool.highlighter) {
-                    _highlighterColor = c;
-                  } else {
-                    _penColor = c;
-                  }
-                }),
+                onSelectColor: (c) {
+                  setState(() {
+                    if (_activeTool == EditorTool.highlighter) {
+                      _highlighterColor = c;
+                    } else {
+                      _penColor = c;
+                    }
+                  });
+                  _persistPenPrefs();
+                },
               ),
               onUpdate: ({
                 width,
@@ -2625,6 +2676,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     _smoothingStrength = smoothingStrength;
                   }
                 });
+                _persistPenPrefs();
                 if (scribbleToErase != null) {
                   appState.setScribbleToErase(scribbleToErase);
                 }
@@ -2637,7 +2689,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               context: context,
               currentMode: _eraserMode,
               eraserRadius: _eraserRadius,
-              onEraserRadiusChanged: (r) => setState(() => _eraserRadius = r),
+              onEraserRadiusChanged: (r) {
+                setState(() => _eraserRadius = r);
+                _persistPenPrefs();
+              },
               onSelectMode: (m) => setState(() => _eraserMode = m),
               onClearCurrentPage: () => _commitPage(
                 currentPage.copyWith(strokes: const []),
@@ -2675,24 +2730,30 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               );
             },
             onToggleAudioRecording: () => _toggleAudioRecording(currentPage),
-            onSelectColor: (c) => setState(() {
-              if (_activeTool == EditorTool.highlighter) {
-                _highlighterColor = c;
-              } else {
-                _penColor = c;
-              }
-            }),
-            onOpenColorPalette: () => showColorPaletteSheet(
-              context: context,
-              isHighlighter: _activeTool == EditorTool.highlighter,
-              currentColor: _effectiveColor,
-              onSelectColor: (c) => setState(() {
+            onSelectColor: (c) {
+              setState(() {
                 if (_activeTool == EditorTool.highlighter) {
                   _highlighterColor = c;
                 } else {
                   _penColor = c;
                 }
-              }),
+              });
+              _persistPenPrefs();
+            },
+            onOpenColorPalette: () => showColorPaletteSheet(
+              context: context,
+              isHighlighter: _activeTool == EditorTool.highlighter,
+              currentColor: _effectiveColor,
+              onSelectColor: (c) {
+                setState(() {
+                  if (_activeTool == EditorTool.highlighter) {
+                    _highlighterColor = c;
+                  } else {
+                    _penColor = c;
+                  }
+                });
+                _persistPenPrefs();
+              },
             ),
           ),
 
@@ -2744,9 +2805,80 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     ..scale(initScale, initScale);
                 }
 
-                return Stack(
-                  key: _viewportStackKey,
-                  children: [
+                return Listener(
+                  behavior: HitTestBehavior.translucent,
+                  onPointerDown: (e) {
+                    if (e.kind != PointerDeviceKind.touch) return;
+                    if (_tapTouchStarts.isEmpty) {
+                      _tapTouchStartTime = DateTime.now();
+                      _tapMaxTouchCount = 0;
+                      _tapMovedTooFar = false;
+                    }
+                    _tapTouchStarts[e.pointer] = e.position;
+                    _tapMaxTouchCount =
+                        math.max(_tapMaxTouchCount, _tapTouchStarts.length);
+                  },
+                  onPointerMove: (e) {
+                    if (e.kind != PointerDeviceKind.touch || _tapMovedTooFar) {
+                      return;
+                    }
+                    final start = _tapTouchStarts[e.pointer];
+                    if (start != null && (e.position - start).distance > 18.0) {
+                      _tapMovedTooFar = true;
+                    }
+                  },
+                  onPointerUp: (e) {
+                    if (e.kind != PointerDeviceKind.touch) return;
+                    _tapTouchStarts.remove(e.pointer);
+                    if (_tapTouchStarts.isEmpty && _tapTouchStartTime != null) {
+                      final elapsed = DateTime.now()
+                          .difference(_tapTouchStartTime!)
+                          .inMilliseconds;
+                      final maxFingers = _tapMaxTouchCount;
+                      final moved = _tapMovedTooFar;
+                      _tapTouchStartTime = null;
+                      _tapMaxTouchCount = 0;
+                      _tapMovedTooFar = false;
+                      if (appState.quickGesturesEnabled &&
+                          !moved &&
+                          elapsed < 350 &&
+                          maxFingers >= 2) {
+                        if (maxFingers == 2) {
+                          _undo(currentPage);
+                          ScaffoldMessenger.of(context)
+                            ..hideCurrentSnackBar()
+                            ..showSnackBar(
+                              const SnackBar(
+                                duration: Duration(milliseconds: 700),
+                                content: Text('Hoàn tác'),
+                              ),
+                            );
+                        } else {
+                          _redo(currentPage);
+                          ScaffoldMessenger.of(context)
+                            ..hideCurrentSnackBar()
+                            ..showSnackBar(
+                              const SnackBar(
+                                duration: Duration(milliseconds: 700),
+                                content: Text('Làm lại'),
+                              ),
+                            );
+                        }
+                      }
+                    }
+                  },
+                  onPointerCancel: (e) {
+                    if (e.kind != PointerDeviceKind.touch) return;
+                    _tapTouchStarts.remove(e.pointer);
+                    if (_tapTouchStarts.isEmpty) {
+                      _tapTouchStartTime = null;
+                      _tapMaxTouchCount = 0;
+                      _tapMovedTooFar = false;
+                    }
+                  },
+                  child: Stack(
+                    key: _viewportStackKey,
+                    children: [
                     if (currentPage.isInfiniteWhiteboard ||
                         notebook.isWhiteboard)
                       _buildInfiniteWhiteboardView(
@@ -2944,6 +3076,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                 }
                                 _selectedImageId = null;
                               });
+                              _persistPenPrefs();
                             },
                             onRemovePreset: (preset) {
                               appState.toggleStarPen(preset);
@@ -3081,7 +3214,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                           ),
                         ),
                       ),
-                  ],
+                    ],
+                  ),
                 );
               },
             ),

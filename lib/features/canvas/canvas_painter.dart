@@ -375,16 +375,57 @@ class CanvasPainter extends CustomPainter {
       return;
     }
 
-    // Variable-width ink ribbon for fountain, ballpoint, brush, and pencil
-    final ribbonPath = StrokeEngine.buildVariableWidthPath(stroke);
+    // 1. Filter consecutive micro-points (< 0.75 px) so tangents never flip or spike
+    final pts = _filterRenderPoints(stroke.points);
+    if (pts.isEmpty) return;
+
+    final bool isPencil = stroke.toolType == ToolType.pencil;
+    final Color inkColor = isPencil
+        ? color.withAlpha((195 * opacityMultiplier).round().clamp(16, 255))
+        : color;
+
+    // Single-point tap: crisp anti-aliased dot
+    if (pts.length == 1) {
+      final r = math.max(0.8, stroke.width * 0.5);
+      final dotCenter = Offset(pts.first.x, pts.first.y);
+      if (isAudioHighlighted) {
+        canvas.drawCircle(
+          dotCenter,
+          r + 3.5,
+          Paint()
+            ..color = const Color(0xFF3B82F6).withAlpha(140)
+            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3.0),
+        );
+      }
+      if (isSelected) {
+        canvas.drawCircle(
+          dotCenter,
+          r + 2.5,
+          Paint()..color = const Color(0xFF3B82F6).withAlpha(75),
+        );
+      }
+      canvas.drawCircle(
+        dotCenter,
+        r,
+        Paint()
+          ..color = inkColor
+          ..style = PaintingStyle.fill
+          ..isAntiAlias = true,
+      );
+      return;
+    }
+
+    // Build smooth quadratic midpoint centerline path (used for ballpoint + audio/selection glow)
+    final smoothCenterPath = _buildQuadraticMidpointPath(pts);
 
     if (isAudioHighlighted) {
       canvas.drawPath(
-        ribbonPath,
+        smoothCenterPath,
         Paint()
           ..color = const Color(0xFF3B82F6).withAlpha(140)
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 6.5
+          ..strokeWidth = stroke.width + 7.0
+          ..strokeCap = StrokeCap.round
           ..strokeJoin = StrokeJoin.round
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3.0),
       );
@@ -392,26 +433,204 @@ class CanvasPainter extends CustomPainter {
 
     if (isSelected) {
       canvas.drawPath(
-        ribbonPath,
+        smoothCenterPath,
         Paint()
-          ..color = const Color(0xFF3B82F6).withAlpha(70)
+          ..color = const Color(0xFF3B82F6).withAlpha(75)
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 5.0
+          ..strokeWidth = stroke.width + 5.5
+          ..strokeCap = StrokeCap.round
           ..strokeJoin = StrokeJoin.round,
       );
     }
 
-    final bool isPencil = stroke.toolType == ToolType.pencil;
-    final fillPaint = Paint()
-      ..color = isPencil
-          ? color.withAlpha((195 * opacityMultiplier).round().clamp(16, 255))
-          : color
-      ..style = PaintingStyle.fill
+    // Ballpoint Pen: crisp uniform-width quadratic Bezier stroke
+    if (stroke.toolType == ToolType.ballpointPen) {
+      canvas.drawPath(
+        smoothCenterPath,
+        Paint()
+          ..color = inkColor
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = stroke.width.clamp(0.6, 40.0)
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round
+          ..isAntiAlias = true,
+      );
+      return;
+    }
+
+    // Fountain Pen / Brush Pen / Pencil: Silky-smooth spike-free quadratic midpoint
+    // calligraphic rendering with 3-point smoothed pressure + velocity width envelope
+    final widths = _computeSmoothedStrokeWidths(pts, stroke);
+    final segPaint = Paint()
+      ..color = inkColor
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = true;
     if (isPencil) {
-      fillPaint.maskFilter = const MaskFilter.blur(BlurStyle.normal, 0.45);
+      segPaint.maskFilter = const MaskFilter.blur(BlurStyle.normal, 0.45);
     }
-    canvas.drawPath(ribbonPath, fillPaint);
+
+    if (pts.length == 2) {
+      segPaint.strokeWidth = (widths[0] + widths[1]) * 0.5;
+      canvas.drawLine(
+        Offset(pts[0].x, pts[0].y),
+        Offset(pts[1].x, pts[1].y),
+        segPaint,
+      );
+      return;
+    }
+
+    // Draw first half-segment p[0] -> mid(p[0], p[1])
+    final firstMid = Offset(
+      (pts[0].x + pts[1].x) * 0.5,
+      (pts[0].y + pts[1].y) * 0.5,
+    );
+    segPaint.strokeWidth = (widths[0] + widths[1]) * 0.5;
+    canvas.drawLine(Offset(pts[0].x, pts[0].y), firstMid, segPaint);
+
+    // Draw quadratic Bezier midpoint segments: prevMid -> control pts[i] -> nextMid
+    Offset prevMid = firstMid;
+    final segPath = Path();
+    for (int i = 1; i < pts.length - 1; i++) {
+      final p = pts[i];
+      final next = pts[i + 1];
+      final nextMid = Offset((p.x + next.x) * 0.5, (p.y + next.y) * 0.5);
+      segPath
+        ..reset()
+        ..moveTo(prevMid.dx, prevMid.dy)
+        ..quadraticBezierTo(p.x, p.y, nextMid.dx, nextMid.dy);
+      segPaint.strokeWidth = widths[i];
+      canvas.drawPath(segPath, segPaint);
+      prevMid = nextMid;
+    }
+
+    // Draw final half-segment prevMid -> p[last]
+    segPaint.strokeWidth =
+        (widths[pts.length - 2] + widths[pts.length - 1]) * 0.5;
+    canvas.drawLine(
+      prevMid,
+      Offset(pts.last.x, pts.last.y),
+      segPaint,
+    );
+  }
+
+  /// Filters out consecutive micro-points closer than 0.75 px while preserving endpoints.
+  static List<StrokePoint> _filterRenderPoints(List<StrokePoint> raw) {
+    if (raw.length <= 2) return raw;
+    const double minDistSq = 0.75 * 0.75;
+    final out = <StrokePoint>[raw.first];
+    for (int i = 1; i < raw.length - 1; i++) {
+      final prev = out.last;
+      final cur = raw[i];
+      final dx = cur.x - prev.x;
+      final dy = cur.y - prev.y;
+      if (dx * dx + dy * dy >= minDistSq) {
+        out.add(cur);
+      }
+    }
+    final last = raw.last;
+    final prev = out.last;
+    final dx = last.x - prev.x;
+    final dy = last.y - prev.y;
+    if (dx * dx + dy * dy >= 0.04 || out.length == 1) {
+      out.add(last);
+    } else {
+      out[out.length - 1] = last;
+    }
+    return out;
+  }
+
+  static Path _buildQuadraticMidpointPath(List<StrokePoint> pts) {
+    final path = Path()..moveTo(pts.first.x, pts.first.y);
+    if (pts.length == 2) {
+      path.lineTo(pts[1].x, pts[1].y);
+      return path;
+    }
+    for (int i = 1; i < pts.length - 1; i++) {
+      final p = pts[i];
+      final next = pts[i + 1];
+      path.quadraticBezierTo(
+        p.x,
+        p.y,
+        (p.x + next.x) * 0.5,
+        (p.y + next.y) * 0.5,
+      );
+    }
+    path.lineTo(pts.last.x, pts.last.y);
+    return path;
+  }
+
+  /// Computes a 3-point smoothed calligraphic width envelope combining
+  /// M-Pencil 3 pressure, subtle velocity thinning, and gentle rounded start/end tapers.
+  static List<double> _computeSmoothedStrokeWidths(
+    List<StrokePoint> pts,
+    Stroke stroke,
+  ) {
+    final int n = pts.length;
+    final raw = List<double>.filled(n, stroke.width);
+    final double base = stroke.width.clamp(0.6, 40.0);
+
+    for (int i = 0; i < n; i++) {
+      final p = pts[i];
+      final double press = p.pressure.clamp(0.08, 1.0);
+      double w;
+
+      if (stroke.toolType == ToolType.fountainPen) {
+        // Authentic fountain pen: smooth pressure curve + subtle velocity thinning
+        double velFactor = 1.0;
+        if (i > 0) {
+          final prev = pts[i - 1];
+          final dt = math.max(1, p.timestamp - prev.timestamp);
+          final dx = p.x - prev.x;
+          final dy = p.y - prev.y;
+          final dist = math.sqrt(dx * dx + dy * dy);
+          final speed = dist / dt; // px per ms
+          // Fast strokes slightly crisper (0.88), slow downstrokes slightly richer (1.06)
+          velFactor = (1.06 - speed * 0.14).clamp(0.88, 1.06);
+        }
+        w = base * (0.58 + 0.72 * press) * velFactor;
+      } else if (stroke.toolType == ToolType.brushPen) {
+        w = base * (0.32 + 1.33 * press);
+      } else if (stroke.toolType == ToolType.pencil) {
+        w = StrokeEngine.radiusForPoint(
+              p,
+              baseWidth: base,
+              toolType: ToolType.pencil,
+            ) *
+            2.0;
+      } else {
+        w = base;
+      }
+
+      // Gentle natural rounded start/end taper (NEVER sharp needle spikes!)
+      if (n >= 5) {
+        if (i == 0) {
+          w *= 0.76;
+        } else if (i == 1) {
+          w *= 0.89;
+        } else if (i == n - 1) {
+          w *= 0.75;
+        } else if (i == n - 2) {
+          w *= 0.83;
+        } else if (i == n - 3) {
+          w *= 0.91;
+        }
+      }
+
+      raw[i] = w.clamp(0.55, base * 2.2);
+    }
+
+    // 2 passes of 3-point binomial smoothing: 0.25*r[i-1] + 0.5*r[i] + 0.25*r[i+1]
+    var cur = raw;
+    for (int pass = 0; pass < 2; pass++) {
+      final next = List<double>.from(cur);
+      for (int i = 1; i < n - 1; i++) {
+        next[i] = 0.25 * cur[i - 1] + 0.50 * cur[i] + 0.25 * cur[i + 1];
+      }
+      cur = next;
+    }
+    return cur;
   }
 
   static void paintStudyTape(
@@ -604,7 +823,7 @@ class ActiveStrokePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // 1. Live in-progress stroke (ultra-fast raw path for 0ms 144Hz stylus ink)
+    // 1. Live in-progress stroke (exact same silky quadratic midpoint renderer as committed ink!)
     final stroke = activeStroke.value;
     if (stroke != null && stroke.points.isNotEmpty) {
       if (stroke.toolType == ToolType.highlighter) {
@@ -614,34 +833,8 @@ class ActiveStrokePainter extends CustomPainter {
           isDarkPaper: isDarkPaper,
           isSelected: false,
         );
-      } else if (stroke.shapeType != ShapeType.none) {
-        CanvasPainter.paintInkStroke(canvas, stroke, isSelected: false);
       } else {
-        final pts = stroke.points;
-        final baseColor = Color(stroke.colorValue);
-        final bool isPencil = stroke.toolType == ToolType.pencil;
-        final paint = Paint()
-          ..color = isPencil ? baseColor.withAlpha(195) : baseColor
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = stroke.width
-          ..strokeCap = StrokeCap.round
-          ..strokeJoin = StrokeJoin.round
-          ..isAntiAlias = true;
-        if (pts.length == 1) {
-          canvas.drawCircle(
-            Offset(pts.first.x, pts.first.y),
-            stroke.width * 0.5,
-            Paint()
-              ..color = paint.color
-              ..style = PaintingStyle.fill,
-          );
-        } else {
-          final path = Path()..moveTo(pts.first.x, pts.first.y);
-          for (int i = 1; i < pts.length; i++) {
-            path.lineTo(pts[i].x, pts[i].y);
-          }
-          canvas.drawPath(path, paint);
-        }
+        CanvasPainter.paintInkStroke(canvas, stroke, isSelected: false);
       }
     }
 

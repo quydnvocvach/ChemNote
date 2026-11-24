@@ -64,6 +64,25 @@ class AppState extends ChangeNotifier {
   // Thư mục xuất PDF mặc định (null => /storage/emulated/0/Documents/ChemNote)
   String? _pdfExportDirectory;
 
+  // Cấu hình bút gần nhất (tự động khôi phục khi mở lại sổ hoặc khởi động lại app)
+  ToolType _lastPenTool = ToolType.fountainPen;
+  int _lastPenColorValue = 0xFF1D4ED8;
+  double _lastPenWidth = 1.6;
+  double _lastPenOpacity = 1.0;
+  double _lastPressureSensitivity = 0.75;
+  bool _lastSmoothingEnabled = true;
+  double _lastSmoothingStrength = 0.45;
+  int _lastHighlighterColorValue = 0xFFFDE047;
+  double _lastHighlighterWidth = 16.0;
+  double _lastEraserRadius = 22.0;
+  List<int> _quickPenColors = const [
+    0xFF0F172A,
+    0xFF1D4ED8,
+    0xFFDC2626,
+    0xFF059669,
+    0xFF7C3AED,
+  ];
+
   // Chế độ Khoá lòng bàn tay (Chống tỳ tay: Bút viết, 1 ngón tay cuộn trang)
   bool _palmRejectionEnabled = true;
 
@@ -123,6 +142,17 @@ class AppState extends ChangeNotifier {
   List<String> get customCoverPaths => List.unmodifiable(_customCoverPaths);
   List<String> get recentImagePaths => List.unmodifiable(_recentImagePaths);
   String? get pdfExportDirectory => _pdfExportDirectory;
+  ToolType get lastPenTool => _lastPenTool;
+  int get lastPenColorValue => _lastPenColorValue;
+  double get lastPenWidth => _lastPenWidth;
+  double get lastPenOpacity => _lastPenOpacity;
+  double get lastPressureSensitivity => _lastPressureSensitivity;
+  bool get lastSmoothingEnabled => _lastSmoothingEnabled;
+  double get lastSmoothingStrength => _lastSmoothingStrength;
+  int get lastHighlighterColorValue => _lastHighlighterColorValue;
+  double get lastHighlighterWidth => _lastHighlighterWidth;
+  double get lastEraserRadius => _lastEraserRadius;
+  List<int> get quickPenColors => List.unmodifiable(_quickPenColors);
   bool get palmRejectionEnabled => _palmRejectionEnabled;
   bool get readOnlyMode => _readOnlyMode;
 
@@ -168,6 +198,62 @@ class AppState extends ChangeNotifier {
     _pdfExportDirectory = normalized;
     notifyListeners();
     unawaited(_storage.savePdfExportDirectory(normalized));
+  }
+
+  /// Cập nhật và lưu cấu hình bút gần nhất để không bao giờ bị reset về mặc định khi mở lại sổ.
+  void updatePenPrefs({
+    ToolType? lastPenTool,
+    int? lastPenColorValue,
+    double? lastPenWidth,
+    double? lastPenOpacity,
+    double? lastPressureSensitivity,
+    bool? lastSmoothingEnabled,
+    double? lastSmoothingStrength,
+    int? lastHighlighterColorValue,
+    double? lastHighlighterWidth,
+    double? lastEraserRadius,
+    List<int>? quickPenColors,
+  }) {
+    if (lastPenTool != null) _lastPenTool = lastPenTool;
+    if (lastPenColorValue != null) _lastPenColorValue = lastPenColorValue;
+    if (lastPenWidth != null) _lastPenWidth = lastPenWidth;
+    if (lastPenOpacity != null) _lastPenOpacity = lastPenOpacity;
+    if (lastPressureSensitivity != null) {
+      _lastPressureSensitivity = lastPressureSensitivity;
+    }
+    if (lastSmoothingEnabled != null) {
+      _lastSmoothingEnabled = lastSmoothingEnabled;
+    }
+    if (lastSmoothingStrength != null) {
+      _lastSmoothingStrength = lastSmoothingStrength;
+    }
+    if (lastHighlighterColorValue != null) {
+      _lastHighlighterColorValue = lastHighlighterColorValue;
+    }
+    if (lastHighlighterWidth != null) {
+      _lastHighlighterWidth = lastHighlighterWidth;
+    }
+    if (lastEraserRadius != null) _lastEraserRadius = lastEraserRadius;
+    if (quickPenColors != null && quickPenColors.isNotEmpty) {
+      _quickPenColors = List<int>.from(quickPenColors);
+    }
+
+    notifyListeners();
+    unawaited(
+      _storage.savePenPrefs({
+        'lastPenTool': _lastPenTool.name,
+        'lastPenColorValue': _lastPenColorValue,
+        'lastPenWidth': _lastPenWidth,
+        'lastPenOpacity': _lastPenOpacity,
+        'lastPressureSensitivity': _lastPressureSensitivity,
+        'lastSmoothingEnabled': _lastSmoothingEnabled,
+        'lastSmoothingStrength': _lastSmoothingStrength,
+        'lastHighlighterColorValue': _lastHighlighterColorValue,
+        'lastHighlighterWidth': _lastHighlighterWidth,
+        'lastEraserRadius': _lastEraserRadius,
+        'quickPenColors': _quickPenColors,
+      }),
+    );
   }
 
   void setPalmRejectionEnabled(bool value) {
@@ -456,6 +542,37 @@ class AppState extends ChangeNotifier {
       _customStickers = await _storage.loadCustomStickers();
       _customCoverPaths = await _storage.loadCustomCovers();
       _pdfExportDirectory = await _storage.loadPdfExportDirectory();
+      final penPrefs = await _storage.loadPenPrefs();
+      if (penPrefs.isNotEmpty) {
+        _lastPenTool = toolTypeFromJson(penPrefs['lastPenTool']);
+        _lastPenColorValue =
+            (penPrefs['lastPenColorValue'] as num?)?.toInt() ?? _lastPenColorValue;
+        _lastPenWidth =
+            (penPrefs['lastPenWidth'] as num?)?.toDouble() ?? _lastPenWidth;
+        _lastPenOpacity =
+            (penPrefs['lastPenOpacity'] as num?)?.toDouble() ?? _lastPenOpacity;
+        _lastPressureSensitivity =
+            (penPrefs['lastPressureSensitivity'] as num?)?.toDouble() ??
+                _lastPressureSensitivity;
+        _lastSmoothingEnabled =
+            penPrefs['lastSmoothingEnabled'] as bool? ?? _lastSmoothingEnabled;
+        _lastSmoothingStrength =
+            (penPrefs['lastSmoothingStrength'] as num?)?.toDouble() ??
+                _lastSmoothingStrength;
+        _lastHighlighterColorValue =
+            (penPrefs['lastHighlighterColorValue'] as num?)?.toInt() ??
+                _lastHighlighterColorValue;
+        _lastHighlighterWidth =
+            (penPrefs['lastHighlighterWidth'] as num?)?.toDouble() ??
+                _lastHighlighterWidth;
+        _lastEraserRadius =
+            (penPrefs['lastEraserRadius'] as num?)?.toDouble() ??
+                _lastEraserRadius;
+        final rawColors = penPrefs['quickPenColors'] as List<dynamic>?;
+        if (rawColors != null && rawColors.isNotEmpty) {
+          _quickPenColors = rawColors.whereType<num>().map((n) => n.toInt()).toList();
+        }
+      }
     } finally {
       _isLoading = false;
       notifyListeners();

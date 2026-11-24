@@ -62,6 +62,11 @@ class LocalStorageService {
     return File('${root.path}${Platform.pathSeparator}pdf_export_dir.txt');
   }
 
+  Future<File> _getPenPrefsFile() async {
+    final root = await getRootDirectory();
+    return File('${root.path}${Platform.pathSeparator}pen_prefs.json');
+  }
+
   Future<File> _getNotebookFile(String notebookId) async {
     final dir = await _getSubdirectory('notebooks');
     return File('${dir.path}${Platform.pathSeparator}$notebookId.json');
@@ -176,6 +181,29 @@ class LocalStorageService {
       } else {
         await file.writeAsString(directory.trim(), flush: true);
       }
+    } catch (_) {
+      // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
+    }
+  }
+
+  Future<Map<String, dynamic>> loadPenPrefs() async {
+    try {
+      final file = await _getPenPrefsFile();
+      if (!await file.exists()) return const {};
+      final raw = await file.readAsString();
+      if (raw.trim().isEmpty) return const {};
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) return decoded;
+      return const {};
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  Future<void> savePenPrefs(Map<String, dynamic> prefs) async {
+    try {
+      final file = await _getPenPrefsFile();
+      await file.writeAsString(jsonEncode(prefs), flush: true);
     } catch (_) {
       // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
     }
