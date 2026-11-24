@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import '../../core/models/drawing_elements.dart';
 import '../../core/models/notebook.dart';
@@ -2848,9 +2850,11 @@ class _HuaweiHsvColorPickerState extends State<_HuaweiHsvColorPicker> {
                             // White ring selector
                             Positioned(
                               left: (_hsv.saturation * box.maxWidth - 10)
-                                  .clamp(0.0, math.max(0.0, box.maxWidth - 20)),
+                                  .clamp(0.0, math.max(0.0, box.maxWidth - 20))
+                                  .toDouble(),
                               top: ((1.0 - _hsv.value) * box.maxHeight - 10)
-                                  .clamp(0.0, math.max(0.0, box.maxHeight - 20)),
+                                  .clamp(0.0, math.max(0.0, box.maxHeight - 20))
+                                  .toDouble(),
                               child: IgnorePointer(
                                 child: Container(
                                   width: 20,
@@ -2924,7 +2928,8 @@ class _HuaweiHsvColorPickerState extends State<_HuaweiHsvColorPicker> {
                           ),
                           Positioned(
                             top: (hueT * box.maxHeight - 10)
-                                .clamp(0.0, math.max(0.0, box.maxHeight - 20)),
+                                .clamp(0.0, math.max(0.0, box.maxHeight - 20))
+                                .toDouble(),
                             child: IgnorePointer(
                               child: Container(
                                 width: 22,
