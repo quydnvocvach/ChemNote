@@ -2179,6 +2179,8 @@ class EditorSettingsDrawer extends StatelessWidget {
   final VoidCallback onPickPdfExportDir;
   final VoidCallback onToggleLockNotebook;
   final VoidCallback onCheckForUpdate;
+  final int audioRecordingsCount;
+  final VoidCallback? onOpenAudioRecordings;
 
   const EditorSettingsDrawer({
     super.key,
@@ -2197,6 +2199,8 @@ class EditorSettingsDrawer extends StatelessWidget {
     required this.onPickPdfExportDir,
     required this.onToggleLockNotebook,
     required this.onCheckForUpdate,
+    this.audioRecordingsCount = 0,
+    this.onOpenAudioRecordings,
   });
 
   @override
@@ -2283,6 +2287,17 @@ class EditorSettingsDrawer extends StatelessWidget {
                 },
               ),
             const Divider(height: 24),
+            if (onOpenAudioRecordings != null)
+              _drawerTile(
+                icon: Icons.mic_none_rounded,
+                title: audioRecordingsCount > 0
+                    ? 'Bản ghi âm trang này ($audioRecordingsCount)'
+                    : 'Ghi âm bài giảng',
+                onTap: () {
+                  Navigator.pop(context);
+                  onOpenAudioRecordings!();
+                },
+              ),
             _sectionLabel('Xuất & Nhập tài liệu'),
             _drawerTile(
               icon: Icons.picture_as_pdf_outlined,
@@ -2507,6 +2522,7 @@ class AudioReplayBar extends StatelessWidget {
   final VoidCallback? onShowList;
   final VoidCallback? onStartNewRecording;
   final VoidCallback onDelete;
+  final VoidCallback? onClose;
 
   const AudioReplayBar({
     super.key,
@@ -2522,6 +2538,7 @@ class AudioReplayBar extends StatelessWidget {
     this.onShowList,
     this.onStartNewRecording,
     required this.onDelete,
+    this.onClose,
   });
 
   String _formatMs(int ms) {
@@ -2688,6 +2705,17 @@ class AudioReplayBar extends StatelessWidget {
             visualDensity: VisualDensity.compact,
             onPressed: onDelete,
           ),
+          if (onClose != null)
+            IconButton(
+              tooltip: 'Ẩn thanh ghi âm',
+              icon: const Icon(
+                Icons.close_rounded,
+                size: 18,
+                color: Colors.grey,
+              ),
+              visualDensity: VisualDensity.compact,
+              onPressed: onClose,
+            ),
         ],
       ),
     );

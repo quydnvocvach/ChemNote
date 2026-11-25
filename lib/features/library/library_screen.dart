@@ -1,3 +1,4 @@
+import 'dart:async' show unawaited;
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -17,6 +18,7 @@ import '../../core/theme/app_theme.dart';
 import '../canvas/note_editor_screen.dart';
 import '../pdf/pdf_import_progress_overlay.dart';
 import '../pdf/pdf_import_service.dart';
+import '../sync/sync_manager.dart';
 import '../sync/sync_settings_screen.dart';
 import 'create_notebook_dialog.dart';
 import 'notebook_cover_widget.dart';
@@ -482,6 +484,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     );
                     if (ok == true) {
                       await appState.emptyTrash();
+                      if (context.mounted) {
+                        final syncManager = context.read<SyncManager>();
+                        if (syncManager.isSignedIn &&
+                            (syncManager.isOnline || syncManager.isDemoMode)) {
+                          unawaited(syncManager.syncNow(isManualSync: true));
+                        }
+                      }
                     }
                   },
                   icon: const Icon(Icons.delete_forever_outlined, size: 18),
@@ -1295,6 +1304,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 );
                 if (ok == true) {
                   await appState.deleteNotebook(notebook.id);
+                  if (context.mounted) {
+                    final syncManager = context.read<SyncManager>();
+                    if (syncManager.isSignedIn &&
+                        (syncManager.isOnline || syncManager.isDemoMode)) {
+                      unawaited(syncManager.syncNow(isManualSync: true));
+                    }
+                  }
                 }
               },
             ),

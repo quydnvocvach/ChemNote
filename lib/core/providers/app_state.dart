@@ -110,6 +110,7 @@ class AppState extends ChangeNotifier {
   /// Hook tùy chọn để SyncManager đồng bộ khi sổ tay thay đổi hoặc bị xóa.
   Future<void> Function(Notebook notebook)? onNotebookChangedForSync;
   Future<void> Function(String notebookId)? onNotebookDeletedForSync;
+  Future<void> Function(Notebook notebook)? onNotebookPermanentlyDeletedForSync;
 
   // Debounce lưu đĩa cho các thay đổi trang liên tiếp (tránh nghẽn luồng UI / ANR khi viết nhanh)
   final Map<String, Timer> _pendingSaveTimers = {};
@@ -818,13 +819,18 @@ class AppState extends ChangeNotifier {
     String notebookId, {
     bool cleanupOrphans = true,
   }) async {
+    final deletedNotebook = getNotebookById(notebookId);
     _openNotebookIds.remove(notebookId);
     _pendingSaveTimers.remove(notebookId)?.cancel();
     _pendingSaveNotebooks.remove(notebookId);
     _notebooks = _notebooks.where((n) => n.id != notebookId).toList();
     await _storage.deleteNotebookFile(notebookId);
     notifyListeners();
-    onNotebookDeletedForSync?.call(notebookId);
+    if (deletedNotebook != null && onNotebookPermanentlyDeletedForSync != null) {
+      unawaited(onNotebookPermanentlyDeletedForSync!(deletedNotebook));
+    } else {
+      onNotebookDeletedForSync?.call(notebookId);
+    }
     if (cleanupOrphans) {
       unawaited(
         _storage.cleanupOrphanAssets(

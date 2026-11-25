@@ -1,5 +1,6 @@
 import 'package:chemnote/core/models/notebook.dart';
 import 'package:chemnote/features/sync/google_auth_service.dart';
+import 'package:chemnote/features/sync/google_drive_service.dart';
 import 'package:chemnote/features/sync/sync_manager.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -256,6 +257,43 @@ void main() {
         lastSyncedAt: lastSync,
       );
       expect(resBackup.conflictBackupCopy, isNull);
+    });
+
+    test('buildNotebookAssetFolderName sanitizes title and preserves unique suffix', () {
+      final folderA = GoogleDriveService.buildNotebookAssetFolderName(
+        'Giáo trình: Điện/Hóa <2026>?',
+        'a1b2c3d4-1111-2222-3333-444455556666',
+      );
+      final folderB = GoogleDriveService.buildNotebookAssetFolderName(
+        'Giáo trình: Điện/Hóa <2026>?',
+        'z9y8x7w6-1111-2222-3333-444455556666',
+      );
+      expect(folderA.endsWith('_a1b2c3d4'), isTrue);
+      expect(folderB.endsWith('_z9y8x7w6'), isTrue);
+      expect(folderA, isNot(equals(folderB)));
+      expect(folderA.contains(RegExp(r'[\\/:*?"<>|]')), isFalse);
+    });
+
+    test('queueNotebookDelete tracks notebookId and Drive IDs for permanent cleanup', () {
+      final nb = Notebook(
+        id: 'nb-trash-1',
+        title: 'Sổ tay đã dọn',
+        createdAt: DateTime.utc(2026, 5, 1),
+        updatedAt: DateTime.utc(2026, 5, 2),
+        driveFileId: 'drive-json-1',
+        drivePdfFileId: 'drive-pdf-1',
+      );
+
+      manager.queueNotebookDelete(
+        nb.id,
+        driveFileId: nb.driveFileId,
+        drivePdfFileId: nb.drivePdfFileId,
+        deletedNotebook: nb,
+      );
+
+      expect(manager.pendingDeleteNotebookIds, contains('nb-trash-1'));
+      expect(manager.pendingDeleteDriveIds, contains('drive-json-1'));
+      expect(manager.pendingDeleteDriveIds, contains('drive-pdf-1'));
     });
   });
 }

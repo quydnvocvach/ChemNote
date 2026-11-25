@@ -79,6 +79,8 @@ class SyncManager extends ChangeNotifier {
   }
 
   static const String _kLastSyncedAt = 'chemnote_last_synced_at';
+  static const String _kPendingDeleteNotebookIds =
+      'chemnote_pending_delete_notebook_ids';
 
   /// Ngưỡng số trang tối đa cho phép tự động xuất PDF khi đồng bộ nền (tránh nóng máy trên Kirin).
   static const int maxBackgroundPdfPages = 30;
@@ -113,6 +115,9 @@ class SyncManager extends ChangeNotifier {
   final Set<String> _pendingUploadIds = <String>{};
   final Map<String, Notebook> _pendingSnapshots = <String, Notebook>{};
   final Set<String> _pendingDeleteDriveIds = <String>{};
+  final Set<String> _pendingDeleteNotebookIds = <String>{};
+  final Map<String, Set<String>> _pendingDeleteLegacyAssetKeys =
+      <String, Set<String>>{};
   final List<SyncLogEntry> _syncLogs = <SyncLogEntry>[];
 
   GoogleAuthService get authService => _authService;
@@ -130,6 +135,8 @@ class SyncManager extends ChangeNotifier {
   Set<String> get pendingUploadIds => Set.unmodifiable(_pendingUploadIds);
   Set<String> get pendingDeleteDriveIds =>
       Set.unmodifiable(_pendingDeleteDriveIds);
+  Set<String> get pendingDeleteNotebookIds =>
+      Set.unmodifiable(_pendingDeleteNotebookIds);
 
   /// Chu kỳ đồng bộ khi đang mở app (phút): `0` (thủ công), `5`, `15`, `45`, `120`.
   int get foregroundSyncMinutes =>
@@ -158,6 +165,14 @@ class SyncManager extends ChangeNotifier {
     appState.onNotebookDeletedForSync = (String notebookId) async {
       queueNotebookDelete(notebookId);
     };
+    appState.onNotebookPermanentlyDeletedForSync = (Notebook notebook) async {
+      queueNotebookDelete(
+        notebook.id,
+        driveFileId: notebook.driveFileId,
+        drivePdfFileId: notebook.drivePdfFileId,
+        deletedNotebook: notebook,
+      );
+    };
   }
 
   /// Khởi tạo phiên đăng nhập đã lưu, khôi phục mốc `lastSyncedAt`, theo dõi mạng và lịch đồng bộ tiết kiệm pin.
@@ -167,6 +182,13 @@ class SyncManager extends ChangeNotifier {
       final savedSyncIso = await _secureStorage.read(key: _kLastSyncedAt);
       if (savedSyncIso != null && savedSyncIso.isNotEmpty) {
         _lastSyncedAt = DateTime.tryParse(savedSyncIso);
+      }
+      final savedDeletes =
+          await _secureStorage.read(key: _kPendingDeleteNotebookIds);
+      if (savedDeletes != null && savedDeletes.isNotEmpty) {
+        _pendingDeleteNotebookIds.addAll(
+          savedDeletes.split('\n').where((s) => s.isNotEmpty),
+        );
       }
     } catch (_) {}
 
@@ -459,21 +481,44 @@ class SyncManager extends ChangeNotifier {
     }
   }
 
-  /// Xếp hàng xóa tệp sổ tay (cả JSON và PDF) trên Google Drive nếu đã từng đồng bộ.
+  /// Xếp hàng xóa tệp sổ tay (JSON, PDF và thư mục Assets) trên Google Drive nếu đã từng đồng bộ.
   void queueNotebookDelete(
     String notebookId, {
     String? driveFileId,
     String? drivePdfFileId,
+    Notebook? deletedNotebook,
   }) {
     _pendingUploadIds.remove(notebookId);
     final removed = _pendingSnapshots.remove(notebookId);
-    final targetJsonId = driveFileId ?? removed?.driveFileId;
-    final targetPdfId = drivePdfFileId ?? removed?.drivePdfFileId;
+    _pendingDeleteNotebookIds.add(notebookId);
+    unawaited(_persistPendingDeleteNotebookIds());
+
+    final targetJsonId =
+        driveFileId ?? deletedNotebook?.driveFileId ?? removed?.driveFileId;
+    final targetPdfId =
+        drivePdfFileId ?? deletedNotebook?.drivePdfFileId ?? removed?.drivePdfFileId;
     if (targetJsonId != null && targetJsonId.isNotEmpty) {
       _pendingDeleteDriveIds.add(targetJsonId);
     }
     if (targetPdfId != null && targetPdfId.isNotEmpty) {
       _pendingDeleteDriveIds.add(targetPdfId);
+    }
+    if (deletedNotebook != null) {
+      final keys = _pendingDeleteLegacyAssetKeys.putIfAbsent(
+        notebookId,
+        () => <String>{},
+      );
+      for (final page in deletedNotebook.pages) {
+        final pdfBg = page.pdfBackgroundPath;
+        if (pdfBg != null && pdfBg.isNotEmpty) {
+          keys.add(remoteAssetKeyForPath(pdfBg, notebookId: notebookId));
+        }
+        for (final img in page.imageElements) {
+          if (img.filePath.isNotEmpty) {
+            keys.add(remoteAssetKeyForPath(img.filePath, notebookId: notebookId));
+          }
+        }
+      }
     }
 
     if (_autoSyncEnabled &&
@@ -629,7 +674,9 @@ class SyncManager extends ChangeNotifier {
 
       // 1. Xử lý các yêu cầu xóa tệp trên Drive
       for (final driveId in List<String>.from(_pendingDeleteDriveIds)) {
-        await _driveService.deleteRemoteNotebook(driveId);
+        try {
+          await _driveService.deleteRemoteNotebook(driveId);
+        } catch (_) {}
         _pendingDeleteDriveIds.remove(driveId);
         _addLog('Đã xóa tệp sao lưu cũ trên Drive ($driveId).');
       }
@@ -641,6 +688,39 @@ class SyncManager extends ChangeNotifier {
         if (meta.notebookId != null && meta.notebookId!.isNotEmpty) {
           remoteByNotebookId[meta.notebookId!] = meta;
         }
+      }
+
+      // Xóa dứt điểm JSON + thư mục Assets con + tệp cũ ở gốc Assets/ của các ghi chú đã dọn thùng rác
+      if (_pendingDeleteNotebookIds.isNotEmpty) {
+        for (final nbId in List<String>.from(_pendingDeleteNotebookIds)) {
+          final remoteMeta = remoteByNotebookId.remove(nbId);
+          if (remoteMeta != null) {
+            try {
+              await _driveService.deleteRemoteNotebook(remoteMeta.driveFileId);
+            } catch (_) {}
+          }
+          try {
+            await _driveService.deleteNotebookAssetsFolder(nbId);
+          } catch (_) {}
+          final legacyKeys = _pendingDeleteLegacyAssetKeys.remove(nbId);
+          if (legacyKeys != null) {
+            for (final key in legacyKeys) {
+              final legacyDriveId = remoteAssets[key];
+              if (legacyDriveId != null) {
+                try {
+                  await _driveService.deleteRemoteNotebook(legacyDriveId);
+                  remoteAssets.remove(key);
+                  remoteAssetNames.remove(key);
+                } catch (_) {}
+              }
+            }
+          }
+          _pendingDeleteNotebookIds.remove(nbId);
+          _addLog(
+            'Đã xóa hoàn toàn sao lưu Drive (JSON + PDF + Assets) của ghi chú đã dọn.',
+          );
+        }
+        await _persistPendingDeleteNotebookIds();
       }
 
       // 3. Thu thập sổ tay cục bộ từ AppState hoặc hàng đợi snapshot
@@ -830,6 +910,16 @@ class SyncManager extends ChangeNotifier {
     Notebook notebook,
     Set<String> remoteAssetNames,
   ) async {
+    String? nbFolderId;
+    Set<String> folderAssetNames = remoteAssetNames;
+    try {
+      nbFolderId = await _driveService.ensureNotebookAssetsFolder(notebook);
+      final nbAssets = await _driveService.listRemoteAssetFiles(
+        parentFolderId: nbFolderId,
+      );
+      folderAssetNames = nbAssets.keys.toSet();
+    } catch (_) {}
+
     for (final page in notebook.pages) {
       final pdfBg = page.pdfBackgroundPath;
       if (pdfBg != null && pdfBg.isNotEmpty) {
@@ -838,7 +928,8 @@ class SyncManager extends ChangeNotifier {
           await _driveService.uploadAssetFileIfMissing(
             File(pdfBg),
             remoteName,
-            remoteAssetNames,
+            folderAssetNames,
+            parentFolderId: nbFolderId,
           );
         } catch (_) {}
       }
@@ -849,7 +940,8 @@ class SyncManager extends ChangeNotifier {
           await _driveService.uploadAssetFileIfMissing(
             File(img.filePath),
             name,
-            remoteAssetNames,
+            folderAssetNames,
+            parentFolderId: nbFolderId,
           );
         } catch (_) {}
       }
@@ -860,7 +952,18 @@ class SyncManager extends ChangeNotifier {
     Notebook notebook,
     Map<String, String> remoteAssets,
   ) async {
-    if (remoteAssets.isEmpty) return notebook;
+    Map<String, String> nbAssets = <String, String>{};
+    try {
+      final nbFolderId =
+          await _driveService.findNotebookAssetsFolderId(notebook.id);
+      if (nbFolderId != null && nbFolderId.isNotEmpty) {
+        nbAssets = await _driveService.listRemoteAssetFiles(
+          parentFolderId: nbFolderId,
+        );
+      }
+    } catch (_) {}
+
+    if (nbAssets.isEmpty && remoteAssets.isEmpty) return notebook;
 
     Directory? rootDir;
     Future<Directory> resolveRootDir() async {
@@ -887,7 +990,10 @@ class SyncManager extends ChangeNotifier {
         final uniqueKey =
             remoteAssetKeyForPath(pdfBgPath, notebookId: notebook.id);
         final legacyName = _basename(pdfBgPath);
-        final driveId = remoteAssets[uniqueKey] ?? remoteAssets[legacyName];
+        final driveId = nbAssets[uniqueKey] ??
+            nbAssets[legacyName] ??
+            remoteAssets[uniqueKey] ??
+            remoteAssets[legacyName];
         if (driveId != null) {
           try {
             final root = await resolveRootDir();
@@ -908,8 +1014,11 @@ class SyncManager extends ChangeNotifier {
         if (img.filePath.isNotEmpty && !await File(img.filePath).exists()) {
           final uniqueKey =
               remoteAssetKeyForPath(img.filePath, notebookId: notebook.id);
-          final driveId =
-              remoteAssets[uniqueKey] ?? remoteAssets[_basename(img.filePath)];
+          final legacyName = _basename(img.filePath);
+          final driveId = nbAssets[uniqueKey] ??
+              nbAssets[legacyName] ??
+              remoteAssets[uniqueKey] ??
+              remoteAssets[legacyName];
           if (driveId != null) {
             try {
               final root = await resolveRootDir();
@@ -1009,8 +1118,15 @@ class SyncManager extends ChangeNotifier {
       final remoteList = await _driveService.listRemoteNotebooks();
 
       for (final meta in remoteList) {
+        if (meta.notebookId != null &&
+            _pendingDeleteNotebookIds.contains(meta.notebookId)) {
+          continue;
+        }
         final remoteNotebook =
             await _driveService.downloadNotebook(meta.driveFileId);
+        if (_pendingDeleteNotebookIds.contains(remoteNotebook.id)) {
+          continue;
+        }
         final hydrated = await _hydrateMissingAssets(
           remoteNotebook,
           remoteAssets,
@@ -1044,6 +1160,19 @@ class SyncManager extends ChangeNotifier {
         key: _kLastSyncedAt,
         value: time.toIso8601String(),
       );
+    } catch (_) {}
+  }
+
+  Future<void> _persistPendingDeleteNotebookIds() async {
+    try {
+      if (_pendingDeleteNotebookIds.isEmpty) {
+        await _secureStorage.delete(key: _kPendingDeleteNotebookIds);
+      } else {
+        await _secureStorage.write(
+          key: _kPendingDeleteNotebookIds,
+          value: _pendingDeleteNotebookIds.join('\n'),
+        );
+      }
     } catch (_) {}
   }
 

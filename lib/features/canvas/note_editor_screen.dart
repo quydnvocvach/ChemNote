@@ -191,6 +191,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   int _recordingElapsedMs = 0;
   Timer? _recordingElapsedTimer;
   String? _selectedAudioId;
+  bool _isAudioBarVisible = false;
   String? _playingAudioId;
   bool _isAudioPlaying = false;
   int _audioPositionMs = 0;
@@ -2413,6 +2414,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   // AUDIO NOTE RECORDING, SYNCED STROKE REPLAY & IN-APP APK UPDATER
   // ===========================================================================
 
+  Future<void> _handleMicToolbarTap(NotePage page) async {
+    if (_isRecordingAudio) {
+      await _toggleAudioRecording(page);
+      return;
+    }
+    if (page.audioRecordings.isNotEmpty && !_isAudioBarVisible) {
+      setState(() => _isAudioBarVisible = true);
+      return;
+    }
+    await _toggleAudioRecording(page);
+  }
+
   Future<void> _toggleAudioRecording(NotePage page) async {
     if (_isRecordingAudio) {
       _recordingElapsedTimer?.cancel();
@@ -2437,6 +2450,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           createdAt: DateTime.now(),
         );
         _selectedAudioId = rec.id;
+        _isAudioBarVisible = true;
         await _commitPage(
           page.copyWith(audioRecordings: [...page.audioRecordings, rec]),
           undoSnapshot: page,
@@ -2587,6 +2601,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         page.audioRecordings.where((r) => r.id != rec.id).toList();
     if (_selectedAudioId == rec.id) {
       _selectedAudioId = updated.isNotEmpty ? updated.last.id : null;
+    }
+    if (updated.isEmpty) {
+      _isAudioBarVisible = false;
     }
     await _commitPage(
       page.copyWith(audioRecordings: updated),
@@ -3249,6 +3266,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           }
         },
         onCheckForUpdate: _handleCheckForUpdate,
+        audioRecordingsCount: currentPage.audioRecordings.length,
+        onOpenAudioRecordings: () {
+          if (currentPage.audioRecordings.isNotEmpty) {
+            setState(() => _isAudioBarVisible = true);
+            _showAudioRecordingsDialog(currentPage);
+          } else {
+            _toggleAudioRecording(currentPage);
+          }
+        },
       ),
       body: Column(
         children: [
@@ -3439,7 +3465,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             onToggleStylusPan: () {
               setState(() => _stylusPanMode = !_stylusPanMode);
             },
-            onToggleAudioRecording: () => _toggleAudioRecording(currentPage),
+            onToggleAudioRecording: () => _handleMicToolbarTap(currentPage),
             onSelectColor: (c) {
               setState(() {
                 if (_activeTool == EditorTool.highlighter) {
@@ -3467,7 +3493,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             ),
           ),
 
-          // Live Audio Recording Bar OR Multi-Recording Audio Replay Bar
+          // Live Audio Recording Bar OR On-Demand Multi-Recording Audio Replay Bar
           if (_isRecordingAudio)
             AudioLiveRecordingBar(
               elapsedMs: _recordingElapsedMs,
@@ -3477,7 +3503,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                   ? () => _showAudioRecordingsDialog(currentPage)
                   : null,
             )
-          else if (currentPage.audioRecordings.isNotEmpty)
+          else if ((_isAudioBarVisible || _isAudioPlaying) &&
+              currentPage.audioRecordings.isNotEmpty)
             Builder(
               builder: (_) {
                 final recs = currentPage.audioRecordings;
@@ -3501,6 +3528,21 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       _toggleAudioRecording(currentPage),
                   onDelete: () =>
                       _deleteAudioRecording(currentPage, activeRec),
+                  onClose: () async {
+                    if (_isAudioPlaying) {
+                      _audioPollTimer?.cancel();
+                      await HardwareService.instance.stopAudio();
+                    }
+                    if (mounted) {
+                      setState(() {
+                        _isAudioBarVisible = false;
+                        _isAudioPlaying = false;
+                        _playingAudioId = null;
+                        _audioPositionMs = 0;
+                        _repaintVersion++;
+                      });
+                    }
+                  },
                 );
               },
             ),

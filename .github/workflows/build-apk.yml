@@ -160,19 +160,19 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.6.9 with APK
+      - name: Publish Release v3.7.0 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.6.9
-          name: ChemNote Pro v3.6.9 (PDF siêu nét 216 DPI & Thanh % ở dưới + Laser 2 chế độ/6 màu & DS Ghi âm)
+          tag_name: v3.7.0
+          name: ChemNote Pro v3.7.0 (Phân thư mục Assets theo từng ghi chú & Tự động xóa sạch sao lưu Drive khi dọn thùng rác)
           body: |
-            ### ChemNote Pro v3.6.9 — Bản tổng hợp hoàn chỉnh cho MatePad 11.5"S & M-Pencil 3!
-            - **Tối ưu nhập PDF siêu nét & bộ nhớ ổn định:**
-              - Nâng độ phân giải raster mặc định lên **216 DPI** (`targetWidth: 2048`, vẽ nền PDF với `FilterQuality.high`), giữ sắc nét công thức Hóa học và chữ nhỏ.
-              - Giải phóng bộ nhớ ghi file theo lô mỗi 4 trang khi nhập tệp PDF dài (72–94+ trang), tránh dồn RAM cục bộ.
-            - **Thanh tiến trình `%` hoàn thành ở cạnh dưới màn hình:** Hiển thị phần trăm (`%`) thực tế ngay từ trang đầu nhờ ước lượng số trang PDF trước khi kết xuất, hoạt động đồng nhất ở cả **Thư viện** lẫn **Trình soạn thảo**.
-            - **Con trỏ Laser kiểu Huawei Notes (từ v3.6.8):** 2 chế độ **Nét** (giữ nguyên cả cụm nét khi viết liên tục, mờ sau 1.3s dừng bút) & **Chỉ điểm**, kèm bảng chọn **6 màu neon**.
-            - **Ghi âm nhiều đoạn & xem lại từng bản ghi (từ v3.6.8):** Thanh `Đang ghi âm...` đếm giây trực tiếp + hộp thoại danh sách `Ghi âm (1)`, `Ghi âm (2)` đồng bộ nét viết tay.
+            ### ChemNote Pro v3.7.0 — Quản lý thư mục Drive `Assets/` gọn gàng theo từng ghi chú & Dọn sạch đồng bộ khi xóa vĩnh viễn!
+            - **Thư mục con riêng cho từng ghi chú trong `ChemNote_Backups/Assets/`:**
+              - Mỗi ghi chú tự động tạo thư mục riêng `<Ten_Ghi_Chu>_<Ma8KyTu>` (ví dụ `Hoa_dai_cuong_a1b2c3d4/`) chứa toàn bộ ảnh & trang PDF nền của đúng cuốn sổ đó — dễ quản lý, không trộn lẫn giữa các ghi chú và vẫn tương thích fallback bản sao lưu cũ.
+            - **Xóa sạch sao lưu trên Google Drive khi "Dọn thùng rác" hoặc xóa vĩnh viễn:**
+              - Khi nhấn **Dọn thùng rác**, ChemNote xóa vĩnh viễn trên máy và tự động xóa luôn tệp `JSON`, tệp `PDF` (nếu có) và toàn bộ thư mục con trong `Assets/` của các ghi chú đó trên Google Drive (kể cả xóa dọn tệp cũ ở gốc `Assets/`), chấm dứt lỗi ghi chú tái xuất hiện từ Drive.
+            - **Thanh Ghi âm ẩn gọn theo nhu cầu:** Chỉ hiển thị khi nhấn biểu tượng **Mic** hoặc mở từ menu **...** (`Bản ghi âm trang này`), kèm nút **×** đóng nhanh.
+            - **Kèm trọn vẹn toàn bộ cải tiến từ v3.6.8–v3.6.9:** Laser 2 chế độ (`Nét`/`Chỉ điểm`) 6 màu kiểu Huawei Notes, Danh sách nhiều bản Ghi âm, Nhập PDF siêu nét **216 DPI** + Thanh `%` hoàn thành ở cạnh dưới màn hình.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

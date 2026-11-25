@@ -84,12 +84,34 @@ class GoogleDriveService {
   String? _cachedJsonFolderId;
   String? _cachedPdfFolderId;
   String? _cachedAssetsFolderId;
+  final Map<String, String> _cachedNotebookAssetFolderIds = <String, String>{};
 
   // Kho lưu trữ mô phỏng trong bộ nhớ khi hoạt động ở Chế độ Demo.
   final Map<String, Notebook> _demoRemoteStore = <String, Notebook>{};
   final Map<String, Uint8List> _demoRemotePdfStore = <String, Uint8List>{};
   final Map<String, Uint8List> _demoRemoteAssetStore = <String, Uint8List>{};
   final Map<String, String> _demoRemoteAssetIds = <String, String>{};
+  final Map<String, Map<String, String>> _demoSubfolderAssetIds =
+      <String, Map<String, String>>{};
+
+  /// Hậu tố định danh ngắn của sổ tay gắn ở cuối tên thư mục `Assets/<Tên_ID>`.
+  static String notebookAssetFolderSuffix(String notebookId) =>
+      '_${_shortId(notebookId)}';
+
+  /// Tạo tên thư mục con an toàn cho từng ghi chú bên trong `ChemNote_Backups/Assets/`.
+  static String buildNotebookAssetFolderName(String title, String notebookId) {
+    final cleaned = title
+        .replaceAll(RegExp(r'''[\\/:*?"'<>|]'''), '_')
+        .replaceAll(RegExp(r'\s+'), '_')
+        .replaceAll(RegExp(r'_+'), '_')
+        .replaceAll(RegExp(r'^_+|_+$'), '');
+    final base = cleaned.isEmpty
+        ? 'Notebook'
+        : (cleaned.length > 40 ? cleaned.substring(0, 40) : cleaned)
+            .replaceAll(RegExp(r'_+$'), '');
+    final safeBase = base.isEmpty ? 'Notebook' : base;
+    return '$safeBase${notebookAssetFolderSuffix(notebookId)}';
+  }
 
   /// Làm sạch tên sổ tay cho Google Drive (giữ nguyên tiếng Việt có dấu, loại ký tự cấm).
   static String _sanitizeDriveTitle(String title) {
@@ -193,13 +215,94 @@ class GoogleDriveService {
     return _cachedAssetsFolderId!;
   }
 
-  /// Liệt kê các tệp tài nguyên hiện có trong `ChemNote_Backups/Assets/` dạng `fileName -> driveFileId`.
-  Future<Map<String, String>> listRemoteAssetFiles() async {
+  /// Tìm ID thư mục con của một ghi chú bên trong `ChemNote_Backups/Assets/`.
+  Future<String?> findNotebookAssetsFolderId(String notebookId) async {
     if (_authService.isDemoMode) {
-      return Map<String, String>.from(_demoRemoteAssetIds);
+      final folderId = 'demo_assets_folder_$notebookId';
+      return _demoSubfolderAssetIds.containsKey(folderId) ? folderId : null;
+    }
+    final cached = _cachedNotebookAssetFolderIds[notebookId];
+    if (cached != null && cached.isNotEmpty) {
+      return cached;
     }
 
     final assetsFolderId = await ensureAssetsFolder();
+    final headers = await _authHeaders();
+    final suffix = notebookAssetFolderSuffix(notebookId);
+    String? pageToken;
+
+    do {
+      final uri = Uri.parse(_driveFilesBase).replace(
+        queryParameters: <String, String>{
+          'q':
+              "'$assetsFolderId' in parents and mimeType = '$_folderMimeType' and trashed = false",
+          'spaces': 'drive',
+          'fields': 'nextPageToken, files(id, name)',
+          'pageSize': '500',
+          if (pageToken != null) 'pageToken': pageToken,
+        },
+      );
+      final response = await _httpClient.get(uri, headers: headers);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw GoogleDriveException(
+          'Không thể tìm thư mục Assets của ghi chú trên Drive (${response.statusCode}).',
+          statusCode: response.statusCode,
+        );
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final files = data['files'] as List<dynamic>? ?? const [];
+      for (final raw in files) {
+        final map = raw as Map<String, dynamic>;
+        final id = map['id'] as String?;
+        final name = map['name'] as String?;
+        if (id != null &&
+            name != null &&
+            (name.endsWith(suffix) || name == notebookId)) {
+          _cachedNotebookAssetFolderIds[notebookId] = id;
+          return id;
+        }
+      }
+      pageToken = data['nextPageToken'] as String?;
+    } while (pageToken != null && pageToken.isNotEmpty);
+
+    return null;
+  }
+
+  /// Tìm hoặc tạo thư mục con riêng cho từng ghi chú bên trong `ChemNote_Backups/Assets/`.
+  Future<String> ensureNotebookAssetsFolder(Notebook notebook) async {
+    if (_authService.isDemoMode) {
+      final folderId = 'demo_assets_folder_${notebook.id}';
+      _demoSubfolderAssetIds.putIfAbsent(folderId, () => <String, String>{});
+      return folderId;
+    }
+    final existingId = await findNotebookAssetsFolderId(notebook.id);
+    if (existingId != null && existingId.isNotEmpty) {
+      return existingId;
+    }
+    final assetsFolderId = await ensureAssetsFolder();
+    final folderName =
+        buildNotebookAssetFolderName(notebook.title, notebook.id);
+    final createdId =
+        await _ensureFolder(name: folderName, parentId: assetsFolderId);
+    _cachedNotebookAssetFolderIds[notebook.id] = createdId;
+    return createdId;
+  }
+
+  /// Liệt kê các tệp tài nguyên hiện có trong thư mục Assets (gốc hoặc thư mục con của 1 ghi chú) dạng `fileName -> driveFileId`.
+  Future<Map<String, String>> listRemoteAssetFiles({
+    String? parentFolderId,
+  }) async {
+    if (_authService.isDemoMode) {
+      if (parentFolderId != null) {
+        return Map<String, String>.from(
+          _demoSubfolderAssetIds[parentFolderId] ?? const <String, String>{},
+        );
+      }
+      return Map<String, String>.from(_demoRemoteAssetIds);
+    }
+
+    final targetFolderId = parentFolderId ?? await ensureAssetsFolder();
     final headers = await _authHeaders();
     final result = <String, String>{};
     String? pageToken;
@@ -207,7 +310,8 @@ class GoogleDriveService {
     do {
       final uri = Uri.parse(_driveFilesBase).replace(
         queryParameters: <String, String>{
-          'q': "'$assetsFolderId' in parents and trashed = false",
+          'q':
+              "'$targetFolderId' in parents and mimeType != '$_folderMimeType' and trashed = false",
           'spaces': 'drive',
           'fields': 'nextPageToken, files(id, name)',
           'pageSize': '500',
@@ -238,13 +342,14 @@ class GoogleDriveService {
     return result;
   }
 
-  /// Tải lên tệp tài nguyên (ảnh / trang PDF nền) vào `ChemNote_Backups/Assets/` nếu chưa có trên Drive.
+  /// Tải lên tệp tài nguyên (ảnh / trang PDF nền) vào thư mục `Assets` (hoặc thư mục con của ghi chú) nếu chưa có trên Drive.
   /// Trả về `driveFileId` nếu vừa tải lên, hoặc `null` nếu đã tồn tại / tệp cục bộ không có.
   Future<String?> uploadAssetFileIfMissing(
     File localFile,
     String fileName,
-    Set<String> existingNames,
-  ) async {
+    Set<String> existingNames, {
+    String? parentFolderId,
+  }) async {
     if (fileName.isEmpty || existingNames.contains(fileName)) {
       return null;
     }
@@ -256,19 +361,24 @@ class GoogleDriveService {
     if (bytes.isEmpty) return null;
 
     if (_authService.isDemoMode) {
-      final id = 'demo_asset_$fileName';
-      _demoRemoteAssetIds[fileName] = id;
+      final id = 'demo_asset_${parentFolderId ?? 'root'}_$fileName';
+      if (parentFolderId != null) {
+        (_demoSubfolderAssetIds[parentFolderId] ??=
+            <String, String>{})[fileName] = id;
+      } else {
+        _demoRemoteAssetIds[fileName] = id;
+      }
       _demoRemoteAssetStore[id] = bytes;
       existingNames.add(fileName);
       return id;
     }
 
-    final assetsFolderId = await ensureAssetsFolder();
+    final targetFolderId = parentFolderId ?? await ensureAssetsFolder();
     final mimeType = _inferAssetMimeType(fileName);
     final metadata = <String, dynamic>{
       'name': fileName,
       'mimeType': mimeType,
-      'parents': <String>[assetsFolderId],
+      'parents': <String>[targetFolderId],
     };
 
     final driveId = await _multipartUploadBytes(
@@ -280,6 +390,27 @@ class GoogleDriveService {
     );
     existingNames.add(fileName);
     return driveId;
+  }
+
+  /// Xóa toàn bộ thư mục Assets con trên Google Drive của một ghi chú đã xóa vĩnh viễn.
+  Future<void> deleteNotebookAssetsFolder(String notebookId) async {
+    if (_authService.isDemoMode) {
+      final folderId = 'demo_assets_folder_$notebookId';
+      final removed = _demoSubfolderAssetIds.remove(folderId);
+      if (removed != null) {
+        for (final assetId in removed.values) {
+          _demoRemoteAssetStore.remove(assetId);
+        }
+      }
+      _cachedNotebookAssetFolderIds.remove(notebookId);
+      return;
+    }
+
+    final folderId = await findNotebookAssetsFolderId(notebookId);
+    if (folderId != null && folderId.isNotEmpty) {
+      await deleteRemoteNotebook(folderId);
+    }
+    _cachedNotebookAssetFolderIds.remove(notebookId);
   }
 
   /// Tải xuống tệp tài nguyên nhị phân từ `ChemNote_Backups/Assets/` về đường dẫn cục bộ `destPath`.
@@ -639,5 +770,6 @@ class GoogleDriveService {
     _cachedJsonFolderId = null;
     _cachedPdfFolderId = null;
     _cachedAssetsFolderId = null;
+    _cachedNotebookAssetFolderIds.clear();
   }
 }
