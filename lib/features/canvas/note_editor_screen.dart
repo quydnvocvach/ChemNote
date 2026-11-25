@@ -20,6 +20,7 @@ import '../chemistry/chemistry_hub_sheet.dart';
 import '../chemistry/widgets/stencil_picker_sheet.dart';
 import '../library/search_screen.dart';
 import '../pdf/pdf_export_service.dart';
+import '../pdf/pdf_import_progress_overlay.dart';
 import '../pdf/pdf_import_service.dart';
 import 'canvas_painter.dart';
 import 'editor_toolbar.dart';
@@ -596,7 +597,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       final file = File(path);
       if (!await file.exists()) return;
       final bytes = await file.readAsBytes();
-      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 1600);
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 2048);
       final frame = await codec.getNextFrame();
       if (!mounted) {
         frame.image.dispose();
@@ -2089,123 +2090,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     required Future<PdfImportResult?> Function(PdfImportProgressCallback onProgress)
         task,
   }) async {
-    final progressNotifier =
-        ValueNotifier<({int current, int? total, String stage})>((
-      current: 0,
-      total: null,
-      stage: 'Đang mở tệp tài liệu...',
-    ));
-    bool dialogOpen = false;
-
-    void openDialogIfNeeded() {
-      if (dialogOpen || !mounted) return;
-      dialogOpen = true;
-      showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (dialogCtx) {
-          final isDark = Theme.of(dialogCtx).brightness == Brightness.dark;
-          final bg = isDark ? EditorColors.obsidianSurface : Colors.white;
-          final fg = isDark ? Colors.white : const Color(0xFF0F172A);
-          final sub = isDark ? Colors.white70 : const Color(0xFF475569);
-          return PopScope(
-            canPop: false,
-            child: AlertDialog(
-              backgroundColor: bg,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(18),
-                side: BorderSide(
-                  color: isDark ? Colors.white12 : Colors.black12,
-                ),
-              ),
-              contentPadding: const EdgeInsets.fromLTRB(22, 20, 22, 20),
-              content: ValueListenableBuilder<
-                  ({int current, int? total, String stage})>(
-                valueListenable: progressNotifier,
-                builder: (_, state, __) {
-                  final double? ratio = (state.total != null && state.total! > 0)
-                      ? (state.current / state.total!).clamp(0.0, 1.0)
-                      : null;
-                  return SizedBox(
-                    width: 300,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            const Icon(
-                              Icons.description_outlined,
-                              color: EditorColors.activeBlue,
-                              size: 22,
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                title,
-                                style: TextStyle(
-                                  color: fg,
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                            if (ratio != null)
-                              Text(
-                                '${(ratio * 100).round()}%',
-                                style: const TextStyle(
-                                  color: EditorColors.activeBlue,
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: 14),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(6),
-                          child: LinearProgressIndicator(
-                            value: ratio,
-                            minHeight: 7,
-                            backgroundColor: isDark
-                                ? Colors.white12
-                                : const Color(0xFFE2E8F0),
-                            valueColor: const AlwaysStoppedAnimation<Color>(
-                              EditorColors.activeBlue,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        Text(
-                          state.stage,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(color: sub, fontSize: 12.5),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-            ),
-          );
-        },
-      );
-    }
-
-    void closeDialog() {
-      if (dialogOpen && mounted) {
-        dialogOpen = false;
-        Navigator.of(context, rootNavigator: true).pop();
-      }
-    }
-
+    final progressBar = PdfImportBottomProgressOverlay();
     try {
       final result = await task((current, total, stage) {
-        openDialogIfNeeded();
-        progressNotifier.value = (current: current, total: total, stage: stage);
+        if (!mounted) return;
+        progressBar.show(context, title: title);
+        progressBar.update(current, total, stage);
       });
-      closeDialog();
+      progressBar.hide();
       if (result == null || !mounted) return;
 
       final firstNewIndex = notebook.pages.length;
@@ -2226,15 +2118,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         );
       }
     } catch (e) {
-      closeDialog();
+      progressBar.hide();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Lỗi nhập tài liệu: $e')),
         );
       }
     } finally {
-      closeDialog();
-      progressNotifier.dispose();
+      progressBar.hide();
     }
   }
 

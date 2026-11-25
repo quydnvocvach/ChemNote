@@ -160,20 +160,19 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.6.8 with APK
+      - name: Publish Release v3.6.9 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.6.8
-          name: ChemNote Pro v3.6.8 (Laser 2 chế độ Nét/Chỉ điểm & Bảng màu kiểu Huawei Notes + Quản lý nhiều bản Ghi âm)
+          tag_name: v3.6.9
+          name: ChemNote Pro v3.6.9 (PDF siêu nét 216 DPI & Thanh % ở dưới + Laser 2 chế độ/6 màu & DS Ghi âm)
           body: |
-            ### ChemNote Pro v3.6.8 — Nâng cấp Con trỏ Laser & Ghi âm bài giảng chuẩn Huawei Notes!
-            - **Con trỏ Laser 2 chế độ (Nét / Chỉ điểm) & 6 màu neon nổi bật:**
-              - **Nét (Line):** Vẽ liên tục nhiều nét (công thức `H₂SO₄`, mũi tên...) vẫn giữ nguyên sáng rõ toàn bộ cụm nét, sau khi ngừng viết ~1.3s mới cùng mờ dần mượt mà ở 144Hz.
-              - **Chỉ điểm (Dot):** Chấm laser phát sáng 3 lớp theo sát đầu bút M-Pencil 3 và tắt gọn khi nhấc bút.
-              - **Thanh điều khiển nổi:** Chuyển nhanh giữa `Nét` / `Chỉ điểm` và đổi màu ngay trên trang.
-            - **Ghi âm nhiều đoạn & xem lại từng bản ghi:**
-              - Thanh `Đang ghi âm...` hiển thị đồng hồ giây trực tiếp & nút **Dừng** gọn gàng.
-              - Thanh phát lại bổ sung tên `Ghi âm (N)`, nút danh sách mở hộp thoại **Ghi âm** liệt kê đầy đủ `Ghi âm (1)`, `Ghi âm (2)` kèm ngày giờ/thời lượng, nút **Ghi mới**, phát lại đồng bộ nét viết & xóa từng bản riêng biệt.
+            ### ChemNote Pro v3.6.9 — Bản tổng hợp hoàn chỉnh cho MatePad 11.5"S & M-Pencil 3!
+            - **Tối ưu nhập PDF siêu nét & bộ nhớ ổn định:**
+              - Nâng độ phân giải raster mặc định lên **216 DPI** (`targetWidth: 2048`, vẽ nền PDF với `FilterQuality.high`), giữ sắc nét công thức Hóa học và chữ nhỏ.
+              - Giải phóng bộ nhớ ghi file theo lô mỗi 4 trang khi nhập tệp PDF dài (72–94+ trang), tránh dồn RAM cục bộ.
+            - **Thanh tiến trình `%` hoàn thành ở cạnh dưới màn hình:** Hiển thị phần trăm (`%`) thực tế ngay từ trang đầu nhờ ước lượng số trang PDF trước khi kết xuất, hoạt động đồng nhất ở cả **Thư viện** lẫn **Trình soạn thảo**.
+            - **Con trỏ Laser kiểu Huawei Notes (từ v3.6.8):** 2 chế độ **Nét** (giữ nguyên cả cụm nét khi viết liên tục, mờ sau 1.3s dừng bút) & **Chỉ điểm**, kèm bảng chọn **6 màu neon**.
+            - **Ghi âm nhiều đoạn & xem lại từng bản ghi (từ v3.6.8):** Thanh `Đang ghi âm...` đếm giây trực tiếp + hộp thoại danh sách `Ghi âm (1)`, `Ghi âm (2)` đồng bộ nét viết tay.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

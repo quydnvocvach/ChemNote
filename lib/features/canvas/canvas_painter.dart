@@ -222,7 +222,9 @@ class CanvasPainter extends CustomPainter {
       image,
       src,
       dst,
-      Paint()..filterQuality = FilterQuality.medium,
+      Paint()
+        ..filterQuality = FilterQuality.high
+        ..isAntiAlias = true,
     );
   }
 

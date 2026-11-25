@@ -15,6 +15,7 @@ import '../../core/providers/app_state.dart';
 import '../../core/services/app_updater_service.dart';
 import '../../core/theme/app_theme.dart';
 import '../canvas/note_editor_screen.dart';
+import '../pdf/pdf_import_progress_overlay.dart';
 import '../pdf/pdf_import_service.dart';
 import '../sync/sync_settings_screen.dart';
 import 'create_notebook_dialog.dart';
@@ -990,8 +991,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _importPdfAsNotebook(BuildContext context) async {
+    final progressBar = PdfImportBottomProgressOverlay();
     try {
-      final result = await PdfImportService().pickAndImportPdf();
+      final result = await PdfImportService().pickAndImportPdf(
+        onProgress: (current, total, stage) {
+          if (!context.mounted) return;
+          progressBar.show(context, title: 'Đang nhập tệp PDF');
+          progressBar.update(current, total, stage);
+        },
+      );
+      progressBar.hide();
       if (result == null || result.pages.isEmpty || !context.mounted) return;
       final appState = context.read<AppState>();
       final nb = await appState.createNotebook(
@@ -1002,16 +1011,27 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (!context.mounted) return;
       await _openNotebook(context, nb);
     } catch (e) {
+      progressBar.hide();
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Không thể nhập PDF: $e')),
       );
+    } finally {
+      progressBar.hide();
     }
   }
 
   Future<void> _importDocPptAsNotebook(BuildContext context) async {
+    final progressBar = PdfImportBottomProgressOverlay();
     try {
-      final result = await PdfImportService().pickAndImportDocx();
+      final result = await PdfImportService().pickAndImportDocx(
+        onProgress: (current, total, stage) {
+          if (!context.mounted) return;
+          progressBar.show(context, title: 'Đang nhập tài liệu Word/PPT');
+          progressBar.update(current, total, stage);
+        },
+      );
+      progressBar.hide();
       if (result == null || result.pages.isEmpty || !context.mounted) return;
       final appState = context.read<AppState>();
       final nb = await appState.createNotebook(
@@ -1022,10 +1042,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (!context.mounted) return;
       await _openNotebook(context, nb);
     } catch (e) {
+      progressBar.hide();
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Không thể nhập tài liệu Word/PPT: $e')),
       );
+    } finally {
+      progressBar.hide();
     }
   }
 

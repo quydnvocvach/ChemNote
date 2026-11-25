@@ -53,13 +53,30 @@ class PdfImportService {
   })  : _uuid = uuid ?? const Uuid(),
         _overrideBaseDir = overrideBaseDir;
 
-  /// Độ phân giải mặc định 132 DPI: sắc nét khi đọc slide/giáo trình nhưng nhanh hơn 2.5–3× so với 200+ DPI.
-  static const double defaultPdfDpi = 132.0;
+  /// Độ phân giải mặc định 216 DPI: chữ nhỏ, công thức Hóa học & ký hiệu dưới hiển thị siêu sắc nét trên MatePad 11.5"S.
+  static const double defaultPdfDpi = 216.0;
 
   /// Đường dẫn chuẩn cho ảnh thu nhỏ (thumbnail) đi kèm trang PDF đã kết xuất.
-  /// Giữ `importPdfBytes` 1 lượt raster 132 DPI cực nhanh; editor giải mã thumbnail `targetWidth: 320` trực tiếp từ PNG gốc (< 3ms).
+  /// Giữ `importPdfBytes` 1 lượt raster 216 DPI; editor giải mã thumbnail `targetWidth: 320` trực tiếp từ PNG gốc (< 3ms).
   static String thumbnailPathForPdfPage(String pageImagePath) =>
       '$pageImagePath.thumb.png';
+
+  /// Ước lượng nhanh số trang từ header/cấu trúc tệp PDF để hiển thị `%` tiến trình ngay từ trang đầu tiên.
+  static int? estimatePdfPageCount(Uint8List pdfBytes) {
+    if (pdfBytes.isEmpty) return null;
+    final text = latin1.decode(pdfBytes, allowInvalid: true);
+    final directCount =
+        RegExp(r'/Type\s*/Page(?![a-zA-Z0-9])').allMatches(text).length;
+    var maxCount = 0;
+    for (final m in RegExp(r'/Count\s+(\d+)').allMatches(text)) {
+      final val = int.tryParse(m.group(1) ?? '') ?? 0;
+      if (val > maxCount) maxCount = val;
+    }
+    if (directCount > 0) {
+      return maxCount > directCount ? maxCount : directCount;
+    }
+    return maxCount > 0 ? maxCount : null;
+  }
 
   final Uuid _uuid;
   final Directory? _overrideBaseDir;
@@ -154,7 +171,8 @@ class PdfImportService {
     void Function(int currentPage)? onPageRendered,
     PdfImportProgressCallback? onProgress,
   }) async {
-    onProgress?.call(0, null, 'Đang chuẩn bị giải mã tệp PDF...');
+    final estimatedTotal = estimatePdfPageCount(pdfBytes);
+    onProgress?.call(0, estimatedTotal, 'Đang chuẩn bị giải mã tệp PDF...');
     await Future<void>.delayed(Duration.zero);
 
     final baseDir =
@@ -175,16 +193,25 @@ class PdfImportService {
     try {
       await for (final raster in Printing.raster(pdfBytes, dpi: dpi)) {
         pageNumber++;
+        final totalHint = estimatedTotal != null
+            ? (pageNumber > estimatedTotal ? pageNumber : estimatedTotal)
+            : null;
         onProgress?.call(
           pageNumber,
-          null,
-          'Đang xử lý trang PDF $pageNumber...',
+          totalHint,
+          totalHint != null
+              ? 'Đang xử lý trang PDF $pageNumber/$totalHint...'
+              : 'Đang xử lý trang PDF $pageNumber...',
         );
 
         final pngBytes = await raster.toPng();
         final filePath =
             '${targetDir.path}${Platform.pathSeparator}${importBatchId}_page_$pageNumber.png';
         writeFutures.add(File(filePath).writeAsBytes(pngBytes, flush: true));
+        if (writeFutures.length >= 4) {
+          await Future.wait(writeFutures);
+          writeFutures.clear();
+        }
 
         final isLandscape = raster.width > raster.height;
         pages.add(
@@ -213,7 +240,13 @@ class PdfImportService {
           'Đang hoàn tất lưu $pageNumber trang PDF...',
         );
         await Future.wait(writeFutures);
+        writeFutures.clear();
       }
+      onProgress?.call(
+        pageNumber,
+        pageNumber,
+        'Hoàn tất nhập $pageNumber trang PDF',
+      );
     } catch (e) {
       throw PdfImportException('Không thể giải mã các trang PDF: $e');
     }
