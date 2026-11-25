@@ -187,6 +187,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   String? _activeRecordingId;
   String? _activeRecordingPath;
   int _recordingStartMs = 0;
+  int _recordingElapsedMs = 0;
+  Timer? _recordingElapsedTimer;
+  String? _selectedAudioId;
   String? _playingAudioId;
   bool _isAudioPlaying = false;
   int _audioPositionMs = 0;
@@ -295,6 +298,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _appStateRef.flushPendingSaves();
     _stylusHoverTimer?.cancel();
     _shapeHoldTimer?.cancel();
+    _recordingElapsedTimer?.cancel();
     _audioPollTimer?.cancel();
     HardwareService.instance.stopAudio();
     _stylusDoubleTapSub?.cancel();
@@ -2520,6 +2524,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   Future<void> _toggleAudioRecording(NotePage page) async {
     if (_isRecordingAudio) {
+      _recordingElapsedTimer?.cancel();
+      _recordingElapsedTimer = null;
       final durationMs = await HardwareService.instance.stopAudioRecording();
       final recId = _activeRecordingId;
       final recPath = _activeRecordingPath;
@@ -2527,6 +2533,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           DateTime.now().millisecondsSinceEpoch - _recordingStartMs;
       setState(() {
         _isRecordingAudio = false;
+        _recordingElapsedMs = 0;
         _activeRecordingId = null;
         _activeRecordingPath = null;
       });
@@ -2534,9 +2541,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         final rec = AudioRecording(
           id: recId,
           filePath: recPath,
-          durationMs: durationMs > 0 ? durationMs : math.max(1000, fallbackDuration),
+          durationMs:
+              durationMs > 0 ? durationMs : math.max(1000, fallbackDuration),
           createdAt: DateTime.now(),
         );
+        _selectedAudioId = rec.id;
         await _commitPage(
           page.copyWith(audioRecordings: [...page.audioRecordings, rec]),
           undoSnapshot: page,
@@ -2551,6 +2560,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         }
       }
       return;
+    }
+
+    if (_isAudioPlaying) {
+      _audioPollTimer?.cancel();
+      await HardwareService.instance.stopAudio();
+      _playingAudioId = null;
+      _isAudioPlaying = false;
+      _audioPositionMs = 0;
     }
 
     // Start new recording
@@ -2574,18 +2591,23 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       );
       return;
     }
+    _recordingElapsedTimer?.cancel();
+    final startedAtMs = DateTime.now().millisecondsSinceEpoch;
     setState(() {
       _isRecordingAudio = true;
       _activeRecordingId = recId;
       _activeRecordingPath = path;
-      _recordingStartMs = DateTime.now().millisecondsSinceEpoch;
+      _recordingStartMs = startedAtMs;
+      _recordingElapsedMs = 0;
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        duration: Duration(milliseconds: 1400),
-        content: Text('Đang ghi âm... Mọi nét viết sẽ tự động đồng bộ mốc thời gian'),
-      ),
-    );
+    _recordingElapsedTimer =
+        Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (!mounted || !_isRecordingAudio) return;
+      setState(() {
+        _recordingElapsedMs =
+            DateTime.now().millisecondsSinceEpoch - _recordingStartMs;
+      });
+    });
   }
 
   Future<void> _togglePlayAudio(AudioRecording rec) async {
@@ -2598,17 +2620,30 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       return;
     }
 
+    final bool switchingTrack =
+        _playingAudioId != null && _playingAudioId != rec.id;
+    if (switchingTrack) {
+      _audioPollTimer?.cancel();
+      await HardwareService.instance.stopAudio();
+      _audioPositionMs = 0;
+    }
+
     final ok = await HardwareService.instance.playAudio(rec.filePath);
     if (!mounted) return;
     if (ok) {
       await HardwareService.instance.setAudioSpeed(_audioSpeed);
-      if (_playingAudioId == rec.id && _audioPositionMs > 0) {
+      if (!switchingTrack &&
+          _playingAudioId == rec.id &&
+          _audioPositionMs > 0) {
         await HardwareService.instance.seekAudio(_audioPositionMs);
       }
     }
     setState(() {
+      _selectedAudioId = rec.id;
       _playingAudioId = rec.id;
       _isAudioPlaying = true;
+      if (switchingTrack) _audioPositionMs = 0;
+      _repaintVersion++;
     });
     _audioPollTimer?.cancel();
     _audioPollTimer = Timer.periodic(const Duration(milliseconds: 80), (_) async {
@@ -2633,6 +2668,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   Future<void> _seekAudio(AudioRecording rec, int ms) async {
     setState(() {
+      _selectedAudioId = rec.id;
       _playingAudioId = rec.id;
       _audioPositionMs = ms;
       _repaintVersion++;
@@ -2658,9 +2694,174 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
     final updated =
         page.audioRecordings.where((r) => r.id != rec.id).toList();
+    if (_selectedAudioId == rec.id) {
+      _selectedAudioId = updated.isNotEmpty ? updated.last.id : null;
+    }
     await _commitPage(
       page.copyWith(audioRecordings: updated),
       undoSnapshot: page,
+    );
+  }
+
+  Future<void> _showAudioRecordingsDialog(NotePage page) async {
+    String fmtDuration(int ms) {
+      final totalSec = (ms / 1000).floor().clamp(0, 35999);
+      final m = (totalSec ~/ 60).toString().padLeft(2, '0');
+      final s = (totalSec % 60).toString().padLeft(2, '0');
+      return '$m:$s';
+    }
+
+    String fmtDate(DateTime dt) {
+      final d = dt.day.toString().padLeft(2, '0');
+      final m = dt.month.toString().padLeft(2, '0');
+      final hh = dt.hour.toString().padLeft(2, '0');
+      final mm = dt.minute.toString().padLeft(2, '0');
+      return '$d/$m/${dt.year} $hh:$mm';
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) {
+          final livePage = _getCurrentPage(_getNotebook(context, listen: false)) ??
+              page;
+          final recs = livePage.audioRecordings;
+          final String? currentId =
+              _selectedAudioId ?? (recs.isNotEmpty ? recs.last.id : null);
+
+          return Dialog(
+            backgroundColor: EditorColors.obsidianSurface,
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420, maxHeight: 480),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(18, 16, 14, 14),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        const Text(
+                          'Ghi âm',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const Spacer(),
+                        if (!_isRecordingAudio)
+                          TextButton.icon(
+                            onPressed: () {
+                              Navigator.pop(ctx);
+                              _toggleAudioRecording(livePage);
+                            },
+                            icon: const Icon(Icons.mic_rounded, size: 17),
+                            label: const Text('Ghi mới'),
+                          ),
+                        IconButton(
+                          icon: const Icon(
+                            Icons.close_rounded,
+                            color: Colors.white70,
+                            size: 20,
+                          ),
+                          onPressed: () => Navigator.pop(ctx),
+                        ),
+                      ],
+                    ),
+                    const Divider(color: Colors.white12, height: 12),
+                    if (recs.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 28),
+                        child: Text(
+                          'Chưa có bản ghi âm nào trên trang này.',
+                          style: TextStyle(color: Colors.white60, fontSize: 13),
+                        ),
+                      )
+                    else
+                      Flexible(
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: recs.length,
+                          separatorBuilder: (_, __) => const Divider(
+                            color: Colors.white10,
+                            height: 1,
+                          ),
+                          itemBuilder: (_, idx) {
+                            final r = recs[idx];
+                            final bool isSelected = r.id == currentId;
+                            final bool isPlayingThis =
+                                _isAudioPlaying && _playingAudioId == r.id;
+                            return ListTile(
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              tileColor: isSelected
+                                  ? EditorColors.activeBlue.withAlpha(32)
+                                  : Colors.transparent,
+                              leading: CircleAvatar(
+                                radius: 18,
+                                backgroundColor: isSelected
+                                    ? EditorColors.activeBlue
+                                    : Colors.white12,
+                                child: Icon(
+                                  isPlayingThis
+                                      ? Icons.pause_rounded
+                                      : Icons.play_arrow_rounded,
+                                  color: Colors.white,
+                                  size: 20,
+                                ),
+                              ),
+                              title: Text(
+                                'Ghi âm (${idx + 1})',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: isSelected
+                                      ? FontWeight.w700
+                                      : FontWeight.w600,
+                                  fontSize: 14,
+                                ),
+                              ),
+                              subtitle: Text(
+                                '${fmtDate(r.createdAt)}  •  ${fmtDuration(r.durationMs)}',
+                                style: const TextStyle(
+                                  color: Colors.white60,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              trailing: IconButton(
+                                tooltip: 'Xóa bản ghi âm này',
+                                icon: const Icon(
+                                  Icons.delete_outline_rounded,
+                                  color: Color(0xFFEF4444),
+                                  size: 19,
+                                ),
+                                onPressed: () async {
+                                  await _deleteAudioRecording(livePage, r);
+                                  if (ctx.mounted) setModalState(() {});
+                                },
+                              ),
+                              onTap: () async {
+                                setModalState(() => _selectedAudioId = r.id);
+                                await _togglePlayAudio(r);
+                                if (ctx.mounted) setModalState(() {});
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -3375,26 +3576,42 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             ),
           ),
 
-          // Compact Audio Note Replay Bar (shown when current page has an AudioRecording)
-          if (currentPage.audioRecordings.isNotEmpty)
-            AudioReplayBar(
-              recording: currentPage.audioRecordings.last,
-              isPlaying: _isAudioPlaying &&
-                  _playingAudioId == currentPage.audioRecordings.last.id,
-              positionMs:
-                  _playingAudioId == currentPage.audioRecordings.last.id
-                      ? _audioPositionMs
-                      : 0,
-              speed: _audioSpeed,
-              onTogglePlay: () =>
-                  _togglePlayAudio(currentPage.audioRecordings.last),
-              onSeek: (ms) =>
-                  _seekAudio(currentPage.audioRecordings.last, ms),
-              onCycleSpeed: _cycleAudioSpeed,
-              onDelete: () => _deleteAudioRecording(
-                currentPage,
-                currentPage.audioRecordings.last,
-              ),
+          // Live Audio Recording Bar OR Multi-Recording Audio Replay Bar
+          if (_isRecordingAudio)
+            AudioLiveRecordingBar(
+              elapsedMs: _recordingElapsedMs,
+              totalRecordings: currentPage.audioRecordings.length,
+              onStop: () => _toggleAudioRecording(currentPage),
+              onShowList: currentPage.audioRecordings.isNotEmpty
+                  ? () => _showAudioRecordingsDialog(currentPage)
+                  : null,
+            )
+          else if (currentPage.audioRecordings.isNotEmpty)
+            Builder(
+              builder: (_) {
+                final recs = currentPage.audioRecordings;
+                final idx = recs.indexWhere((r) => r.id == _selectedAudioId);
+                final activeIdx = idx >= 0 ? idx : recs.length - 1;
+                final activeRec = recs[activeIdx];
+                return AudioReplayBar(
+                  recording: activeRec,
+                  recordingIndex: activeIdx + 1,
+                  totalRecordings: recs.length,
+                  isPlaying:
+                      _isAudioPlaying && _playingAudioId == activeRec.id,
+                  positionMs:
+                      _playingAudioId == activeRec.id ? _audioPositionMs : 0,
+                  speed: _audioSpeed,
+                  onTogglePlay: () => _togglePlayAudio(activeRec),
+                  onSeek: (ms) => _seekAudio(activeRec, ms),
+                  onCycleSpeed: _cycleAudioSpeed,
+                  onShowList: () => _showAudioRecordingsDialog(currentPage),
+                  onStartNewRecording: () =>
+                      _toggleAudioRecording(currentPage),
+                  onDelete: () =>
+                      _deleteAudioRecording(currentPage, activeRec),
+                );
+              },
             ),
 
           // Main Canvas Area (Infinite Whiteboard, Unified Vertical InteractiveViewer, or Horizontal Flip)
@@ -3801,9 +4018,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                             setState(() => _isOverlayDragging = false),
                       ),
 
-                    // Item 3: Clear `×` close pill whenever Study Tape or Laser Pointer mode is active
-                    if (_activeTool == EditorTool.studyTape ||
-                        _activeTool == EditorTool.laserPointer)
+                    // Floating Study Tape close pill
+                    if (_activeTool == EditorTool.studyTape)
                       Positioned(
                         top: 10,
                         left: 0,
@@ -3819,19 +4035,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Icon(
-                                    _activeTool == EditorTool.studyTape
-                                        ? Icons.visibility_off_outlined
-                                        : Icons.flare_rounded,
+                                  const Icon(
+                                    Icons.visibility_off_outlined,
                                     size: 15,
                                     color: EditorColors.activeBlue,
                                   ),
                                   const SizedBox(width: 6),
-                                  Text(
-                                    _activeTool == EditorTool.studyTape
-                                        ? 'Băng che học thuộc (Chạm băng để ẩn/hiện)'
-                                        : 'Con trỏ Laser đang bật',
-                                    style: const TextStyle(
+                                  const Text(
+                                    'Băng che học thuộc (Chạm băng để ẩn/hiện)',
+                                    style: TextStyle(
                                       color: Colors.white,
                                       fontSize: 12,
                                       fontWeight: FontWeight.w600,
@@ -3849,6 +4061,177 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                     ),
                                   ),
                                 ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+
+                    // Huawei-Notes-style Floating Laser Control Bar (Mode + 6 Neon Colors + Close)
+                    if (_activeTool == EditorTool.laserPointer)
+                      Positioned(
+                        top: 10,
+                        left: 12,
+                        right: 12,
+                        child: Center(
+                          child: SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Material(
+                              elevation: 8,
+                              borderRadius: BorderRadius.circular(24),
+                              color:
+                                  EditorColors.obsidianSurface.withAlpha(242),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 10, vertical: 6),
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(24),
+                                  border: Border.all(
+                                    color: Colors.white.withAlpha(28),
+                                  ),
+                                ),
+                                child: AnimatedBuilder(
+                                  animation: _laserController,
+                                  builder: (_, __) {
+                                    final mode = _laserController.mode;
+                                    final curColor = _laserController.color;
+                                    Widget modeChip({
+                                      required LaserPointerMode targetMode,
+                                      required IconData icon,
+                                      required String label,
+                                    }) {
+                                      final active = mode == targetMode;
+                                      return GestureDetector(
+                                        onTap: () => _laserController
+                                            .setMode(targetMode),
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 10, vertical: 5),
+                                          decoration: BoxDecoration(
+                                            color: active
+                                                ? EditorColors.activeBlue
+                                                    .withAlpha(65)
+                                                : Colors.transparent,
+                                            borderRadius:
+                                                BorderRadius.circular(16),
+                                            border: Border.all(
+                                              color: active
+                                                  ? EditorColors.activeBlue
+                                                  : Colors.transparent,
+                                            ),
+                                          ),
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Icon(
+                                                icon,
+                                                size: 15,
+                                                color: active
+                                                    ? Colors.white
+                                                    : Colors.white70,
+                                              ),
+                                              const SizedBox(width: 4),
+                                              Text(
+                                                label,
+                                                style: TextStyle(
+                                                  color: active
+                                                      ? Colors.white
+                                                      : Colors.white70,
+                                                  fontSize: 12,
+                                                  fontWeight: active
+                                                      ? FontWeight.w700
+                                                      : FontWeight.w500,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      );
+                                    }
+
+                                    return Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        modeChip(
+                                          targetMode: LaserPointerMode.line,
+                                          icon: Icons.gesture_rounded,
+                                          label: 'Nét',
+                                        ),
+                                        const SizedBox(width: 4),
+                                        modeChip(
+                                          targetMode: LaserPointerMode.dot,
+                                          icon: Icons
+                                              .radio_button_checked_rounded,
+                                          label: 'Chỉ điểm',
+                                        ),
+                                        Container(
+                                          width: 1,
+                                          height: 18,
+                                          margin: const EdgeInsets.symmetric(
+                                              horizontal: 8),
+                                          color: Colors.white24,
+                                        ),
+                                        for (final c in LaserPointerController
+                                            .presetColors)
+                                          GestureDetector(
+                                            onTap: () =>
+                                                _laserController.setColor(c),
+                                            child: Padding(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 4),
+                                              child: Container(
+                                                width: 22,
+                                                height: 22,
+                                                decoration: BoxDecoration(
+                                                  color: c,
+                                                  shape: BoxShape.circle,
+                                                  border: Border.all(
+                                                    color: curColor == c
+                                                        ? Colors.white
+                                                        : Colors.white30,
+                                                    width:
+                                                        curColor == c ? 2.5 : 1,
+                                                  ),
+                                                  boxShadow: curColor == c
+                                                      ? [
+                                                          BoxShadow(
+                                                            color: c.withAlpha(
+                                                                180),
+                                                            blurRadius: 6,
+                                                          ),
+                                                        ]
+                                                      : null,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        Container(
+                                          width: 1,
+                                          height: 18,
+                                          margin: const EdgeInsets.symmetric(
+                                              horizontal: 8),
+                                          color: Colors.white24,
+                                        ),
+                                        GestureDetector(
+                                          onTap: () {
+                                            _laserController.clear();
+                                            setState(() =>
+                                                _activeTool = _lastPenTool);
+                                          },
+                                          child: const Padding(
+                                            padding: EdgeInsets.all(2),
+                                            child: Icon(
+                                              Icons.close_rounded,
+                                              size: 18,
+                                              color: Colors.white70,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    );
+                                  },
+                                ),
                               ),
                             ),
                           ),

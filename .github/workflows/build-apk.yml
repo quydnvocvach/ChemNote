@@ -160,17 +160,20 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.6.7 with APK
+      - name: Publish Release v3.6.8 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.6.7
-          name: ChemNote Pro v3.6.7 (Chống tràn RAM PDF lớn & xung đột ảo, Định danh Asset chuẩn PDF, Laser 144Hz kiểu Huawei & Kéo góc ảnh 1:1 theo đầu bút)
+          tag_name: v3.6.8
+          name: ChemNote Pro v3.6.8 (Laser 2 chế độ Nét/Chỉ điểm & Bảng màu kiểu Huawei Notes + Quản lý nhiều bản Ghi âm)
           body: |
-            ### ChemNote Pro v3.6.7 — Ổn định bộ nhớ PDF lớn, Đồng bộ Asset không trùng & Trải nghiệm bút M-Pencil 3 chuẩn xác!
-            - **Nạp PDF theo vùng lân cận & giải phóng RAM (LRU 12 trang, `targetWidth: 1600`):** Tránh giải mã hàng chục/trăm trang PDF cùng lúc gây lag hoặc văng app (OOM), đồng thời lưu `lastSyncedAt` ngay sau mỗi sổ tay và chặn tạo `(Bản sao xung đột)` ảo sau sự cố.
-            - **Chống ghi đè tên `page_N.png` trên Google Drive `Assets/`:** Đổi tên trang PDF thành `${importBatchId}_page_$pageNumber.png` khi nhập mới, tự động gắn mã batch trong `SyncManager.remoteAssetKeyForPath` cho các file PDF cũ (`page_94.png` -> `<batchId>_page_94.png`) và tải đúng về vị trí từng sổ tay (kèm fallback bản sao lưu cũ).
-            - **Con trỏ Laser 144Hz kiểu Huawei Notes:** Giữ nguyên nét laser liên tục trong suốt lúc đặt bút viết và chỉ bắt đầu mờ dần (`hold 220ms` + `fade 700ms`) sau khi nhấc bút lên, dựng bằng đường cong Bezier mượt ở tần số quét cao.
-            - **Kéo 4 nút góc ảnh bám chính xác 1:1 đầu bút & giữ nguyên tỉ lệ:** Chuyển sang chiếu vector đường chéo từ tọa độ điểm chạm gốc (`globalPosition`) thay vì tích lũy `delta` cục bộ, loại bỏ hoàn toàn hiện tượng phóng đại nhảy vọt khi kéo nhẹ.
+            ### ChemNote Pro v3.6.8 — Nâng cấp Con trỏ Laser & Ghi âm bài giảng chuẩn Huawei Notes!
+            - **Con trỏ Laser 2 chế độ (Nét / Chỉ điểm) & 6 màu neon nổi bật:**
+              - **Nét (Line):** Vẽ liên tục nhiều nét (công thức `H₂SO₄`, mũi tên...) vẫn giữ nguyên sáng rõ toàn bộ cụm nét, sau khi ngừng viết ~1.3s mới cùng mờ dần mượt mà ở 144Hz.
+              - **Chỉ điểm (Dot):** Chấm laser phát sáng 3 lớp theo sát đầu bút M-Pencil 3 và tắt gọn khi nhấc bút.
+              - **Thanh điều khiển nổi:** Chuyển nhanh giữa `Nét` / `Chỉ điểm` và đổi màu ngay trên trang.
+            - **Ghi âm nhiều đoạn & xem lại từng bản ghi:**
+              - Thanh `Đang ghi âm...` hiển thị đồng hồ giây trực tiếp & nút **Dừng** gọn gàng.
+              - Thanh phát lại bổ sung tên `Ghi âm (N)`, nút danh sách mở hộp thoại **Ghi âm** liệt kê đầy đủ `Ghi âm (1)`, `Ghi âm (2)` kèm ngày giờ/thời lượng, nút **Ghi mới**, phát lại đồng bộ nét viết & xóa từng bản riêng biệt.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

@@ -2496,23 +2496,31 @@ class EditorSettingsDrawer extends StatelessWidget {
 
 class AudioReplayBar extends StatelessWidget {
   final AudioRecording recording;
+  final int recordingIndex;
+  final int totalRecordings;
   final bool isPlaying;
   final int positionMs;
   final double speed;
   final VoidCallback onTogglePlay;
   final ValueChanged<int> onSeek;
   final VoidCallback onCycleSpeed;
+  final VoidCallback? onShowList;
+  final VoidCallback? onStartNewRecording;
   final VoidCallback onDelete;
 
   const AudioReplayBar({
     super.key,
     required this.recording,
+    this.recordingIndex = 1,
+    this.totalRecordings = 1,
     required this.isPlaying,
     required this.positionMs,
     required this.speed,
     required this.onTogglePlay,
     required this.onSeek,
     required this.onCycleSpeed,
+    this.onShowList,
+    this.onStartNewRecording,
     required this.onDelete,
   });
 
@@ -2554,6 +2562,30 @@ class AudioReplayBar extends StatelessWidget {
             padding: EdgeInsets.zero,
             onPressed: onTogglePlay,
           ),
+          const SizedBox(width: 4),
+          if (onShowList != null)
+            InkWell(
+              onTap: onShowList,
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                child: Text(
+                  'Ghi âm ($recordingIndex)',
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            )
+          else
+            Text(
+              'Ghi âm ($recordingIndex)',
+              style: const TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           const SizedBox(width: 6),
           Text(
             _formatMs(clampedPos),
@@ -2599,8 +2631,55 @@ class AudioReplayBar extends StatelessWidget {
               ),
             ),
           ),
+          if (onShowList != null) ...[
+            const SizedBox(width: 4),
+            Tooltip(
+              message: 'Danh sách bản ghi âm ($totalRecordings)',
+              child: InkWell(
+                onTap: onShowList,
+                borderRadius: BorderRadius.circular(10),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: isDark
+                        ? Colors.white.withAlpha(18)
+                        : Colors.black.withAlpha(12),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.format_list_bulleted_rounded, size: 16),
+                      if (totalRecordings > 1) ...[
+                        const SizedBox(width: 3),
+                        Text(
+                          '$totalRecordings',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+          if (onStartNewRecording != null)
+            IconButton(
+              tooltip: 'Ghi âm mới',
+              icon: const Icon(
+                Icons.mic_none_rounded,
+                size: 19,
+                color: EditorColors.activeBlue,
+              ),
+              visualDensity: VisualDensity.compact,
+              onPressed: onStartNewRecording,
+            ),
           IconButton(
-            tooltip: 'Xóa bản ghi âm trang này',
+            tooltip: 'Xóa bản ghi âm này',
             icon: const Icon(
               Icons.delete_outline_rounded,
               size: 18,
@@ -2608,6 +2687,98 @@ class AudioReplayBar extends StatelessWidget {
             ),
             visualDensity: VisualDensity.compact,
             onPressed: onDelete,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class AudioLiveRecordingBar extends StatelessWidget {
+  final int elapsedMs;
+  final int totalRecordings;
+  final VoidCallback onStop;
+  final VoidCallback? onShowList;
+
+  const AudioLiveRecordingBar({
+    super.key,
+    required this.elapsedMs,
+    this.totalRecordings = 0,
+    required this.onStop,
+    this.onShowList,
+  });
+
+  String _formatMs(int ms) {
+    final totalSec = (ms / 1000).floor().clamp(0, 35999);
+    final m = (totalSec ~/ 60).toString().padLeft(2, '0');
+    final s = (totalSec % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = isDark ? EditorColors.obsidianSurface : Colors.white;
+    final border =
+        isDark ? Colors.white.withAlpha(20) : Colors.black.withAlpha(18);
+
+    return Container(
+      height: 44,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: bg,
+        border: Border(bottom: BorderSide(color: border)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 10,
+            height: 10,
+            decoration: const BoxDecoration(
+              color: Color(0xFFEF4444),
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 8),
+          const Text(
+            'Đang ghi âm...',
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const Spacer(),
+          Text(
+            _formatMs(elapsedMs),
+            style: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          if (totalRecordings > 0 && onShowList != null) ...[
+            const SizedBox(width: 10),
+            IconButton(
+              tooltip: 'Danh sách bản ghi âm ($totalRecordings)',
+              icon: const Icon(Icons.format_list_bulleted_rounded, size: 19),
+              visualDensity: VisualDensity.compact,
+              onPressed: onShowList,
+            ),
+          ],
+          const SizedBox(width: 8),
+          FilledButton.icon(
+            onPressed: onStop,
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFEF4444),
+              foregroundColor: Colors.white,
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              minimumSize: const Size(0, 30),
+            ),
+            icon: const Icon(Icons.stop_rounded, size: 16),
+            label: const Text(
+              'Dừng',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+            ),
           ),
         ],
       ),

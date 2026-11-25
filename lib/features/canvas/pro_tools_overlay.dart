@@ -2,60 +2,127 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
-/// A single continuous laser stroke that remains visible while the pen is held down,
-/// then smoothly fades out after the pen lifts (Huawei Notes behavior).
+/// Operating mode for the Huawei-Notes-style laser pointer.
+enum LaserPointerMode {
+  /// Continuous glowing laser stroke held solid while writing, fading after pause.
+  line,
+
+  /// Focused glowing laser dot spotlight following the stylus tip.
+  dot,
+}
+
+/// A single continuous laser stroke held solid while writing,
+/// then faded out together with recent strokes after pausing (Huawei Notes style).
 class LaserStroke {
   final List<Offset> points;
   bool isActive;
-  int? releasedAtMs;
 
   LaserStroke({
     required this.points,
     this.isActive = true,
-    this.releasedAtMs,
   });
 }
 
-/// Manages 144Hz zero-delay laser pointer strokes without rebuilding
-/// the underlying page canvas.
+/// Manages 144Hz zero-delay laser pointer strokes & spotlight dot without
+/// rebuilding the underlying page canvas.
 class LaserPointerController extends ChangeNotifier {
+  static const List<Color> presetColors = [
+    Color(0xFFFF2D2D), // Bright Neon Red
+    Color(0xFF22E53D), // Vivid Neon Green
+    Color(0xFF00B4FF), // Electric Cyan Blue
+    Color(0xFFA855F7), // Vibrant Violet
+    Color(0xFFFF9F0A), // Warm Amber
+    Color(0xFFFF2D95), // Hot Magenta
+  ];
+
+  static const int holdBeforeFadeMs = 1300;
+  static const int fadeOutDurationMs = 550;
+  static const int dotFadeOutMs = 160;
+
   final List<LaserStroke> _strokes = [];
   Timer? _fadeTimer;
   Color color;
+  LaserPointerMode _mode = LaserPointerMode.line;
   String? _activePageId;
 
-  static const int holdAfterReleaseMs = 220;
-  static const int fadeOutDurationMs = 700;
-  static const int totalReleaseFadeMs = holdAfterReleaseMs + fadeOutDurationMs;
+  int? _lastGroupReleaseMs;
+  Offset? _spotPosition;
+  bool _isSpotActive = false;
+  int? _spotReleasedAtMs;
 
-  LaserPointerController({this.color = const Color(0xFFEF4444)});
+  LaserPointerController({this.color = const Color(0xFFFF2D2D)});
 
   List<LaserStroke> get strokes => List.unmodifiable(_strokes);
+  LaserPointerMode get mode => _mode;
   String? get activePageId => _activePageId;
-  bool get hasPoints => _strokes.isNotEmpty;
+  Offset? get spotPosition => _spotPosition;
+  bool get isSpotActive => _isSpotActive;
+  int? get spotReleasedAtMs => _spotReleasedAtMs;
+  int? get lastGroupReleaseMs => _lastGroupReleaseMs;
+  bool get hasPoints => _strokes.isNotEmpty || _spotPosition != null;
+
+  void setMode(LaserPointerMode next) {
+    if (_mode == next) return;
+    _mode = next;
+    _strokes.clear();
+    _spotPosition = null;
+    _isSpotActive = false;
+    _spotReleasedAtMs = null;
+    _lastGroupReleaseMs = null;
+    _fadeTimer?.cancel();
+    _fadeTimer = null;
+    notifyListeners();
+  }
+
+  void setColor(Color next) {
+    if (color == next) return;
+    color = next;
+    notifyListeners();
+  }
 
   void beginStroke(Offset pos, {String? pageId}) {
     if (pageId != null && _activePageId != null && _activePageId != pageId) {
       _strokes.clear();
+      _spotPosition = null;
     }
     if (pageId != null) _activePageId = pageId;
+
+    if (_mode == LaserPointerMode.dot) {
+      _strokes.clear();
+      _lastGroupReleaseMs = null;
+      _spotPosition = pos;
+      _isSpotActive = true;
+      _spotReleasedAtMs = null;
+      notifyListeners();
+      return;
+    }
+
+    // Hold all existing strokes solid whenever user continues writing multi-stroke formulas
+    _lastGroupReleaseMs = null;
     for (final s in _strokes) {
-      if (s.isActive) {
-        s.isActive = false;
-        s.releasedAtMs ??= DateTime.now().millisecondsSinceEpoch;
-      }
+      s.isActive = false;
     }
     _strokes.add(LaserStroke(points: [pos], isActive: true));
     notifyListeners();
   }
 
   void addPoint(Offset pos, {String? pageId}) {
+    if (_mode == LaserPointerMode.dot) {
+      if (pageId != null) _activePageId = pageId;
+      _spotPosition = pos;
+      _isSpotActive = true;
+      _spotReleasedAtMs = null;
+      notifyListeners();
+      return;
+    }
+
     if (_strokes.isEmpty ||
         !_strokes.last.isActive ||
         (pageId != null && _activePageId != null && _activePageId != pageId)) {
       beginStroke(pos, pageId: pageId);
       return;
     }
+    _lastGroupReleaseMs = null;
     final active = _strokes.last;
     if ((pos - active.points.last).distance < 1.5) return;
     active.points.add(pos);
@@ -64,15 +131,25 @@ class LaserPointerController extends ChangeNotifier {
 
   void endStroke() {
     final now = DateTime.now().millisecondsSinceEpoch;
+    if (_mode == LaserPointerMode.dot) {
+      if (_spotPosition != null) {
+        _isSpotActive = false;
+        _spotReleasedAtMs = now;
+        _ensureTimer();
+        notifyListeners();
+      }
+      return;
+    }
+
     bool endedAny = false;
     for (final s in _strokes) {
       if (s.isActive) {
         s.isActive = false;
-        s.releasedAtMs = now;
         endedAny = true;
       }
     }
     if (endedAny || _strokes.isNotEmpty) {
+      _lastGroupReleaseMs = now;
       _ensureTimer();
       notifyListeners();
     }
@@ -80,6 +157,10 @@ class LaserPointerController extends ChangeNotifier {
 
   void clear() {
     _strokes.clear();
+    _spotPosition = null;
+    _isSpotActive = false;
+    _spotReleasedAtMs = null;
+    _lastGroupReleaseMs = null;
     _activePageId = null;
     _fadeTimer?.cancel();
     _fadeTimer = null;
@@ -90,7 +171,10 @@ class LaserPointerController extends ChangeNotifier {
     _fadeTimer ??= Timer.periodic(const Duration(milliseconds: 8), (_) {
       final now = DateTime.now().millisecondsSinceEpoch;
       _pruneExpired(now);
-      if (_strokes.isEmpty || _strokes.every((s) => s.isActive)) {
+      final bool nothingFading =
+          (_strokes.isEmpty || _strokes.any((s) => s.isActive)) &&
+              (_spotPosition == null || _isSpotActive);
+      if (nothingFading) {
         _fadeTimer?.cancel();
         _fadeTimer = null;
       }
@@ -99,11 +183,19 @@ class LaserPointerController extends ChangeNotifier {
   }
 
   void _pruneExpired(int nowMs) {
-    _strokes.removeWhere((s) {
-      if (s.isActive || s.releasedAtMs == null) return false;
-      return nowMs - s.releasedAtMs! > totalReleaseFadeMs;
-    });
-    if (_strokes.isEmpty) {
+    if (!_isSpotActive && _spotReleasedAtMs != null) {
+      if (nowMs - _spotReleasedAtMs! > dotFadeOutMs) {
+        _spotPosition = null;
+        _spotReleasedAtMs = null;
+      }
+    }
+    if (_strokes.every((s) => !s.isActive) && _lastGroupReleaseMs != null) {
+      if (nowMs - _lastGroupReleaseMs! > holdBeforeFadeMs + fadeOutDurationMs) {
+        _strokes.clear();
+        _lastGroupReleaseMs = null;
+      }
+    }
+    if (_strokes.isEmpty && _spotPosition == null) {
       _activePageId = null;
     }
   }
@@ -115,8 +207,8 @@ class LaserPointerController extends ChangeNotifier {
   }
 }
 
-/// Paints smooth glowing laser pointer strokes on top of the active page
-/// with minimal GPU draw calls at 144Hz.
+/// Paints smooth glowing Huawei-Notes-style neon laser strokes or spotlight dot
+/// on top of the active page at 144Hz.
 class LaserPointerPainter extends CustomPainter {
   final LaserPointerController controller;
   final String? pageId;
@@ -133,28 +225,82 @@ class LaserPointerPainter extends CustomPainter {
         controller.activePageId != pageId) {
       return;
     }
-    final strokes = controller.strokes;
-    if (strokes.isEmpty) return;
 
     final now = DateTime.now().millisecondsSinceEpoch;
     final baseColor = controller.color;
 
+    if (controller.mode == LaserPointerMode.dot) {
+      final pos = controller.spotPosition;
+      if (pos == null) return;
+      double t = 1.0;
+      if (!controller.isSpotActive && controller.spotReleasedAtMs != null) {
+        final elapsed = now - controller.spotReleasedAtMs!;
+        t = (1.0 - elapsed / LaserPointerController.dotFadeOutMs)
+            .clamp(0.0, 1.0);
+      }
+      if (t <= 0.01) return;
+
+      canvas.drawCircle(
+        pos,
+        16.0 * t,
+        Paint()
+          ..color = baseColor.withAlpha((t * 115).round())
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6.0),
+      );
+      canvas.drawCircle(
+        pos,
+        9.5 * t,
+        Paint()..color = baseColor.withAlpha((t * 215).round()),
+      );
+      canvas.drawCircle(
+        pos,
+        4.5 * t,
+        Paint()..color = Colors.white.withAlpha((t * 250).round()),
+      );
+      return;
+    }
+
+    final strokes = controller.strokes;
+    if (strokes.isEmpty) return;
+
+    final bool anyActive = strokes.any((s) => s.isActive);
+    double t = 1.0;
+    if (!anyActive && controller.lastGroupReleaseMs != null) {
+      final elapsedAfterRelease = now - controller.lastGroupReleaseMs!;
+      if (elapsedAfterRelease > LaserPointerController.holdBeforeFadeMs) {
+        final fadeElapsed =
+            elapsedAfterRelease - LaserPointerController.holdBeforeFadeMs;
+        t = (1.0 - fadeElapsed / LaserPointerController.fadeOutDurationMs)
+            .clamp(0.0, 1.0);
+      }
+    }
+    if (t <= 0.01) return;
+
+    final haloPaint = Paint()
+      ..color = baseColor.withAlpha((t * 115).round())
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 16.0 * (0.45 + 0.55 * t)
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5.0);
+
+    final vividPaint = Paint()
+      ..color = baseColor.withAlpha((t * 220).round())
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 8.5 * (0.45 + 0.55 * t)
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    final corePaint = Paint()
+      ..color = Colors.white.withAlpha((t * 248).round())
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3.8 * (0.45 + 0.55 * t)
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
     for (final stroke in strokes) {
       final pts = stroke.points;
       if (pts.isEmpty) continue;
-
-      double t = 1.0;
-      if (!stroke.isActive && stroke.releasedAtMs != null) {
-        final ageAfterRelease = now - stroke.releasedAtMs!;
-        if (ageAfterRelease > LaserPointerController.holdAfterReleaseMs) {
-          final fadeElapsed =
-              ageAfterRelease - LaserPointerController.holdAfterReleaseMs;
-          t = (1.0 -
-                  fadeElapsed / LaserPointerController.fadeOutDurationMs)
-              .clamp(0.0, 1.0);
-        }
-      }
-      if (t <= 0.01) continue;
 
       if (pts.length >= 2) {
         final path = Path()..moveTo(pts.first.dx, pts.first.dy);
@@ -167,41 +313,35 @@ class LaserPointerPainter extends CustomPainter {
         }
         path.lineTo(pts.last.dx, pts.last.dy);
 
-        // Outer neon halo (single drawPath call)
-        canvas.drawPath(
-          path,
+        canvas.drawPath(path, haloPaint);
+        canvas.drawPath(path, vividPaint);
+        canvas.drawPath(path, corePaint);
+      } else {
+        canvas.drawCircle(
+          pts.first,
+          7.0 * t,
           Paint()
-            ..color = baseColor.withAlpha((t * 105).round())
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = 9.0 * (0.4 + 0.6 * t)
-            ..strokeCap = StrokeCap.round
-            ..strokeJoin = StrokeJoin.round,
+            ..color = baseColor.withAlpha((t * 180).round())
+            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4.0),
         );
-
-        // Bright inner laser core (single drawPath call)
-        canvas.drawPath(
-          path,
-          Paint()
-            ..color = Color.lerp(baseColor, Colors.white, 0.55)!
-                .withAlpha((t * 245).round())
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = 3.6 * (0.4 + 0.6 * t)
-            ..strokeCap = StrokeCap.round
-            ..strokeJoin = StrokeJoin.round,
+        canvas.drawCircle(
+          pts.first,
+          3.2 * t,
+          Paint()..color = Colors.white.withAlpha((t * 248).round()),
         );
       }
 
-      if (stroke.isActive || t > 0.25) {
+      if (stroke.isActive) {
         final tip = pts.last;
         canvas.drawCircle(
           tip,
-          7.0 * t,
-          Paint()..color = baseColor.withAlpha((t * 130).round()),
+          8.0,
+          Paint()..color = baseColor.withAlpha(180),
         );
         canvas.drawCircle(
           tip,
-          3.4 * t,
-          Paint()..color = Colors.white.withAlpha((t * 250).round()),
+          3.8,
+          Paint()..color = Colors.white,
         );
       }
     }
