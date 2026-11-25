@@ -160,24 +160,17 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.7.2 with APK
+      - name: Publish Release v3.7.3 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.7.2
-          name: ChemNote Pro v3.7.2 (Tăng tốc nhập PDF 6–10× & Sửa lỗi đen màn hình khi nhập Word)
+          tag_name: v3.7.3
+          name: ChemNote Pro v3.7.3 (Thumbnail Danh sách trang sắc nét 720px cho PDF ≤ 80 trang & 480px cho PDF hàng trăm trang)
           body: |
-            ### ChemNote Pro v3.7.2 — Nhập PDF siêu nhanh & Nhập Word (`.docx`) hiển thị trắng sáng rõ nét!
-            - **Tăng tốc độ nhập PDF vượt trội trên MatePad / Android (`MainActivity.kt`):**
-              - Tái sử dụng trực tiếp một vùng đệm `Bitmap` giữa các trang PDF đồng kích thước thay vì cấp phát/thu hồi hàng chục MB mỗi trang, chuẩn cạnh dài **2048px** (`2K` sắc nét).
-              - Chuyển bước nén ảnh nền sang phần cứng **`Bitmap.CompressFormat.JPEG` (chất lượng 92)** qua `BufferedOutputStream` trên nền trắng tinh khiết (`Color.WHITE`) — mã hóa nhanh gấp **6–10 lần** so với PNG nén CPU, dung lượng nhẹ hơn **5–8 lần**, đồng bộ Google Drive nhanh hơn.
-              - Tiết chế tần suất cập nhật UI `pdf_import_progress` (~80ms/lần với PDF nhiều trang) để tránh nghẽn luồng giao diện.
-            - **Xử lý PDF dung lượng lớn (92–800+ trang) siêu mượt & không bao giờ bị trắng trang khi lướt/nhảy trang:**
-              - **Ảo hóa cửa sổ hiển thị trang (`Windowed Page Virtualization`):** Tự động chỉ dựng ~17 trang quanh màn hình hiện tại (giữ nguyên 100% chiều cao & tốc độ lướt 1×–25×) thay vì dựng toàn bộ 800 trang cùng lúc, hết hẳn lag khi mở hoặc nhảy tới trang cuối.
-              - **Kéo thanh cuộn bên & Lưới Danh sách trang thông minh:** Hủy bỏ ảnh cũ vừa giải mã xong ở xa khi kéo nhanh qua hàng trăm trang (`_nearbyPdfKeepPaths`) và tự nạp ngay vùng trang đích ngay khi nhả tay khỏi thanh cuộn — không còn hiện tượng trang trắng phải chạm tay mới hiện nội dung. Lưới Danh sách trang tải ảnh thu nhỏ theo yêu cầu (`cacheWidth: 220`, `cacheExtent: 360`) để hiển thị đầy đủ mọi trang từ trang 1 tới trang 92–800+ và nhảy thẳng tới trang bất kỳ không giật.
-            - **Sửa triệt để lỗi nhập tệp Word (`.docx`) bị đen thui ở Chế độ Tối:**
-              - Gỡ bỏ `inputDecorationTheme.fillColor` (`obsidianCard` `#22252E`) đang vô tình tô đè nền tối đặc lên `TextField` toàn trang của `_DraggableTextBoxOverlay`, giúp trang Word nền trắng và chữ hiển thị đúng sáng rõ.
-              - Gia cố trình phân tích XML Word (`_extractDocxParagraphs`): bỏ qua thẻ rỗng tự đóng `<w:p/>` tránh nuốt đoạn văn kế tiếp và hỗ trợ đọc thêm công thức Hóa/Toán `<m:t>` trong Word; `pickAndImportDocx` đặt `withData: kIsWeb`.
-            - **Kèm trọn vẹn toàn bộ cải tiến từ v3.7.1:** Luồng Android `PdfRenderer` stream từng trang không văng app tại 0%.
+            ### ChemNote Pro v3.7.3 — Thumbnail Danh sách trang rõ nét trở lại trên màn hình MatePad 2.8K!
+            - **Nâng độ nét thumbnail trong Danh sách trang (`_openPageGridModal`):**
+              - Tự động giải mã ảnh thu nhỏ ở độ rộng **`720px`** cho tài liệu `<= 80` trang (rõ chữ, sắc nét như các bản cũ trên màn hình 2800×1840) và **`480px`** cho tài liệu `> 80` trang (800+ trang vẫn nét gấp đôi 220px cũ mà vẫn tiết kiệm RAM & cuộn mượt).
+              - Chuyển bộ lọc thu phóng từ `FilterQuality.low` sang **`FilterQuality.medium`** để chữ và công thức không bị răng cưa hay nhòe.
+            - **Kèm trọn vẹn toàn bộ cải tiến từ v3.7.2:** Nhập PDF siêu nhanh (JPEG 92 + tái sử dụng `Bitmap`), sửa lỗi đen màn hình khi nhập Word (`.docx`), ảo hóa cửa sổ 800 trang & kéo thanh cuộn bên hiển thị ngay không bị trang trắng.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

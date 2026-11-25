@@ -3060,10 +3060,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                                               File(p
                                                                   .pdfBackgroundPath!),
                                                               fit: BoxFit.contain,
-                                                              cacheWidth: 220,
+                                                              cacheWidth:
+                                                                  notebook.pages
+                                                                              .length <=
+                                                                          80
+                                                                      ? 720
+                                                                      : 480,
                                                               filterQuality:
                                                                   FilterQuality
-                                                                      .low,
+                                                                      .medium,
                                                               gaplessPlayback:
                                                                   true,
                                                               errorBuilder: (
