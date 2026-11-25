@@ -59,8 +59,8 @@ class PdfImportService {
   /// Độ phân giải mặc định 150 DPI cho fallback `Printing.raster` trên Web/Desktop: cân bằng độ nét và RAM.
   static const double defaultPdfDpi = 150.0;
 
-  /// Cạnh dài mục tiêu (px) khi kết xuất PDF bằng Android `PdfRenderer` gốc (giữ chữ sắc nét, không bao giờ OOM).
-  static const int nativeTargetLongEdgePx = 2200;
+  /// Cạnh dài mục tiêu (px) khi kết xuất PDF bằng Android `PdfRenderer` gốc (2K sắc nét, tốc độ cao, không OOM).
+  static const int nativeTargetLongEdgePx = 2048;
 
   /// Đường dẫn chuẩn cho ảnh thu nhỏ (thumbnail) đi kèm trang PDF đã kết xuất.
   /// Giữ lượt raster 1 lần duy nhất; editor giải mã thumbnail `targetWidth: 320` trực tiếp từ PNG gốc (< 3ms).
@@ -402,7 +402,7 @@ class PdfImportService {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: const <String>['docx', 'doc', 'ppt', 'pptx'],
-        withData: true,
+        withData: kIsWeb,
       );
 
       if (result == null || result.files.isEmpty) {
@@ -690,12 +690,12 @@ class PdfImportService {
     );
   }
 
-  /// Trích xuất danh sách đoạn văn sạch từ `word/document.xml` (hỗ trợ `<w:p>`, `<w:t>`, `<w:br/>`, `<w:tab/>`, `<w:tc>`).
+  /// Trích xuất danh sách đoạn văn sạch từ `word/document.xml` (hỗ trợ `<w:p>`, `<w:t>`, `<m:t>` công thức, `<w:br/>`, `<w:tab/>`, bỏ qua thẻ tự đóng `<w:p/>`).
   static List<String> _extractDocxParagraphs(String xml) {
     final paragraphs = <String>[];
-    final pRegex = RegExp(r'<w:p\b[^>]*>([\s\S]*?)</w:p>');
+    final pRegex = RegExp(r'<w:p(?:\s[^>]*)?(?<!/)>([\s\S]*?)</w:p>');
     final tokenRegex = RegExp(
-      r'<w:t\b[^>]*>([\s\S]*?)</w:t>|<w:br\b[^>]*/>|<w:cr\b[^>]*/>|<w:tab\b[^>]*/>',
+      r'<(?:w|m):t\b[^>]*>([\s\S]*?)</(?:w|m):t>|<w:br\b[^>]*/>|<w:cr\b[^>]*/>|<w:tab\b[^>]*/>',
     );
 
     for (final pMatch in pRegex.allMatches(xml)) {

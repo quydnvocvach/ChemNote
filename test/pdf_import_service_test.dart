@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:archive/archive.dart';
+import 'package:chemnote/core/models/drawing_elements.dart';
 import 'package:chemnote/features/pdf/pdf_import_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -34,6 +36,37 @@ void main() {
         PdfImportService.estimatePdfPageCount(Uint8List(25 * 1024 * 1024 + 1)),
         isNull,
       );
+    });
+  });
+
+  group('PdfImportService Word (.docx) extraction', () {
+    test('extracts paragraphs and OMML formulas past self-closing <w:p/> onto white pages', () async {
+      const xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+  <w:body>
+    <w:p><w:r><w:t>Bài 1: Dung dịch chất điện li</w:t></w:r></w:p>
+    <w:p w:rsidR="001234"/>
+    <w:p><m:oMath><m:r><m:t>H2SO4 -> 2H+ + SO4(2-)</m:t></m:r></m:oMath></w:p>
+  </w:body>
+</w:document>''';
+      final xmlBytes = utf8.encode(xml);
+      final archive = Archive()
+        ..addFile(ArchiveFile('word/document.xml', xmlBytes.length, xmlBytes));
+      final bytes = Uint8List.fromList(ZipEncoder().encode(archive)!);
+
+      final result = await PdfImportService().importDocxBytes(
+        bytes,
+        fileName: 'hoa_hoc_11.docx',
+      );
+
+      expect(result.suggestedTitle, 'hoa_hoc_11');
+      expect(result.pages, isNotEmpty);
+      expect(result.pages.first.paperColor, PaperColorType.white);
+      final combinedText =
+          result.pages.first.textElements.map((e) => e.text).join('\n');
+      expect(combinedText, contains('Bài 1: Dung dịch chất điện li'));
+      expect(combinedText, contains('H2SO4 -> 2H+ + SO4(2-)'));
     });
   });
 }

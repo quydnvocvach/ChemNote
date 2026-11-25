@@ -30,6 +30,7 @@ import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
 
@@ -761,6 +762,7 @@ class MainActivity : FlutterActivity() {
         Thread {
             var pfd: ParcelFileDescriptor? = null
             var renderer: PdfRenderer? = null
+            var reusableBitmap: Bitmap? = null
             val renderedPages = ArrayList<HashMap<String, Any>>()
             try {
                 pfd = ParcelFileDescriptor.open(srcFile, ParcelFileDescriptor.MODE_READ_ONLY)
@@ -782,9 +784,9 @@ class MainActivity : FlutterActivity() {
                     )
                 }
 
+                var lastProgressEmitMs = 0L
                 for (index in 0 until pageCount) {
                     val pageNumber = index + 1
-                    var bitmap: Bitmap? = null
                     val page = renderer.openPage(index)
                     try {
                         val pageW = page.width.coerceAtLeast(1)
@@ -794,7 +796,23 @@ class MainActivity : FlutterActivity() {
                         val targetW = (pageW * scale).toInt().coerceIn(1, targetLongEdge)
                         val targetH = (pageH * scale).toInt().coerceIn(1, targetLongEdge)
 
-                        bitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+                        val currentReusable = reusableBitmap
+                        val bitmap = if (
+                            currentReusable != null &&
+                            !currentReusable.isRecycled &&
+                            currentReusable.width == targetW &&
+                            currentReusable.height == targetH
+                        ) {
+                            currentReusable
+                        } else {
+                            if (currentReusable != null && !currentReusable.isRecycled) {
+                                currentReusable.recycle()
+                            }
+                            Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888).also {
+                                reusableBitmap = it
+                            }
+                        }
+
                         val canvas = Canvas(bitmap)
                         canvas.drawColor(Color.WHITE)
                         page.render(
@@ -804,10 +822,10 @@ class MainActivity : FlutterActivity() {
                             PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY
                         )
 
-                        val outFile = File(targetDir, "${safeBatch}_page_$pageNumber.png")
-                        FileOutputStream(outFile).use { fos ->
-                            bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
-                            fos.flush()
+                        val outFile = File(targetDir, "${safeBatch}_page_$pageNumber.jpg")
+                        BufferedOutputStream(FileOutputStream(outFile), 65536).use { bos ->
+                            bitmap.compress(Bitmap.CompressFormat.JPEG, 92, bos)
+                            bos.flush()
                         }
 
                         renderedPages.add(
@@ -820,21 +838,26 @@ class MainActivity : FlutterActivity() {
                             )
                         )
                     } finally {
-                        if (bitmap != null && !bitmap.isRecycled) {
-                            bitmap.recycle()
-                        }
                         page.close()
                     }
 
-                    runOnUiThread {
-                        hardwareChannel?.invokeMethod(
-                            "pdf_import_progress",
-                            hashMapOf(
-                                "currentPage" to pageNumber,
-                                "totalPages" to pageCount,
-                                "stage" to "Đang nhập trang PDF $pageNumber/$pageCount..."
+                    val nowMs = SystemClock.uptimeMillis()
+                    if (pageCount <= 20 ||
+                        pageNumber == 1 ||
+                        pageNumber == pageCount ||
+                        nowMs - lastProgressEmitMs >= 80L
+                    ) {
+                        lastProgressEmitMs = nowMs
+                        runOnUiThread {
+                            hardwareChannel?.invokeMethod(
+                                "pdf_import_progress",
+                                hashMapOf(
+                                    "currentPage" to pageNumber,
+                                    "totalPages" to pageCount,
+                                    "stage" to "Đang nhập trang PDF $pageNumber/$pageCount..."
+                                )
                             )
-                        )
+                        }
                     }
                 }
 
@@ -866,6 +889,11 @@ class MainActivity : FlutterActivity() {
                     )
                 }
             } finally {
+                val bmp = reusableBitmap
+                if (bmp != null && !bmp.isRecycled) {
+                    bmp.recycle()
+                }
+                reusableBitmap = null
                 runCatching { renderer?.close() }
                 runCatching { pfd?.close() }
             }

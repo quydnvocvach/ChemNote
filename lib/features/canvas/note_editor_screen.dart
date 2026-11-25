@@ -101,6 +101,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   late final AppState _appStateRef;
   late String _activeNotebookId;
   int _currentPageIndex = 0;
+  int _renderedWindowCenter = 0;
+  bool _isScrubbingPages = false;
+  Timer? _scrubPrefetchTimer;
   String? _activeDrawingPageId;
   int _repaintVersion = 0;
   double _refreshRateHz = 60.0;
@@ -247,6 +250,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     super.initState();
     _activeNotebookId = widget.notebookId;
     _currentPageIndex = widget.initialPageIndex;
+    _renderedWindowCenter = _currentPageIndex;
     _horizontalPageController = PageController(initialPage: _currentPageIndex);
     _lassoController.addListener(_onLassoChanged);
 
@@ -300,6 +304,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _appStateRef.flushPendingSaves();
     _stylusHoverTimer?.cancel();
     _shapeHoldTimer?.cancel();
+    _scrubPrefetchTimer?.cancel();
     _recordingElapsedTimer?.cancel();
     _audioPollTimer?.cancel();
     HardwareService.instance.stopAudio();
@@ -416,6 +421,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     setState(() {
       _activeNotebookId = notebookId;
       _currentPageIndex = 0;
+      _renderedWindowCenter = 0;
+      _isScrubbingPages = false;
+      _scrubPrefetchTimer?.cancel();
       _lassoController.clear();
       _selectedTextId = null;
       _selectedImageId = null;
@@ -469,15 +477,23 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     final appState = context.read<AppState>();
     final notebook = _getNotebook(context, listen: false);
     if (notebook == null || notebook.pages.isEmpty) return;
+    final prevIdx = _currentPageIndex;
     final clampedIdx = index.clamp(0, notebook.pages.length - 1);
-    setState(() => _currentPageIndex = clampedIdx);
+    setState(() {
+      _currentPageIndex = clampedIdx;
+      _renderedWindowCenter = clampedIdx;
+    });
     if (!appState.verticalContinuousScroll &&
         _horizontalPageController.hasClients) {
-      _horizontalPageController.animateToPage(
-        clampedIdx,
-        duration: const Duration(milliseconds: 240),
-        curve: Curves.easeOutCubic,
-      );
+      if ((clampedIdx - prevIdx).abs() > 3) {
+        _horizontalPageController.jumpToPage(clampedIdx);
+      } else {
+        _horizontalPageController.animateToPage(
+          clampedIdx,
+          duration: const Duration(milliseconds: 240),
+          curve: Curves.easeOutCubic,
+        );
+      }
     } else if (appState.verticalContinuousScroll && !notebook.isWhiteboard) {
       final m = _transformController.value;
       final double scale = m.getMaxScaleOnAxis().clamp(0.5, 4.0);
@@ -534,6 +550,19 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
   }
 
+  Set<String> _nearbyPdfKeepPaths(Notebook notebook) {
+    final int center = _currentPageIndex.clamp(0, notebook.pages.length - 1);
+    final int keepStart = math.max(0, center - (_pdfPreloadRadius + 2));
+    final int keepEnd =
+        math.min(notebook.pages.length - 1, center + (_pdfPreloadRadius + 2));
+    final keepPaths = <String>{};
+    for (int i = keepStart; i <= keepEnd; i++) {
+      final p = notebook.pages[i].pdfBackgroundPath;
+      if (p != null && p.isNotEmpty) keepPaths.add(p);
+    }
+    return keepPaths;
+  }
+
   void _prefetchNearbyPdfPages(Notebook notebook) {
     if (notebook.pages.isEmpty) return;
     final int center = _currentPageIndex.clamp(0, notebook.pages.length - 1);
@@ -551,14 +580,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
 
     if (_pdfImageCache.length <= _maxCachedPdfPages) return;
-    final int keepStart = math.max(0, center - (_pdfPreloadRadius + 2));
-    final int keepEnd =
-        math.min(notebook.pages.length - 1, center + (_pdfPreloadRadius + 2));
-    final keepPaths = <String>{};
-    for (int i = keepStart; i <= keepEnd; i++) {
-      final p = notebook.pages[i].pdfBackgroundPath;
-      if (p != null && p.isNotEmpty) keepPaths.add(p);
-    }
+    final keepPaths = _nearbyPdfKeepPaths(notebook);
 
     final evictedImages = <ui.Image>[];
     final candidates = _pdfImageCache.keys.toList();
@@ -604,14 +626,27 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         frame.image.dispose();
         return;
       }
+      final notebook = _getNotebook(context, listen: false);
+      final Set<String> keepPaths =
+          notebook != null && notebook.pages.isNotEmpty
+              ? _nearbyPdfKeepPaths(notebook)
+              : const <String>{};
+      if (keepPaths.isNotEmpty && !keepPaths.contains(path)) {
+        // Bỏ qua ảnh cũ vừa giải mã xong sau khi người dùng đã kéo tới vị trí khác xa
+        frame.image.dispose();
+        return;
+      }
       final evictedImages = <ui.Image>[];
       setState(() {
         _pdfImageCache[path] = frame.image;
-        while (_pdfImageCache.length > _maxCachedPdfPages + 4) {
-          final oldestKey = _pdfImageCache.keys.first;
-          if (oldestKey == path) break;
-          final removed = _pdfImageCache.remove(oldestKey);
-          if (removed != null) evictedImages.add(removed);
+        if (_pdfImageCache.length > _maxCachedPdfPages + 4) {
+          final keys = _pdfImageCache.keys.toList();
+          for (final k in keys) {
+            if (_pdfImageCache.length <= _maxCachedPdfPages + 4) break;
+            if (k == path || keepPaths.contains(k)) continue;
+            final removed = _pdfImageCache.remove(k);
+            if (removed != null) evictedImages.add(removed);
+          }
         }
         _repaintVersion++;
       });
@@ -2368,6 +2403,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
     if (visibleIdx != _currentPageIndex) {
       _currentPageIndex = visibleIdx;
+      if ((visibleIdx - _renderedWindowCenter).abs() >= 3) {
+        setState(() => _renderedWindowCenter = visibleIdx);
+      }
       _prefetchNearbyPdfPages(notebook);
     }
 
@@ -2960,6 +2998,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             Expanded(
               child: GridView.builder(
                 padding: const EdgeInsets.all(16),
+                cacheExtent: 360,
                 gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
                   maxCrossAxisExtent: 170,
                   mainAxisSpacing: 14,
@@ -3010,22 +3049,49 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                               child: Stack(
                                                 children: [
                                                   Positioned.fill(
-                                                    child: CustomPaint(
-                                                      size: thumbSize,
-                                                      painter: CanvasPainter(
-                                                        page: p,
-                                                        pdfBackgroundImage:
-                                                            p.pdfBackgroundPath !=
-                                                                    null
-                                                                ? _pdfImageCache[
-                                                                    p.pdfBackgroundPath!]
-                                                                : null,
-                                                        elementImageCache:
-                                                            _elementImageCache,
-                                                        repaintVersion:
-                                                            _repaintVersion,
-                                                      ),
-                                                    ),
+                                                    child: (p.pdfBackgroundPath !=
+                                                                null &&
+                                                            _pdfImageCache[p
+                                                                    .pdfBackgroundPath!] ==
+                                                                null)
+                                                        ? ColoredBox(
+                                                            color: Colors.white,
+                                                            child: Image.file(
+                                                              File(p
+                                                                  .pdfBackgroundPath!),
+                                                              fit: BoxFit.contain,
+                                                              cacheWidth: 220,
+                                                              filterQuality:
+                                                                  FilterQuality
+                                                                      .low,
+                                                              gaplessPlayback:
+                                                                  true,
+                                                              errorBuilder: (
+                                                                _,
+                                                                __,
+                                                                ___,
+                                                              ) =>
+                                                                  const SizedBox
+                                                                      .shrink(),
+                                                            ),
+                                                          )
+                                                        : CustomPaint(
+                                                            size: thumbSize,
+                                                            painter:
+                                                                CanvasPainter(
+                                                              page: p,
+                                                              pdfBackgroundImage:
+                                                                  p.pdfBackgroundPath !=
+                                                                          null
+                                                                      ? _pdfImageCache[
+                                                                          p.pdfBackgroundPath!]
+                                                                      : null,
+                                                              elementImageCache:
+                                                                  _elementImageCache,
+                                                              repaintVersion:
+                                                                  _repaintVersion,
+                                                            ),
+                                                          ),
                                                   ),
                                                   for (final txt
                                                       in p.textElements)
@@ -4245,8 +4311,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                           ..translate(tx, targetTy)
                           ..scale(scale, scale);
                         if (_currentPageIndex != targetPage) {
-                          setState(() => _currentPageIndex = targetPage);
+                          setState(() {
+                            _currentPageIndex = targetPage;
+                            _renderedWindowCenter = targetPage;
+                          });
                         }
+                        _scrubPrefetchTimer?.cancel();
+                        _scrubPrefetchTimer =
+                            Timer(const Duration(milliseconds: 90), () {
+                          if (!mounted) return;
+                          final curNb = _getNotebook(context, listen: false);
+                          if (curNb != null) {
+                            _prefetchNearbyPdfPages(curNb);
+                          }
+                        });
                       } else if (_currentPageIndex != targetPage) {
                         _jumpToPage(targetPage);
                       }
@@ -4258,8 +4336,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onTap: () => _openPageGridModal(notebook),
-                        onVerticalDragStart: (_) =>
-                            setState(() => _isOverlayDragging = true),
+                        onVerticalDragStart: (_) {
+                          _scrubPrefetchTimer?.cancel();
+                          setState(() {
+                            _isOverlayDragging = true;
+                            _isScrubbingPages = true;
+                          });
+                        },
                         onVerticalDragUpdate: (d) {
                           final box = _viewportStackKey.currentContext
                               ?.findRenderObject() as RenderBox?;
@@ -4268,10 +4351,30 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                             scrubToDy(local.dy);
                           }
                         },
-                        onVerticalDragEnd: (_) =>
-                            setState(() => _isOverlayDragging = false),
-                        onVerticalDragCancel: () =>
-                            setState(() => _isOverlayDragging = false),
+                        onVerticalDragEnd: (_) {
+                          _scrubPrefetchTimer?.cancel();
+                          setState(() {
+                            _isOverlayDragging = false;
+                            _isScrubbingPages = false;
+                            _renderedWindowCenter = _currentPageIndex;
+                          });
+                          final curNb = _getNotebook(context, listen: false);
+                          if (curNb != null) {
+                            _prefetchNearbyPdfPages(curNb);
+                          }
+                        },
+                        onVerticalDragCancel: () {
+                          _scrubPrefetchTimer?.cancel();
+                          setState(() {
+                            _isOverlayDragging = false;
+                            _isScrubbingPages = false;
+                            _renderedWindowCenter = _currentPageIndex;
+                          });
+                          final curNb = _getNotebook(context, listen: false);
+                          if (curNb != null) {
+                            _prefetchNearbyPdfPages(curNb);
+                          }
+                        },
                         child: Container(
                           padding: const EdgeInsets.symmetric(
                             horizontal: 10,
@@ -4596,13 +4699,34 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   Widget _buildVerticalContinuousPages(Notebook notebook) {
     // No nested SingleChildScrollView fighting InteractiveViewer!
     // One unified InteractiveViewer handles 144fps 1-finger scroll & 2-finger pinch-zoom cleanly.
+    const int liveRadius = 8;
+    final bool useWindowing = notebook.pages.length > 24;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 24),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           for (int i = 0; i < notebook.pages.length; i++) ...[
-            _buildSinglePageCanvas(notebook, notebook.pages[i], i),
+            if (!useWindowing ||
+                (i - _renderedWindowCenter).abs() <= liveRadius)
+              _buildSinglePageCanvas(notebook, notebook.pages[i], i)
+            else
+              () {
+                final phSize = PaperMetrics.pageSize(
+                  isLandscape: notebook.pages[i].isLandscape,
+                  isInfiniteWhiteboard: notebook.pages[i].isInfiniteWhiteboard,
+                );
+                return SizedBox(
+                  width: phSize.width,
+                  height: phSize.height,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: PaperPalette.of(notebook.pages[i].paperColor)
+                          .background,
+                    ),
+                  ),
+                );
+              }(),
             if (i < notebook.pages.length - 1) const SizedBox(height: 14),
           ],
           const SizedBox(height: 18),
@@ -4654,7 +4778,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           : const NeverScrollableScrollPhysics(),
       itemCount: notebook.pages.length,
       onPageChanged: (i) {
-        setState(() => _currentPageIndex = i);
+        setState(() {
+          _currentPageIndex = i;
+          _renderedWindowCenter = i;
+        });
         _prefetchNearbyPdfPages(notebook);
       },
       itemBuilder: (ctx, i) {
@@ -4675,7 +4802,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     NotePage page,
     int pageIndex,
   ) {
-    if ((pageIndex - _currentPageIndex).abs() <= _pdfPreloadRadius) {
+    if (!_isScrubbingPages &&
+        (pageIndex - _currentPageIndex).abs() <= _pdfPreloadRadius) {
       _ensurePdfImageLoaded(page.pdfBackgroundPath);
     }
     for (final img in page.imageElements) {
@@ -7538,7 +7666,13 @@ class _DraggableTextBoxOverlayState extends State<_DraggableTextBoxOverlay> {
                           ),
                           decoration: const InputDecoration(
                             isDense: true,
+                            filled: false,
+                            fillColor: Colors.transparent,
                             border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            disabledBorder: InputBorder.none,
+                            contentPadding: EdgeInsets.zero,
                             hintText: 'Nhập văn bản / PTHH...',
                           ),
                         ),
