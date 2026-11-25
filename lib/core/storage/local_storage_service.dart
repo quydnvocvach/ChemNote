@@ -9,7 +9,21 @@ import '../models/drawing_elements.dart';
 import '../models/folder.dart';
 import '../models/notebook.dart';
 
-String _encodeNotebookJson(Map<String, dynamic> data) => jsonEncode(data);
+String _serializeNotebookToJson(Notebook notebook) =>
+    jsonEncode(notebook.toJson());
+
+Notebook? _decodeNotebookFromJsonString(String raw) {
+  try {
+    if (raw.trim().isEmpty) return null;
+    final decoded = jsonDecode(raw);
+    if (decoded is Map<String, dynamic>) {
+      return Notebook.fromJson(decoded);
+    }
+  } catch (_) {
+    // Bỏ qua tệp bị hỏng để không ảnh hưởng toàn bộ thư viện.
+  }
+  return null;
+}
 
 class LocalStorageService {
   final Directory? _overrideBaseDir;
@@ -215,17 +229,32 @@ class LocalStorageService {
     try {
       final dir = await _getSubdirectory('notebooks');
       final entities = await dir.list().toList();
+      final files = entities
+          .whereType<File>()
+          .where((f) => f.path.endsWith('.json'))
+          .toList();
       final notebooks = <Notebook>[];
-      for (final entity in entities) {
-        if (entity is File && entity.path.endsWith('.json')) {
-          try {
-            final raw = await entity.readAsString();
-            if (raw.trim().isEmpty) continue;
-            final decoded = jsonDecode(raw) as Map<String, dynamic>;
-            notebooks.add(Notebook.fromJson(decoded));
-          } catch (_) {
-            // Bỏ qua tệp bị hỏng để không ảnh hưởng toàn bộ thư viện.
-          }
+      const int batchSize = 6;
+      for (int i = 0; i < files.length; i += batchSize) {
+        final end =
+            (i + batchSize < files.length) ? i + batchSize : files.length;
+        final batch = files.sublist(i, end);
+        final decodedBatch = await Future.wait(
+          batch.map((file) async {
+            try {
+              final raw = await file.readAsString();
+              if (raw.trim().isEmpty) return null;
+              if (raw.length > 48 * 1024) {
+                return await compute(_decodeNotebookFromJsonString, raw);
+              }
+              return _decodeNotebookFromJsonString(raw);
+            } catch (_) {
+              return null;
+            }
+          }),
+        );
+        for (final nb in decodedBatch) {
+          if (nb != null) notebooks.add(nb);
         }
       }
       notebooks.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
@@ -237,7 +266,7 @@ class LocalStorageService {
 
   Future<void> saveNotebook(Notebook notebook) async {
     final file = await _getNotebookFile(notebook.id);
-    final encoded = await compute(_encodeNotebookJson, notebook.toJson());
+    final encoded = await compute(_serializeNotebookToJson, notebook);
     await file.writeAsString(encoded);
   }
 

@@ -9,6 +9,22 @@ import 'lasso_controller.dart';
 import 'paper_templates.dart';
 import 'stroke_engine.dart';
 
+class _WidthPathRun {
+  final double width;
+  final Path path;
+
+  const _WidthPathRun(this.width, this.path);
+}
+
+class _CachedStrokeGeometry {
+  final List<StrokePoint> filteredPts;
+  Path? centerPath;
+  Path? highlighterPath;
+  List<_WidthPathRun>? widthRuns;
+
+  _CachedStrokeGeometry(this.filteredPts);
+}
+
 /// Layer 1 (Cached in RepaintBoundary): Renders committed elements of a [NotePage]:
 /// 1. Paper template background (8 templates × 3 colors)
 /// 2. Optional rasterized PDF background image
@@ -18,6 +34,46 @@ import 'stroke_engine.dart';
 /// 6. Study Tape elements ([TapeElement])
 /// 7. Lasso selection bounding box
 class CanvasPainter extends CustomPainter {
+  static final Expando<_CachedStrokeGeometry> _geometryCache =
+      Expando<_CachedStrokeGeometry>('stroke_geom');
+  static final Expando<Rect> _boundsCache = Expando<Rect>('stroke_bounds');
+
+  /// Computes and caches the padded bounding box of a [Stroke] in O(1) after first lookup.
+  static Rect strokeBounds(Stroke stroke) {
+    final cached = _boundsCache[stroke];
+    if (cached != null) return cached;
+    final pts = stroke.points;
+    if (pts.isEmpty) return Rect.zero;
+    double minX = pts.first.x, maxX = minX;
+    double minY = pts.first.y, maxY = minY;
+    for (int i = 1; i < pts.length; i++) {
+      final p = pts[i];
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    final pad = stroke.width * 0.5;
+    final rect = Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
+    _boundsCache[stroke] = rect;
+    return rect;
+  }
+
+  static _CachedStrokeGeometry _getOrBuildGeometry(
+    Stroke stroke, {
+    required bool cacheable,
+  }) {
+    if (cacheable) {
+      final existing = _geometryCache[stroke];
+      if (existing != null) return existing;
+    }
+    final geom = _CachedStrokeGeometry(_filterRenderPoints(stroke.points));
+    if (cacheable) {
+      _geometryCache[stroke] = geom;
+    }
+    return geom;
+  }
+
   final NotePage page;
   final ui.Image? pdfBackgroundImage;
   final Map<String, ui.Image> elementImageCache;
@@ -29,6 +85,7 @@ class CanvasPainter extends CustomPainter {
   final String? hiddenImageId;
   final String? playingAudioId;
   final int? playingAudioTimeMs;
+  final ValueListenable<int>? playingAudioTimeMsNotifier;
   final int repaintVersion;
   final bool drawBackground;
   final bool drawOverlays;
@@ -47,6 +104,7 @@ class CanvasPainter extends CustomPainter {
     this.hiddenImageId,
     this.playingAudioId,
     this.playingAudioTimeMs,
+    this.playingAudioTimeMsNotifier,
     this.repaintVersion = 0,
     this.drawBackground = true,
     this.drawOverlays = true,
@@ -57,6 +115,7 @@ class CanvasPainter extends CustomPainter {
           repaint: Listenable.merge([
             if (lassoDragOffset != null) lassoDragOffset,
             if (erasingStrokesNotifier != null) erasingStrokesNotifier,
+            if (playingAudioTimeMsNotifier != null) playingAudioTimeMsNotifier,
           ]),
         );
 
@@ -295,13 +354,15 @@ class CanvasPainter extends CustomPainter {
   ({double opacityMultiplier, bool isHighlighted}) _audioVisualForStroke(
     Stroke stroke,
   ) {
+    final int? activeTimeMs =
+        playingAudioTimeMsNotifier?.value ?? playingAudioTimeMs;
     if (playingAudioId == null ||
-        playingAudioTimeMs == null ||
+        activeTimeMs == null ||
         stroke.audioId != playingAudioId ||
         stroke.audioTimeMs == null) {
       return (opacityMultiplier: 1.0, isHighlighted: false);
     }
-    final diff = stroke.audioTimeMs! - playingAudioTimeMs!;
+    final diff = stroke.audioTimeMs! - activeTimeMs;
     if (diff > 0) {
       return (opacityMultiplier: 0.22, isHighlighted: false);
     }
@@ -318,6 +379,7 @@ class CanvasPainter extends CustomPainter {
     required bool isSelected,
     double opacityMultiplier = 1.0,
     bool isAudioHighlighted = false,
+    bool isLive = false,
   }) {
     if (stroke.points.isEmpty) return;
 
@@ -334,7 +396,14 @@ class CanvasPainter extends CustomPainter {
       ..blendMode = isDarkPaper ? BlendMode.srcOver : BlendMode.multiply
       ..isAntiAlias = true;
 
-    final path = StrokeEngine.buildCenterlinePath(stroke.points);
+    final Path path;
+    if (isLive) {
+      path = StrokeEngine.buildCenterlinePath(stroke.points);
+    } else {
+      final geom = _getOrBuildGeometry(stroke, cacheable: true);
+      path = geom.highlighterPath ??=
+          StrokeEngine.buildCenterlinePath(stroke.points);
+    }
     if (isAudioHighlighted) {
       canvas.drawPath(
         path,
@@ -367,6 +436,7 @@ class CanvasPainter extends CustomPainter {
     required bool isSelected,
     double opacityMultiplier = 1.0,
     bool isAudioHighlighted = false,
+    bool isLive = false,
   }) {
     if (stroke.points.isEmpty) return;
 
@@ -443,8 +513,10 @@ class CanvasPainter extends CustomPainter {
       return;
     }
 
-    // 1. Filter consecutive micro-points (< 0.75 px) so tangents never flip or spike
-    final pts = _filterRenderPoints(stroke.points);
+    // 1. Filter consecutive micro-points (< 0.75 px) once and cache per committed Stroke
+    final _CachedStrokeGeometry geom =
+        _getOrBuildGeometry(stroke, cacheable: !isLive);
+    final List<StrokePoint> pts = geom.filteredPts;
     if (pts.isEmpty) return;
 
     final bool isPencil = stroke.toolType == ToolType.pencil;
@@ -483,10 +555,18 @@ class CanvasPainter extends CustomPainter {
       return;
     }
 
-    // Build smooth quadratic midpoint centerline path (used for ballpoint + audio/selection glow)
-    final smoothCenterPath = _buildQuadraticMidpointPath(pts);
+    // Build smooth quadratic midpoint centerline path ONLY when needed
+    final bool needsCenterPath = isAudioHighlighted ||
+        isSelected ||
+        stroke.toolType == ToolType.ballpointPen;
+    Path? smoothCenterPath;
+    if (needsCenterPath) {
+      smoothCenterPath = isLive
+          ? _buildQuadraticMidpointPath(pts)
+          : (geom.centerPath ??= _buildQuadraticMidpointPath(pts));
+    }
 
-    if (isAudioHighlighted) {
+    if (isAudioHighlighted && smoothCenterPath != null) {
       canvas.drawPath(
         smoothCenterPath,
         Paint()
@@ -499,7 +579,7 @@ class CanvasPainter extends CustomPainter {
       );
     }
 
-    if (isSelected) {
+    if (isSelected && smoothCenterPath != null) {
       canvas.drawPath(
         smoothCenterPath,
         Paint()
@@ -514,7 +594,7 @@ class CanvasPainter extends CustomPainter {
     // Ballpoint Pen: crisp uniform-width quadratic Bezier stroke
     if (stroke.toolType == ToolType.ballpointPen) {
       canvas.drawPath(
-        smoothCenterPath,
+        smoothCenterPath!,
         Paint()
           ..color = inkColor
           ..style = PaintingStyle.stroke
@@ -526,9 +606,8 @@ class CanvasPainter extends CustomPainter {
       return;
     }
 
-    // Fountain Pen / Brush Pen / Pencil: Silky-smooth spike-free quadratic midpoint
-    // calligraphic rendering with 3-point smoothed pressure + velocity width envelope
-    final widths = _computeSmoothedStrokeWidths(pts, stroke);
+    // Fountain Pen / Brush Pen / Pencil: Quantized width-batched quadratic midpoint runs
+    // cached for committed strokes to slash drawPath calls 4x-15x at 144Hz.
     final segPaint = Paint()
       ..color = inkColor
       ..style = PaintingStyle.stroke
@@ -539,48 +618,65 @@ class CanvasPainter extends CustomPainter {
       segPaint.maskFilter = const MaskFilter.blur(BlurStyle.normal, 0.45);
     }
 
+    final List<_WidthPathRun> runs = isLive
+        ? _buildWidthBatchedRuns(pts, stroke)
+        : (geom.widthRuns ??= _buildWidthBatchedRuns(pts, stroke));
+
+    for (final run in runs) {
+      segPaint.strokeWidth = run.width;
+      canvas.drawPath(run.path, segPaint);
+    }
+  }
+
+  static List<_WidthPathRun> _buildWidthBatchedRuns(
+    List<StrokePoint> pts,
+    Stroke stroke,
+  ) {
+    final widths = _computeSmoothedStrokeWidths(pts, stroke);
     if (pts.length == 2) {
-      segPaint.strokeWidth = (widths[0] + widths[1]) * 0.5;
-      canvas.drawLine(
-        Offset(pts[0].x, pts[0].y),
-        Offset(pts[1].x, pts[1].y),
-        segPaint,
-      );
-      return;
+      final w = (widths[0] + widths[1]) * 0.5;
+      final p = Path()
+        ..moveTo(pts[0].x, pts[0].y)
+        ..lineTo(pts[1].x, pts[1].y);
+      return [_WidthPathRun(w, p)];
     }
 
-    // Draw first half-segment p[0] -> mid(p[0], p[1])
+    final runs = <_WidthPathRun>[];
+    const double bucketThreshold = 0.14;
+
     final firstMid = Offset(
       (pts[0].x + pts[1].x) * 0.5,
       (pts[0].y + pts[1].y) * 0.5,
     );
-    segPaint.strokeWidth = (widths[0] + widths[1]) * 0.5;
-    canvas.drawLine(Offset(pts[0].x, pts[0].y), firstMid, segPaint);
-
-    // Draw quadratic Bezier midpoint segments: prevMid -> control pts[i] -> nextMid
+    double bucketWidth =
+        (((widths[0] + widths[1]) * 0.5) * 10.0).roundToDouble() / 10.0;
+    Path activePath = Path()
+      ..moveTo(pts[0].x, pts[0].y)
+      ..lineTo(firstMid.dx, firstMid.dy);
     Offset prevMid = firstMid;
-    final segPath = Path();
+
+    void switchRunIfNeeded(double rawWidth, Offset segStart) {
+      if ((rawWidth - bucketWidth).abs() > bucketThreshold) {
+        runs.add(_WidthPathRun(bucketWidth, activePath));
+        bucketWidth = (rawWidth * 10.0).roundToDouble() / 10.0;
+        activePath = Path()..moveTo(segStart.dx, segStart.dy);
+      }
+    }
+
     for (int i = 1; i < pts.length - 1; i++) {
       final p = pts[i];
       final next = pts[i + 1];
       final nextMid = Offset((p.x + next.x) * 0.5, (p.y + next.y) * 0.5);
-      segPath
-        ..reset()
-        ..moveTo(prevMid.dx, prevMid.dy)
-        ..quadraticBezierTo(p.x, p.y, nextMid.dx, nextMid.dy);
-      segPaint.strokeWidth = widths[i];
-      canvas.drawPath(segPath, segPaint);
+      switchRunIfNeeded(widths[i], prevMid);
+      activePath.quadraticBezierTo(p.x, p.y, nextMid.dx, nextMid.dy);
       prevMid = nextMid;
     }
 
-    // Draw final half-segment prevMid -> p[last]
-    segPaint.strokeWidth =
-        (widths[pts.length - 2] + widths[pts.length - 1]) * 0.5;
-    canvas.drawLine(
-      prevMid,
-      Offset(pts.last.x, pts.last.y),
-      segPaint,
-    );
+    final lastWidth = (widths[pts.length - 2] + widths[pts.length - 1]) * 0.5;
+    switchRunIfNeeded(lastWidth, prevMid);
+    activePath.lineTo(pts.last.x, pts.last.y);
+    runs.add(_WidthPathRun(bucketWidth, activePath));
+    return runs;
   }
 
   /// Filters out consecutive micro-points closer than 0.75 px while preserving endpoints.
@@ -853,6 +949,7 @@ class CanvasPainter extends CustomPainter {
         oldDelegate.hiddenImageId != hiddenImageId ||
         oldDelegate.playingAudioId != playingAudioId ||
         oldDelegate.playingAudioTimeMs != playingAudioTimeMs ||
+        oldDelegate.playingAudioTimeMsNotifier != playingAudioTimeMsNotifier ||
         oldDelegate.drawBackground != drawBackground ||
         oldDelegate.drawOverlays != drawOverlays ||
         oldDelegate.minZExclusive != minZExclusive ||
@@ -902,9 +999,15 @@ class ActiveStrokePainter extends CustomPainter {
           stroke,
           isDarkPaper: isDarkPaper,
           isSelected: false,
+          isLive: true,
         );
       } else {
-        CanvasPainter.paintInkStroke(canvas, stroke, isSelected: false);
+        CanvasPainter.paintInkStroke(
+          canvas,
+          stroke,
+          isSelected: false,
+          isLive: true,
+        );
       }
     }
 

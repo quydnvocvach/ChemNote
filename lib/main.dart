@@ -6,6 +6,8 @@ import 'features/sync/sync_manager.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  PaintingBinding.instance.imageCache.maximumSize = 250;
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 160 << 20;
 
   final appState = AppState();
   await appState.loadAll();

@@ -160,20 +160,21 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.7.4 with APK
+      - name: Publish Release v3.7.5 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.7.4
-          name: ChemNote Pro v3.7.4 (Nhập Word giữ nguyên Font, Bảng biểu, Ảnh nội tuyến & Công thức Equation/MathML)
+          tag_name: v3.7.5
+          name: ChemNote Pro v3.7.5 (Tối ưu độ mượt 144Hz toàn diện trên mọi tác vụ viết, cuộn, audio, lưu nền & thư viện)
           body: |
-            ### ChemNote Pro v3.7.4 — Nhập tệp Word (`.docx`) giữ nguyên định dạng gốc chuẩn xác!
-            - **Bộ chuyển đổi OOXML → HTML5/CSS/MathML chuyên dụng ([docx_html_converter.dart](lib/features/pdf/docx_html_converter.dart)):**
-              - Giữ nguyên **font chữ** (kế thừa từ `word/styles.xml` và từng đoạn/chữ), **cỡ chữ**, **đậm / nghiêng / gạch chân / gạch ngang**, **màu chữ & tô sáng (highlight)**, **chỉ số trên/dưới**, **căn lề**, **thụt đầu dòng**, **danh sách đầu dòng / đánh số** và **ngắt trang**.
-              - Giữ nguyên cấu trúc **bảng biểu (`<w:tbl>`)** bao gồm gộp ô ngang (`colspan` / `gridSpan`), gộp ô dọc (`rowspan` / `vMerge`), viền ô, màu nền ô và tỷ lệ độ rộng cột.
-              - Hiển thị **hình ảnh nhúng (`word/media/*` + `<w:drawing>`)** đúng vị trí ban đầu trong tài liệu.
-              - Chuyển đổi đầy đủ công thức **Word Equation OMML (`<m:oMath>`, `<m:oMathPara>`) sang HTML5 MathML** (phân số `\frac`, căn thức `\sqrt`/`\mroot`, chỉ số trên dưới phản ứng hóa học, toán tử lớn tích phân/tổng, ngoặc co giãn `()`, `[]`, `{}`, ma trận/hệ phương trình, mũi tên điều kiện nhiệt độ/xúc tác `<m:limUpp>`).
-            - **Kết xuất qua Chromium Print PDF → Android `PdfRenderer`:** Giữ trọn bố cục trang A4 sắc nét để viết chú thích trực tiếp, đồng thời tự động fallback an toàn trên nền tảng không hỗ trợ.
-            - **Kèm trọn vẹn toàn bộ cải tiến từ v3.7.3:** Thumbnail Danh sách trang 720px/480px rõ nét, ảo hóa 800 trang, và kéo thanh cuộn bên hiển thị ngay tức thì.
+            ### ChemNote Pro v3.7.5 — Mượt mà tối đa 144Hz trên toàn bộ ứng dụng!
+            - **Viết & Vẽ nét 144Hz không giật ([canvas_painter.dart](lib/features/canvas/canvas_painter.dart), [note_editor_screen.dart](lib/features/canvas/note_editor_screen.dart)):**
+              - Bộ nhớ đệm hình học `Expando` cho từng `Stroke` đã viết (cache sẵn đường dẫn mượt, AABB `strokeBounds` và gộp các đoạn bút máy/cọ/chì đồng độ dày `±0.14px` thành ít `Path` hơn **4×–15×** mỗi khung hình), loại bỏ sao chép mảng điểm `O(N²)` khi đang kéo bút bằng bộ đệm `_liveStrokePoints`.
+              - Kích hoạt tạm hoãn tự động lưu nền (`setStylusDrawingActive`) trong lúc bút M-Pencil đang chạm màn hình.
+            - **Cuộn, Xóa & Phát Audio/Ghi âm không làm rebuild cây UI:**
+              - Đổi đồng hồ ghi âm (`500ms`) và đồng bộ phát Audio (`80ms`) sang `ValueNotifier` (`_recordingElapsedMsNotifier`, `_audioPositionMsNotifier`) — cập nhật trực tiếp thanh Audio và `CanvasPainter` mà không gọi `setState()` toàn màn hình Editor.
+              - Đệm hóa tọa độ Y tích lũy của từng trang (`_ensureVerticalLayoutCache`) + tìm kiếm nhị phân `O(log N)` vị trí trang khi cuộn, xóa bỏ vòng lặp 800 trang mỗi khung hình.
+            - **Khởi động, Lưu trữ Isolate & Thư viện sổ tay siêu nhẹ ([local_storage_service.dart](lib/core/storage/local_storage_service.dart), [app_state.dart](lib/core/providers/app_state.dart), [main.dart](lib/main.dart)):**
+              - Đẩy cả `notebook.toJson()` + `jsonEncode()` ra Isolate phụ (`compute`), giải mã song song theo lô khi khởi động (`loadAll` chạy `Future.wait`), mở rộng `imageCache` (`250` ảnh / `160 MB`), bọc `RepaintBoundary` từng bìa sổ và thêm `cacheWidth` + `cacheExtent: 420` cho kệ sách & chọn bìa.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

@@ -105,6 +105,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   bool _isScrubbingPages = false;
   Timer? _scrubPrefetchTimer;
   String? _activeDrawingPageId;
+  final List<StrokePoint> _liveStrokePoints = <StrokePoint>[];
+  String? _cachedLayoutNotebookId;
+  List<NotePage>? _cachedLayoutPagesRef;
+  int _cachedLayoutPageCount = -1;
+  List<double> _cachedPageTops = const [];
+  double _cachedTotalHeight = 0.0;
+  double _cachedMaxPageWidth = 0.0;
   int _repaintVersion = 0;
   double _refreshRateHz = 60.0;
   StreamSubscription<void>? _stylusDoubleTapSub;
@@ -191,15 +198,19 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   String? _activeRecordingId;
   String? _activeRecordingPath;
   int _recordingStartMs = 0;
-  int _recordingElapsedMs = 0;
+  final ValueNotifier<int> _recordingElapsedMsNotifier = ValueNotifier<int>(0);
   Timer? _recordingElapsedTimer;
   String? _selectedAudioId;
   bool _isAudioBarVisible = false;
   String? _playingAudioId;
   bool _isAudioPlaying = false;
-  int _audioPositionMs = 0;
+  final ValueNotifier<int> _audioPositionMsNotifier = ValueNotifier<int>(0);
   double _audioSpeed = 1.0;
   Timer? _audioPollTimer;
+
+  void _syncStylusDrawingState() {
+    _appStateRef.setStylusDrawingActive(_isStylusDown || _isDrawingPointerDown);
+  }
 
   Color get _effectiveColor =>
       _activeTool == EditorTool.highlighter ? _highlighterColor : _penColor;
@@ -301,6 +312,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   @override
   void dispose() {
+    _appStateRef.setStylusDrawingActive(false);
     _appStateRef.flushPendingSaves();
     _stylusHoverTimer?.cancel();
     _shapeHoldTimer?.cancel();
@@ -331,6 +343,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _erasingStrokesNotifier.dispose();
     _cropDraftNotifier.dispose();
     _pullAddProgressNotifier.dispose();
+    _recordingElapsedMsNotifier.dispose();
+    _audioPositionMsNotifier.dispose();
     _activeTextController?.dispose();
     _activeTextFocusNode?.dispose();
     for (final img in _pdfImageCache.values) {
@@ -452,25 +466,53 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
   }
 
-  double _totalVerticalContentHeight(Notebook notebook) {
-    double h = 18.0 + 18.0 + 18.0 + 44.0 + 36.0;
-    for (int i = 0; i < notebook.pages.length; i++) {
-      h += PaperMetrics.pageSize(isLandscape: notebook.pages[i].isLandscape)
-          .height;
-      if (i < notebook.pages.length - 1) h += 14.0;
+  void _ensureVerticalLayoutCache(Notebook notebook) {
+    final count = notebook.pages.length;
+    if (_cachedLayoutNotebookId == notebook.id &&
+        identical(_cachedLayoutPagesRef, notebook.pages) &&
+        _cachedLayoutPageCount == count) {
+      return;
     }
-    return h;
+    _cachedLayoutNotebookId = notebook.id;
+    _cachedLayoutPagesRef = notebook.pages;
+    _cachedLayoutPageCount = count;
+    if (count == 0) {
+      _cachedPageTops = const [];
+      _cachedMaxPageWidth = 0.0;
+      _cachedTotalHeight = 18.0 + 18.0 + 18.0 + 44.0 + 36.0;
+      return;
+    }
+    final tops = List<double>.filled(count, 18.0);
+    double cursorY = 18.0;
+    double maxW = 0.0;
+    for (int i = 0; i < count; i++) {
+      tops[i] = cursorY;
+      final size =
+          PaperMetrics.pageSize(isLandscape: notebook.pages[i].isLandscape);
+      if (size.width > maxW) maxW = size.width;
+      cursorY += size.height;
+      if (i < count - 1) cursorY += 14.0;
+    }
+    _cachedPageTops = tops;
+    _cachedMaxPageWidth = maxW;
+    _cachedTotalHeight = cursorY + 18.0 + 18.0 + 44.0 + 36.0;
+  }
+
+  double _totalVerticalContentHeight(Notebook notebook) {
+    _ensureVerticalLayoutCache(notebook);
+    return _cachedTotalHeight;
+  }
+
+  double _maxVerticalPageWidth(Notebook notebook) {
+    _ensureVerticalLayoutCache(notebook);
+    return _cachedMaxPageWidth;
   }
 
   double _pageTopOffsetY(Notebook notebook, int pageIndex) {
-    double y = 18.0;
-    final clamped = pageIndex.clamp(0, notebook.pages.length - 1);
-    for (int i = 0; i < clamped; i++) {
-      y += PaperMetrics.pageSize(isLandscape: notebook.pages[i].isLandscape)
-              .height +
-          14.0;
-    }
-    return y;
+    if (notebook.pages.isEmpty) return 18.0;
+    _ensureVerticalLayoutCache(notebook);
+    final clamped = pageIndex.clamp(0, _cachedPageTops.length - 1);
+    return _cachedPageTops[clamped];
   }
 
   void _jumpToPage(int index) {
@@ -497,11 +539,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     } else if (appState.verticalContinuousScroll && !notebook.isWhiteboard) {
       final m = _transformController.value;
       final double scale = m.getMaxScaleOnAxis().clamp(0.5, 4.0);
-      double maxPageW = 0.0;
-      for (final p in notebook.pages) {
-        final pw = PaperMetrics.pageSize(isLandscape: p.isLandscape).width;
-        if (pw > maxPageW) maxPageW = pw;
-      }
+      final double maxPageW = _maxVerticalPageWidth(notebook);
       final double contentW = maxPageW + 48.0;
       final double scaledW = contentW * scale;
       double tx = m.getTranslation().x;
@@ -719,7 +757,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus;
     if (isStylusEvent) {
-      if (!_isStylusDown) setState(() => _isStylusDown = true);
+      if (!_isStylusDown) {
+        setState(() => _isStylusDown = true);
+        _syncStylusDrawingState();
+      }
       // When Stylus-Pan Mode is ON, M-Pencil 3 ONLY scrolls/pans and never draws!
       if (_stylusPanMode) return;
     } else if (event.kind == PointerDeviceKind.touch) {
@@ -812,7 +853,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         _commitPage(page.copyWith(tapeElements: updatedTapes));
         return;
       }
-      if (!_isDrawingPointerDown) setState(() => _isDrawingPointerDown = true);
+      if (!_isDrawingPointerDown) {
+        setState(() => _isDrawingPointerDown = true);
+        _syncStylusDrawingState();
+      }
       _tapeDragStart = rawPos;
       _tapeDraftNotifier.value = Rect.fromPoints(rawPos, rawPos);
       return;
@@ -822,7 +866,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     if (_activeTool == EditorTool.laserPointer) {
       if (!allowThisPointer) return;
       _currentPageIndex = pageIndex;
-      if (!_isDrawingPointerDown) setState(() => _isDrawingPointerDown = true);
+      if (!_isDrawingPointerDown) {
+        setState(() => _isDrawingPointerDown = true);
+        _syncStylusDrawingState();
+      }
       _laserController.beginStroke(rawPos, pageId: page.id);
       return;
     }
@@ -835,7 +882,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
     if (!allowThisPointer) return;
 
-    if (!_isDrawingPointerDown) setState(() => _isDrawingPointerDown = true);
+    if (!_isDrawingPointerDown) {
+      setState(() => _isDrawingPointerDown = true);
+      _syncStylusDrawingState();
+    }
 
     // Clear overlay selections when starting a stroke on empty paper
     if (_selectedTextId != null ||
@@ -887,13 +937,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         (_effectiveOpacity.clamp(0.1, 1.0) * 255).round(),
       );
       _shapeSnappedLive = false;
+      _liveStrokePoints
+        ..clear()
+        ..add(firstPoint);
       _activeStrokeNotifier.value = Stroke(
         id: _uuid.v4(),
         toolType: _activeTool.toStrokeToolType(),
         // ignore: deprecated_member_use
         colorValue: effectiveInkColor.value,
         width: _effectiveWidth / zoomScale,
-        points: [firstPoint],
+        points: _liveStrokePoints,
         isSmoothed: false,
         shapeType: ShapeType.none,
         audioId: _isRecordingAudio ? _activeRecordingId : null,
@@ -1006,8 +1059,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       );
       if (filtered == null) return;
 
+      _liveStrokePoints.add(filtered);
       _activeStrokeNotifier.value = current.copyWith(
-        points: [...current.points, filtered],
+        points: _liveStrokePoints,
         shapeType: ShapeType.none,
       );
 
@@ -1030,9 +1084,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           _isStylusDown = false;
           _isDrawingPointerDown = false;
         });
+        _syncStylusDrawingState();
       }
     } else if (_pointerDownPositions.isEmpty && _isDrawingPointerDown) {
       setState(() => _isDrawingPointerDown = false);
+      _syncStylusDrawingState();
     }
 
     // Multi-finger tap Undo/Redo is handled by the top-level viewport Listener
@@ -1162,12 +1218,19 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           points: [finalized.points.first, finalized.points.last],
           isSmoothed: true,
         );
+      } else if (identical(finalized.points, _liveStrokePoints)) {
+        finalized = finalized.copyWith(
+          points: List<StrokePoint>.from(finalized.points),
+        );
       }
+      _liveStrokePoints.clear();
 
       _commitPage(
         page.copyWith(strokes: [...page.strokes, finalized]),
         undoSnapshot: page,
       );
+    } else {
+      _liveStrokePoints.clear();
     }
   }
 
@@ -1175,12 +1238,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _shapeHoldTimer?.cancel();
     _shapeSnappedLive = false;
     _activeStrokeNotifier.value = null;
+    _liveStrokePoints.clear();
     _eraserCursorNotifier.value = null;
     _tapeDraftNotifier.value = null;
     _lassoDragOffsetNotifier.value = Offset.zero;
     _tapeDragStart = null;
     if (_isDrawingPointerDown) {
       setState(() => _isDrawingPointerDown = false);
+      _syncStylusDrawingState();
     }
   }
 
@@ -1279,21 +1344,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   /// Fast AABB check for whether [stroke] could possibly intersect [box].
   bool _strokeIntersectsBox(Stroke stroke, Rect box) {
-    if (stroke.points.isEmpty) return false;
-    double minX = stroke.points.first.x, maxX = minX;
-    double minY = stroke.points.first.y, maxY = minY;
-    for (int i = 1; i < stroke.points.length; i++) {
-      final p = stroke.points[i];
-      if (p.x < minX) minX = p.x;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.y > maxY) maxY = p.y;
-    }
-    final pad = stroke.width * 0.5;
-    return !(maxX + pad < box.left ||
-        minX - pad > box.right ||
-        maxY + pad < box.top ||
-        minY - pad > box.bottom);
+    final bounds = CanvasPainter.strokeBounds(stroke);
+    return !bounds.isEmpty && bounds.overlaps(box);
   }
 
   /// Zero-lag 144fps swept-segment eraser with fast AABB pre-filtering:
@@ -2376,30 +2428,27 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   void _updatePullToAddProgress(Notebook notebook, Size viewportSize) {
     if (notebook.pages.isEmpty || _isAddingPullPage) return;
-    double totalContentHeight = 18.0 + 18.0 + 18.0 + 44.0 + 36.0;
-    for (int i = 0; i < notebook.pages.length; i++) {
-      totalContentHeight +=
-          PaperMetrics.pageSize(isLandscape: notebook.pages[i].isLandscape)
-              .height;
-      if (i < notebook.pages.length - 1) totalContentHeight += 14.0;
-    }
+    _ensureVerticalLayoutCache(notebook);
+    final double totalContentHeight = _cachedTotalHeight;
     final m = _transformController.value;
     final scale = m.getMaxScaleOnAxis().clamp(0.35, 4.0);
     final ty = m.getTranslation().y;
 
-    // Keep current page index in sync for the page counter pill without setState()
+    // Keep current page index in sync using O(log N) binary search
     final double centerContentY = (-ty + viewportSize.height * 0.45) / scale;
-    double cursorY = 18.0;
-    int visibleIdx = notebook.pages.length - 1;
-    for (int i = 0; i < notebook.pages.length; i++) {
-      final ph =
-          PaperMetrics.pageSize(isLandscape: notebook.pages[i].isLandscape)
-              .height;
-      if (centerContentY <= cursorY + ph + 14.0) {
-        visibleIdx = i;
-        break;
+    int visibleIdx = 0;
+    if (_cachedPageTops.length > 1) {
+      int lo = 0;
+      int hi = _cachedPageTops.length - 1;
+      while (lo < hi) {
+        final mid = (lo + hi + 1) >> 1;
+        if (_cachedPageTops[mid] < centerContentY) {
+          lo = mid;
+        } else {
+          hi = mid - 1;
+        }
       }
-      cursorY += ph + 14.0;
+      visibleIdx = lo;
     }
     if (visibleIdx != _currentPageIndex) {
       _currentPageIndex = visibleIdx;
@@ -2473,9 +2522,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       final recPath = _activeRecordingPath;
       final fallbackDuration =
           DateTime.now().millisecondsSinceEpoch - _recordingStartMs;
+      _recordingElapsedMsNotifier.value = 0;
       setState(() {
         _isRecordingAudio = false;
-        _recordingElapsedMs = 0;
         _activeRecordingId = null;
         _activeRecordingPath = null;
       });
@@ -2510,7 +2559,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       await HardwareService.instance.stopAudio();
       _playingAudioId = null;
       _isAudioPlaying = false;
-      _audioPositionMs = 0;
+      _audioPositionMsNotifier.value = 0;
     }
 
     // Start new recording
@@ -2536,20 +2585,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
     _recordingElapsedTimer?.cancel();
     final startedAtMs = DateTime.now().millisecondsSinceEpoch;
+    _recordingElapsedMsNotifier.value = 0;
     setState(() {
       _isRecordingAudio = true;
       _activeRecordingId = recId;
       _activeRecordingPath = path;
       _recordingStartMs = startedAtMs;
-      _recordingElapsedMs = 0;
     });
     _recordingElapsedTimer =
         Timer.periodic(const Duration(milliseconds: 500), (_) {
       if (!mounted || !_isRecordingAudio) return;
-      setState(() {
-        _recordingElapsedMs =
-            DateTime.now().millisecondsSinceEpoch - _recordingStartMs;
-      });
+      _recordingElapsedMsNotifier.value =
+          DateTime.now().millisecondsSinceEpoch - _recordingStartMs;
     });
   }
 
@@ -2568,7 +2615,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     if (switchingTrack) {
       _audioPollTimer?.cancel();
       await HardwareService.instance.stopAudio();
-      _audioPositionMs = 0;
+      _audioPositionMsNotifier.value = 0;
     }
 
     final ok = await HardwareService.instance.playAudio(rec.filePath);
@@ -2577,15 +2624,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       await HardwareService.instance.setAudioSpeed(_audioSpeed);
       if (!switchingTrack &&
           _playingAudioId == rec.id &&
-          _audioPositionMs > 0) {
-        await HardwareService.instance.seekAudio(_audioPositionMs);
+          _audioPositionMsNotifier.value > 0) {
+        await HardwareService.instance.seekAudio(_audioPositionMsNotifier.value);
       }
     }
+    if (switchingTrack) _audioPositionMsNotifier.value = 0;
     setState(() {
       _selectedAudioId = rec.id;
       _playingAudioId = rec.id;
       _isAudioPlaying = true;
-      if (switchingTrack) _audioPositionMs = 0;
       _repaintVersion++;
     });
     _audioPollTimer?.cancel();
@@ -2595,27 +2642,26 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       if (!mounted) return;
       if (pos >= rec.durationMs && rec.durationMs > 0) {
         _audioPollTimer?.cancel();
+        _audioPositionMsNotifier.value = rec.durationMs;
         setState(() {
           _isAudioPlaying = false;
-          _audioPositionMs = rec.durationMs;
           _repaintVersion++;
         });
       } else {
-        setState(() {
-          _audioPositionMs = pos;
-          _repaintVersion++;
-        });
+        _audioPositionMsNotifier.value = pos;
       }
     });
   }
 
   Future<void> _seekAudio(AudioRecording rec, int ms) async {
-    setState(() {
-      _selectedAudioId = rec.id;
-      _playingAudioId = rec.id;
-      _audioPositionMs = ms;
-      _repaintVersion++;
-    });
+    _audioPositionMsNotifier.value = ms;
+    if (_selectedAudioId != rec.id || _playingAudioId != rec.id) {
+      setState(() {
+        _selectedAudioId = rec.id;
+        _playingAudioId = rec.id;
+        _repaintVersion++;
+      });
+    }
     await HardwareService.instance.seekAudio(ms);
   }
 
@@ -2633,7 +2679,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       await HardwareService.instance.stopAudio();
       _playingAudioId = null;
       _isAudioPlaying = false;
-      _audioPositionMs = 0;
+      _audioPositionMsNotifier.value = 0;
     }
     final updated =
         page.audioRecordings.where((r) => r.id != rec.id).toList();
@@ -3566,13 +3612,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
           // Live Audio Recording Bar OR On-Demand Multi-Recording Audio Replay Bar
           if (_isRecordingAudio)
-            AudioLiveRecordingBar(
-              elapsedMs: _recordingElapsedMs,
-              totalRecordings: currentPage.audioRecordings.length,
-              onStop: () => _toggleAudioRecording(currentPage),
-              onShowList: currentPage.audioRecordings.isNotEmpty
-                  ? () => _showAudioRecordingsDialog(currentPage)
-                  : null,
+            ValueListenableBuilder<int>(
+              valueListenable: _recordingElapsedMsNotifier,
+              builder: (_, elapsedMs, __) => AudioLiveRecordingBar(
+                elapsedMs: elapsedMs,
+                totalRecordings: currentPage.audioRecordings.length,
+                onStop: () => _toggleAudioRecording(currentPage),
+                onShowList: currentPage.audioRecordings.isNotEmpty
+                    ? () => _showAudioRecordingsDialog(currentPage)
+                    : null,
+              ),
             )
           else if ((_isAudioBarVisible || _isAudioPlaying) &&
               currentPage.audioRecordings.isNotEmpty)
@@ -3582,38 +3631,41 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 final idx = recs.indexWhere((r) => r.id == _selectedAudioId);
                 final activeIdx = idx >= 0 ? idx : recs.length - 1;
                 final activeRec = recs[activeIdx];
-                return AudioReplayBar(
-                  recording: activeRec,
-                  recordingIndex: activeIdx + 1,
-                  totalRecordings: recs.length,
-                  isPlaying:
-                      _isAudioPlaying && _playingAudioId == activeRec.id,
-                  positionMs:
-                      _playingAudioId == activeRec.id ? _audioPositionMs : 0,
-                  speed: _audioSpeed,
-                  onTogglePlay: () => _togglePlayAudio(activeRec),
-                  onSeek: (ms) => _seekAudio(activeRec, ms),
-                  onCycleSpeed: _cycleAudioSpeed,
-                  onShowList: () => _showAudioRecordingsDialog(currentPage),
-                  onStartNewRecording: () =>
-                      _toggleAudioRecording(currentPage),
-                  onDelete: () =>
-                      _deleteAudioRecording(currentPage, activeRec),
-                  onClose: () async {
-                    if (_isAudioPlaying) {
-                      _audioPollTimer?.cancel();
-                      await HardwareService.instance.stopAudio();
-                    }
-                    if (mounted) {
-                      setState(() {
-                        _isAudioBarVisible = false;
-                        _isAudioPlaying = false;
-                        _playingAudioId = null;
-                        _audioPositionMs = 0;
-                        _repaintVersion++;
-                      });
-                    }
-                  },
+                return ValueListenableBuilder<int>(
+                  valueListenable: _audioPositionMsNotifier,
+                  builder: (_, posMs, __) => AudioReplayBar(
+                    recording: activeRec,
+                    recordingIndex: activeIdx + 1,
+                    totalRecordings: recs.length,
+                    isPlaying:
+                        _isAudioPlaying && _playingAudioId == activeRec.id,
+                    positionMs:
+                        _playingAudioId == activeRec.id ? posMs : 0,
+                    speed: _audioSpeed,
+                    onTogglePlay: () => _togglePlayAudio(activeRec),
+                    onSeek: (ms) => _seekAudio(activeRec, ms),
+                    onCycleSpeed: _cycleAudioSpeed,
+                    onShowList: () => _showAudioRecordingsDialog(currentPage),
+                    onStartNewRecording: () =>
+                        _toggleAudioRecording(currentPage),
+                    onDelete: () =>
+                        _deleteAudioRecording(currentPage, activeRec),
+                    onClose: () async {
+                      if (_isAudioPlaying) {
+                        _audioPollTimer?.cancel();
+                        await HardwareService.instance.stopAudio();
+                      }
+                      _audioPositionMsNotifier.value = 0;
+                      if (mounted) {
+                        setState(() {
+                          _isAudioBarVisible = false;
+                          _isAudioPlaying = false;
+                          _playingAudioId = null;
+                          _repaintVersion++;
+                        });
+                      }
+                    },
+                  ),
                 );
               },
             ),
@@ -3696,6 +3748,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       }
                       if (!_isStylusDown) {
                         setState(() => _isStylusDown = true);
+                        _syncStylusDrawingState();
                       }
                       return;
                     }
@@ -3753,13 +3806,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       final double contentH =
                           _totalVerticalContentHeight(notebook);
                       final double scaledH = contentH * scale;
-                      double maxPageW = 0.0;
-                      for (final p in notebook.pages) {
-                        final pw = PaperMetrics.pageSize(
-                          isLandscape: p.isLandscape,
-                        ).width;
-                        if (pw > maxPageW) maxPageW = pw;
-                      }
+                      final double maxPageW = _maxVerticalPageWidth(notebook);
                       final double scaledW = (maxPageW + 48.0) * scale;
 
                       final double dx = (appState.freePaperMovement ||
@@ -3808,6 +3855,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                           _isStylusDown = false;
                           _isDrawingPointerDown = false;
                         });
+                        _syncStylusDrawingState();
                       }
                       return;
                     }
@@ -3822,6 +3870,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         !_isStylusDown &&
                         _isDrawingPointerDown) {
                       setState(() => _isDrawingPointerDown = false);
+                      _syncStylusDrawingState();
                     }
                     _tapTouchStarts.remove(e.pointer);
                     if (_tapTouchStarts.isEmpty && _tapTouchStartTime != null) {
@@ -3856,6 +3905,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                           _isStylusDown = false;
                           _isDrawingPointerDown = false;
                         });
+                        _syncStylusDrawingState();
                       }
                       return;
                     }
@@ -3870,6 +3920,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         !_isStylusDown &&
                         _isDrawingPointerDown) {
                       setState(() => _isDrawingPointerDown = false);
+                      _syncStylusDrawingState();
                     }
                     _tapTouchStarts.remove(e.pointer);
                     if (_tapTouchStarts.isEmpty) {
@@ -4877,8 +4928,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         erasingStrokesNotifier: _erasingStrokesNotifier,
                         hiddenImageId: _selectedImageId,
                         playingAudioId: _playingAudioId,
-                        playingAudioTimeMs: _playingAudioId != null
-                            ? _audioPositionMs
+                        playingAudioTimeMsNotifier: (_playingAudioId != null &&
+                                page.strokes.any((s) => s.audioId == _playingAudioId))
+                            ? _audioPositionMsNotifier
                             : null,
                         repaintVersion: _repaintVersion,
                         drawBackground: true,
@@ -4967,8 +5019,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                               erasingStrokesNotifier: _erasingStrokesNotifier,
                               hiddenImageId: _selectedImageId,
                               playingAudioId: _playingAudioId,
-                              playingAudioTimeMs: _playingAudioId != null
-                                  ? _audioPositionMs
+                              playingAudioTimeMsNotifier: (_playingAudioId != null &&
+                                      page.strokes
+                                          .any((s) => s.audioId == _playingAudioId))
+                                  ? _audioPositionMsNotifier
                                   : null,
                               repaintVersion: _repaintVersion,
                               drawBackground: false,

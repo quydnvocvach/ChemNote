@@ -531,6 +531,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
         return ListView.builder(
           padding: const EdgeInsets.fromLTRB(20, 18, 20, 48),
+          cacheExtent: 420,
           itemCount: rowCount,
           itemBuilder: (context, rowIndex) {
             final start = rowIndex * crossAxisCount;

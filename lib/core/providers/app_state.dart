@@ -598,13 +598,22 @@ class AppState extends ChangeNotifier {
     _isLoading = true;
     notifyListeners();
     try {
-      _folders = await _storage.loadFolders();
-      _notebooks = await _storage.loadNotebooks();
-      _favoritePens = await _storage.loadFavoritePens();
-      _customStickers = await _storage.loadCustomStickers();
-      _customCoverPaths = await _storage.loadCustomCovers();
-      _pdfExportDirectory = await _storage.loadPdfExportDirectory();
-      final penPrefs = await _storage.loadPenPrefs();
+      final results = await Future.wait<dynamic>([
+        _storage.loadFolders(),
+        _storage.loadNotebooks(),
+        _storage.loadFavoritePens(),
+        _storage.loadCustomStickers(),
+        _storage.loadCustomCovers(),
+        _storage.loadPdfExportDirectory(),
+        _storage.loadPenPrefs(),
+      ]);
+      _folders = results[0] as List<Folder>;
+      _notebooks = results[1] as List<Notebook>;
+      _favoritePens = results[2] as List<PenPreset>;
+      _customStickers = results[3] as List<String>;
+      _customCoverPaths = results[4] as List<String>;
+      _pdfExportDirectory = results[5] as String?;
+      final penPrefs = results[6] as Map<String, dynamic>;
       if (penPrefs.isNotEmpty) {
         _lastPenTool = toolTypeFromJson(penPrefs['lastPenTool']);
         _lastPenColorValue =

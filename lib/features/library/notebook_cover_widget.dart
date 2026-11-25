@@ -26,10 +26,11 @@ class NotebookCoverWidget extends StatelessWidget {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
 
-    return InkWell(
-      onTap: onTap,
-      onLongPress: onLongPress,
-      borderRadius: BorderRadius.circular(14),
+    return RepaintBoundary(
+      child: InkWell(
+        onTap: onTap,
+        onLongPress: onLongPress,
+        borderRadius: BorderRadius.circular(14),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -67,11 +68,17 @@ class NotebookCoverWidget extends StatelessWidget {
                         fit: StackFit.expand,
                         children: [
                           if (notebook.customCoverImagePath != null &&
-                              notebook.customCoverImagePath!.isNotEmpty &&
-                              File(notebook.customCoverImagePath!).existsSync())
+                              notebook.customCoverImagePath!.isNotEmpty)
                             Image.file(
                               File(notebook.customCoverImagePath!),
                               fit: BoxFit.cover,
+                              cacheWidth: 420,
+                              filterQuality: FilterQuality.medium,
+                              gaplessPlayback: true,
+                              errorBuilder: (_, __, ___) => _CoverBackground(
+                                color: coverColor,
+                                style: notebook.coverStyle,
+                              ),
                             )
                           else if (notebook.useFirstPageAsCover)
                             CustomPaint(
@@ -268,7 +275,8 @@ class NotebookCoverWidget extends StatelessWidget {
                 ),
             ],
           ),
-        ],
+          ],
+        ),
       ),
     );
   }

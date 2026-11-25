@@ -235,12 +235,16 @@ class _CreateNotebookDialogState extends State<CreateNotebookDialog> {
     }
 
     if (_customCoverImagePath != null &&
-        File(_customCoverImagePath!).existsSync()) {
+        _customCoverImagePath!.isNotEmpty) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(8),
         child: Image.file(
           File(_customCoverImagePath!),
           fit: BoxFit.cover,
+          cacheWidth: 360,
+          filterQuality: FilterQuality.medium,
+          gaplessPlayback: true,
+          errorBuilder: (_, __, ___) => ColoredBox(color: Color(_coverColorValue)),
         ),
       );
     }
@@ -376,7 +380,13 @@ class _CreateNotebookDialogState extends State<CreateNotebookDialog> {
                       ),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(9.5),
-                        child: Image.file(File(path), fit: BoxFit.cover),
+                        child: Image.file(
+                          File(path),
+                          fit: BoxFit.cover,
+                          cacheWidth: 240,
+                          filterQuality: FilterQuality.medium,
+                          gaplessPlayback: true,
+                        ),
                       ),
                     ),
                   ),
