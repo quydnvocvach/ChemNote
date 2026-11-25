@@ -8,12 +8,14 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart' show PlatformException;
 import 'package:path_provider/path_provider.dart';
+import 'package:pdf/pdf.dart';
 import 'package:printing/printing.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../core/models/drawing_elements.dart';
 import '../../core/models/note_page.dart';
 import '../../core/services/hardware_service.dart';
+import 'docx_html_converter.dart';
 
 /// Callback báo tiến độ nhập PDF / DOCX để hiển thị thanh tiến trình mượt mà.
 typedef PdfImportProgressCallback = void Function(
@@ -514,6 +516,50 @@ class PdfImportService {
       throw const PdfImportException(
         'Không tìm thấy nội dung word/document.xml trong tệp .docx.',
       );
+    }
+
+    if (!kIsWeb) {
+      File? tempPdfFile;
+      try {
+        onProgress?.call(0, null, 'Đang dựng định dạng Word & công thức...');
+        await Future<void>.delayed(Duration.zero);
+        final htmlDoc = DocxHtmlConverter.convert(docxBytes);
+        final PdfPageFormat baseFormat =
+            htmlDoc.isLandscape ? PdfPageFormat.a4.landscape : PdfPageFormat.a4;
+        final PdfPageFormat pageFormat = baseFormat.copyWith(
+          marginTop: 0,
+          marginBottom: 0,
+          marginLeft: 0,
+          marginRight: 0,
+        );
+        final pdfBytes = await Printing.convertHtml(
+          html: htmlDoc.html,
+          format: pageFormat,
+        );
+        if (pdfBytes.isNotEmpty) {
+          final baseTemp = Directory.systemTemp;
+          tempPdfFile = File(
+            '${baseTemp.path}${Platform.pathSeparator}chemnote_docx_${_uuid.v4()}.pdf',
+          );
+          await tempPdfFile.writeAsBytes(pdfBytes, flush: true);
+          return await importPdfFile(
+            tempPdfFile,
+            fileNameOverride: fileName,
+            startIndex: startIndex,
+            onProgress: onProgress,
+          );
+        }
+      } catch (_) {
+        // Fallback an toàn sang trích xuất thuần Dart trên môi trường test / nền tảng chưa hỗ trợ Print WebView.
+      } finally {
+        if (tempPdfFile != null) {
+          try {
+            if (await tempPdfFile.exists()) {
+              await tempPdfFile.delete();
+            }
+          } catch (_) {}
+        }
+      }
     }
 
     onProgress?.call(0, null, 'Đang trích xuất văn bản & hình ảnh...');

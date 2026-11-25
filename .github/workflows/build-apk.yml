@@ -160,17 +160,20 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.7.3 with APK
+      - name: Publish Release v3.7.4 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.7.3
-          name: ChemNote Pro v3.7.3 (Thumbnail Danh sách trang sắc nét 720px cho PDF ≤ 80 trang & 480px cho PDF hàng trăm trang)
+          tag_name: v3.7.4
+          name: ChemNote Pro v3.7.4 (Nhập Word giữ nguyên Font, Bảng biểu, Ảnh nội tuyến & Công thức Equation/MathML)
           body: |
-            ### ChemNote Pro v3.7.3 — Thumbnail Danh sách trang rõ nét trở lại trên màn hình MatePad 2.8K!
-            - **Nâng độ nét thumbnail trong Danh sách trang (`_openPageGridModal`):**
-              - Tự động giải mã ảnh thu nhỏ ở độ rộng **`720px`** cho tài liệu `<= 80` trang (rõ chữ, sắc nét như các bản cũ trên màn hình 2800×1840) và **`480px`** cho tài liệu `> 80` trang (800+ trang vẫn nét gấp đôi 220px cũ mà vẫn tiết kiệm RAM & cuộn mượt).
-              - Chuyển bộ lọc thu phóng từ `FilterQuality.low` sang **`FilterQuality.medium`** để chữ và công thức không bị răng cưa hay nhòe.
-            - **Kèm trọn vẹn toàn bộ cải tiến từ v3.7.2:** Nhập PDF siêu nhanh (JPEG 92 + tái sử dụng `Bitmap`), sửa lỗi đen màn hình khi nhập Word (`.docx`), ảo hóa cửa sổ 800 trang & kéo thanh cuộn bên hiển thị ngay không bị trang trắng.
+            ### ChemNote Pro v3.7.4 — Nhập tệp Word (`.docx`) giữ nguyên định dạng gốc chuẩn xác!
+            - **Bộ chuyển đổi OOXML → HTML5/CSS/MathML chuyên dụng ([docx_html_converter.dart](lib/features/pdf/docx_html_converter.dart)):**
+              - Giữ nguyên **font chữ** (kế thừa từ `word/styles.xml` và từng đoạn/chữ), **cỡ chữ**, **đậm / nghiêng / gạch chân / gạch ngang**, **màu chữ & tô sáng (highlight)**, **chỉ số trên/dưới**, **căn lề**, **thụt đầu dòng**, **danh sách đầu dòng / đánh số** và **ngắt trang**.
+              - Giữ nguyên cấu trúc **bảng biểu (`<w:tbl>`)** bao gồm gộp ô ngang (`colspan` / `gridSpan`), gộp ô dọc (`rowspan` / `vMerge`), viền ô, màu nền ô và tỷ lệ độ rộng cột.
+              - Hiển thị **hình ảnh nhúng (`word/media/*` + `<w:drawing>`)** đúng vị trí ban đầu trong tài liệu.
+              - Chuyển đổi đầy đủ công thức **Word Equation OMML (`<m:oMath>`, `<m:oMathPara>`) sang HTML5 MathML** (phân số `\frac`, căn thức `\sqrt`/`\mroot`, chỉ số trên dưới phản ứng hóa học, toán tử lớn tích phân/tổng, ngoặc co giãn `()`, `[]`, `{}`, ma trận/hệ phương trình, mũi tên điều kiện nhiệt độ/xúc tác `<m:limUpp>`).
+            - **Kết xuất qua Chromium Print PDF → Android `PdfRenderer`:** Giữ trọn bố cục trang A4 sắc nét để viết chú thích trực tiếp, đồng thời tự động fallback an toàn trên nền tảng không hỗ trợ.
+            - **Kèm trọn vẹn toàn bộ cải tiến từ v3.7.3:** Thumbnail Danh sách trang 720px/480px rõ nét, ảo hóa 800 trang, và kéo thanh cuộn bên hiển thị ngay tức thì.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true
