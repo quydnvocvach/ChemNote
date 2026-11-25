@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
-const String kAppVersion = '3.7.0';
+const String kAppVersion = '3.7.1';
 const String kGithubReleasesLatestApi =
     'https://api.github.com/repos/quydnvocvach/ChemNote/releases/latest';
 const String kGithubReleasesFallbackUrl =

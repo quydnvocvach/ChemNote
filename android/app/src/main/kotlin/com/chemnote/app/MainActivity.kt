@@ -7,12 +7,16 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.pdf.PdfRenderer
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.media.PlaybackParams
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.provider.MediaStore
@@ -168,6 +172,19 @@ class MainActivity : FlutterActivity() {
                             ?.mapNotNull { it?.toString()?.lowercase() }
                             ?: emptyList()
                         handlePickDocumentFile(extensions, result)
+                    }
+                    "renderPdfToPngs" -> {
+                        val pdfPath = call.argument<String>("pdfPath") ?: ""
+                        val outputDir = call.argument<String>("outputDir") ?: ""
+                        val batchId = call.argument<String>("batchId") ?: "pdf"
+                        val maxLongEdge = call.argument<Int>("maxLongEdge") ?: 2200
+                        handleRenderPdfToPngs(
+                            pdfPath = pdfPath,
+                            outputDir = outputDir,
+                            batchId = batchId,
+                            maxLongEdge = maxLongEdge,
+                            result = result
+                        )
                     }
                     else -> result.notImplemented()
                 }
@@ -713,5 +730,145 @@ class MainActivity : FlutterActivity() {
         } else if (!pressed && stylusPrimaryButtonDown) {
             stylusPrimaryButtonDown = false
         }
+    }
+
+    private fun handleRenderPdfToPngs(
+        pdfPath: String,
+        outputDir: String,
+        batchId: String,
+        maxLongEdge: Int,
+        result: MethodChannel.Result
+    ) {
+        if (pdfPath.isBlank() || outputDir.isBlank()) {
+            result.error("INVALID_ARGS", "Thiếu đường dẫn tệp PDF hoặc thư mục xuất.", null)
+            return
+        }
+        val srcFile = File(pdfPath)
+        if (!srcFile.exists() || !srcFile.isFile || srcFile.length() <= 0L) {
+            result.error("PDF_NOT_FOUND", "Không tìm thấy tệp PDF hợp lệ: $pdfPath", null)
+            return
+        }
+
+        val targetDir = File(outputDir)
+        if (!targetDir.exists() && !targetDir.mkdirs()) {
+            result.error("IO_ERROR", "Không thể tạo thư mục lưu trang PDF.", null)
+            return
+        }
+
+        val targetLongEdge = maxLongEdge.coerceIn(800, 2600)
+        val safeBatch = batchId.replace(Regex("[^A-Za-z0-9_-]"), "_").ifEmpty { "pdf" }
+
+        Thread {
+            var pfd: ParcelFileDescriptor? = null
+            var renderer: PdfRenderer? = null
+            val renderedPages = ArrayList<HashMap<String, Any>>()
+            try {
+                pfd = ParcelFileDescriptor.open(srcFile, ParcelFileDescriptor.MODE_READ_ONLY)
+                renderer = PdfRenderer(pfd)
+                val pageCount = renderer.pageCount
+
+                runOnUiThread {
+                    hardwareChannel?.invokeMethod(
+                        "pdf_import_progress",
+                        hashMapOf(
+                            "currentPage" to 0,
+                            "totalPages" to pageCount,
+                            "stage" to if (pageCount > 0) {
+                                "Chuẩn bị nhập $pageCount trang PDF..."
+                            } else {
+                                "Đang kiểm tra tệp PDF..."
+                            }
+                        )
+                    )
+                }
+
+                for (index in 0 until pageCount) {
+                    val pageNumber = index + 1
+                    var bitmap: Bitmap? = null
+                    val page = renderer.openPage(index)
+                    try {
+                        val pageW = page.width.coerceAtLeast(1)
+                        val pageH = page.height.coerceAtLeast(1)
+                        val longEdge = maxOf(pageW, pageH)
+                        val scale = targetLongEdge.toFloat() / longEdge.toFloat()
+                        val targetW = (pageW * scale).toInt().coerceIn(1, targetLongEdge)
+                        val targetH = (pageH * scale).toInt().coerceIn(1, targetLongEdge)
+
+                        bitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+                        val canvas = Canvas(bitmap)
+                        canvas.drawColor(Color.WHITE)
+                        page.render(
+                            bitmap,
+                            null,
+                            null,
+                            PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY
+                        )
+
+                        val outFile = File(targetDir, "${safeBatch}_page_$pageNumber.png")
+                        FileOutputStream(outFile).use { fos ->
+                            bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                            fos.flush()
+                        }
+
+                        renderedPages.add(
+                            hashMapOf(
+                                "pageNumber" to pageNumber,
+                                "path" to outFile.absolutePath,
+                                "width" to targetW,
+                                "height" to targetH,
+                                "isLandscape" to (targetW > targetH)
+                            )
+                        )
+                    } finally {
+                        if (bitmap != null && !bitmap.isRecycled) {
+                            bitmap.recycle()
+                        }
+                        page.close()
+                    }
+
+                    runOnUiThread {
+                        hardwareChannel?.invokeMethod(
+                            "pdf_import_progress",
+                            hashMapOf(
+                                "currentPage" to pageNumber,
+                                "totalPages" to pageCount,
+                                "stage" to "Đang nhập trang PDF $pageNumber/$pageCount..."
+                            )
+                        )
+                    }
+                }
+
+                runOnUiThread {
+                    result.success(renderedPages)
+                }
+            } catch (e: SecurityException) {
+                for (entry in renderedPages) {
+                    val path = entry["path"] as? String ?: continue
+                    runCatching { File(path).delete() }
+                }
+                runOnUiThread {
+                    result.error(
+                        "PDF_PROTECTED",
+                        e.message ?: "Tệp PDF được bảo vệ bằng mật khẩu.",
+                        null
+                    )
+                }
+            } catch (t: Throwable) {
+                for (entry in renderedPages) {
+                    val path = entry["path"] as? String ?: continue
+                    runCatching { File(path).delete() }
+                }
+                runOnUiThread {
+                    result.error(
+                        "PDF_RENDER_FAILED",
+                        t.message ?: "Không thể kết xuất PDF trên thiết bị.",
+                        null
+                    )
+                }
+            } finally {
+                runCatching { renderer?.close() }
+                runCatching { pfd?.close() }
+            }
+        }.start()
     }
 }

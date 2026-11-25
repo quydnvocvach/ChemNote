@@ -29,6 +29,23 @@ class PickedDeviceFile {
   });
 }
 
+/// Kết quả kết xuất một trang PDF thành ảnh PNG trực tiếp bằng Android `PdfRenderer`.
+class NativePdfPageRender {
+  final int pageNumber;
+  final String path;
+  final int width;
+  final int height;
+  final bool isLandscape;
+
+  const NativePdfPageRender({
+    required this.pageNumber,
+    required this.path,
+    required this.width,
+    required this.height,
+    required this.isLandscape,
+  });
+}
+
 /// Cầu nối phần cứng cho Huawei MatePad 11.5"S (144Hz PaperMatte), Huawei M-Pencil 3 (NearLink)
 /// và Ghi âm / Phát lại bài giảng gốc Android (`MediaRecorder` / `MediaPlayer`).
 /// Tự động bỏ qua an toàn trên nền tảng không hỗ trợ (Web, Desktop, Unit Tests).
@@ -44,13 +61,34 @@ class HardwareService {
 
   final StreamController<void> _stylusDoubleTapController =
       StreamController<void>.broadcast();
+  final StreamController<({int currentPage, int? totalPages, String stage})>
+      _pdfImportProgressController = StreamController<
+          ({int currentPage, int? totalPages, String stage})>.broadcast();
 
   /// Luồng sự kiện khi người dùng gõ đúp thân bút Huawei M-Pencil 3 / S-Pen.
   Stream<void> get onStylusDoubleTap => _stylusDoubleTapController.stream;
 
+  /// Luồng tiến độ kết xuất PDF gốc theo từng trang từ Android `PdfRenderer`.
+  Stream<({int currentPage, int? totalPages, String stage})>
+      get onPdfImportProgress => _pdfImportProgressController.stream;
+
   Future<dynamic> _handleNativeCall(MethodCall call) async {
     if (call.method == 'stylus_double_tap') {
       _stylusDoubleTapController.add(null);
+    } else if (call.method == 'pdf_import_progress') {
+      final args = call.arguments;
+      if (args is Map) {
+        final rawPage = args['currentPage'];
+        final rawTotal = args['totalPages'];
+        final currentPage = rawPage is num ? rawPage.toInt() : 0;
+        final totalPages = rawTotal is num ? rawTotal.toInt() : null;
+        final stage = args['stage']?.toString() ?? '';
+        _pdfImportProgressController.add((
+          currentPage: currentPage,
+          totalPages: totalPages,
+          stage: stage,
+        ));
+      }
     }
     return null;
   }
@@ -278,6 +316,59 @@ class HardwareService {
       return (handled: false, file: null);
     } on PlatformException {
       return (handled: false, file: null);
+    }
+  }
+
+  /// Kết xuất từng trang tệp PDF trực tiếp trên Android bằng `PdfRenderer` theo kiểu stream 1 trang/lần,
+  /// không nạp toàn bộ tệp PDF vào heap Dart và giải phóng Bitmap ngay sau khi ghi PNG.
+  /// Trả về `null` trên nền tảng không hỗ trợ (`MissingPluginException`, Web, Desktop) để dùng fallback Dart.
+  Future<List<NativePdfPageRender>?> renderPdfToPngs({
+    required String pdfPath,
+    required String outputDir,
+    required String batchId,
+    int maxLongEdge = 2200,
+  }) async {
+    if (kIsWeb) return null;
+    try {
+      final raw = await _channel.invokeMethod<List<dynamic>>(
+        'renderPdfToPngs',
+        {
+          'pdfPath': pdfPath,
+          'outputDir': outputDir,
+          'batchId': batchId,
+          'maxLongEdge': maxLongEdge,
+        },
+      );
+      if (raw == null) return null;
+      final pages = <NativePdfPageRender>[];
+      for (final item in raw) {
+        if (item is Map) {
+          final rawPage = item['pageNumber'];
+          final rawW = item['width'];
+          final rawH = item['height'];
+          final path = item['path']?.toString() ?? '';
+          final pageNumber = rawPage is num ? rawPage.toInt() : pages.length + 1;
+          final width = rawW is num ? rawW.toInt() : 0;
+          final height = rawH is num ? rawH.toInt() : 0;
+          final isLandscape = item['isLandscape'] == true || width > height;
+          if (path.isNotEmpty) {
+            pages.add(
+              NativePdfPageRender(
+                pageNumber: pageNumber,
+                path: path,
+                width: width,
+                height: height,
+                isLandscape: isLandscape,
+              ),
+            );
+          }
+        }
+      }
+      return pages;
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      rethrow;
     }
   }
 

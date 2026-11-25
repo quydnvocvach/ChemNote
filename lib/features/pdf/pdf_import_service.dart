@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:path_provider/path_provider.dart';
 import 'package:printing/printing.dart';
 import 'package:uuid/uuid.dart';
@@ -53,17 +56,21 @@ class PdfImportService {
   })  : _uuid = uuid ?? const Uuid(),
         _overrideBaseDir = overrideBaseDir;
 
-  /// Độ phân giải mặc định 216 DPI: chữ nhỏ, công thức Hóa học & ký hiệu dưới hiển thị siêu sắc nét trên MatePad 11.5"S.
-  static const double defaultPdfDpi = 216.0;
+  /// Độ phân giải mặc định 150 DPI cho fallback `Printing.raster` trên Web/Desktop: cân bằng độ nét và RAM.
+  static const double defaultPdfDpi = 150.0;
+
+  /// Cạnh dài mục tiêu (px) khi kết xuất PDF bằng Android `PdfRenderer` gốc (giữ chữ sắc nét, không bao giờ OOM).
+  static const int nativeTargetLongEdgePx = 2200;
 
   /// Đường dẫn chuẩn cho ảnh thu nhỏ (thumbnail) đi kèm trang PDF đã kết xuất.
-  /// Giữ `importPdfBytes` 1 lượt raster 216 DPI; editor giải mã thumbnail `targetWidth: 320` trực tiếp từ PNG gốc (< 3ms).
+  /// Giữ lượt raster 1 lần duy nhất; editor giải mã thumbnail `targetWidth: 320` trực tiếp từ PNG gốc (< 3ms).
   static String thumbnailPathForPdfPage(String pageImagePath) =>
       '$pageImagePath.thumb.png';
 
   /// Ước lượng nhanh số trang từ header/cấu trúc tệp PDF để hiển thị `%` tiến trình ngay từ trang đầu tiên.
+  /// Bỏ qua tệp > 25 MB để tránh giải mã chuỗi khổng lồ trên heap Dart.
   static int? estimatePdfPageCount(Uint8List pdfBytes) {
-    if (pdfBytes.isEmpty) return null;
+    if (pdfBytes.isEmpty || pdfBytes.length > 25 * 1024 * 1024) return null;
     final text = latin1.decode(pdfBytes, allowInvalid: true);
     final directCount =
         RegExp(r'/Type\s*/Page(?![a-zA-Z0-9])').allMatches(text).length;
@@ -81,7 +88,21 @@ class PdfImportService {
   final Uuid _uuid;
   final Directory? _overrideBaseDir;
 
+  Future<Directory> _resolvePdfTargetDir(String importBatchId) async {
+    final baseDir =
+        _overrideBaseDir ?? await getApplicationDocumentsDirectory();
+    final targetDir = Directory(
+      '${baseDir.path}${Platform.pathSeparator}chemnote'
+      '${Platform.pathSeparator}pdf_pages${Platform.pathSeparator}$importBatchId',
+    );
+    if (!await targetDir.exists()) {
+      await targetDir.create(recursive: true);
+    }
+    return targetDir;
+  }
+
   /// Mở trình chọn tệp của hệ thống để chọn PDF và chuyển đổi từng trang thành `NotePage`.
+  /// Ưu tiên truyền trực tiếp đường dẫn đĩa xuống luồng native (`importPdfFile`) để tránh nạp toàn bộ PDF vào RAM.
   /// Trả về `null` nếu người dùng hủy chọn tệp.
   Future<PdfImportResult?> pickAndImportPdf({
     int startIndex = 0,
@@ -105,7 +126,7 @@ class PdfImportService {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: const <String>['pdf'],
-        withData: true,
+        withData: kIsWeb,
       );
 
       if (result == null || result.files.isEmpty) {
@@ -118,8 +139,15 @@ class PdfImportService {
       pickedName = picked.name;
     }
 
-    if (bytes == null && pickedPath != null) {
-      bytes = await File(pickedPath).readAsBytes();
+    if (pickedPath != null && pickedPath.isNotEmpty) {
+      return importPdfFile(
+        File(pickedPath),
+        fileNameOverride: pickedName,
+        startIndex: startIndex,
+        dpi: dpi,
+        onPageRendered: onPageRendered,
+        onProgress: onProgress,
+      );
     }
 
     if (bytes == null || bytes.isEmpty) {
@@ -137,8 +165,10 @@ class PdfImportService {
   }
 
   /// Nhập trực tiếp từ một `File` PDF có sẵn trên thiết bị.
+  /// Trên Android dùng `PdfRenderer` gốc kết xuất từng trang trực tiếp ra đĩa (không OOM).
   Future<PdfImportResult> importPdfFile(
     File pdfFile, {
+    String? fileNameOverride,
     int startIndex = 0,
     double dpi = defaultPdfDpi,
     void Function(int currentPage)? onPageRendered,
@@ -147,11 +177,103 @@ class PdfImportService {
     if (!await pdfFile.exists()) {
       throw PdfImportException('Không tìm thấy tệp PDF: ${pdfFile.path}');
     }
-    final bytes = await pdfFile.readAsBytes();
-    final fileName = pdfFile.uri.pathSegments.isNotEmpty
-        ? pdfFile.uri.pathSegments.last
-        : 'tai_lieu.pdf';
+    final fileName =
+        (fileNameOverride != null && fileNameOverride.trim().isNotEmpty)
+            ? fileNameOverride.trim()
+            : (pdfFile.uri.pathSegments.isNotEmpty
+                ? pdfFile.uri.pathSegments.last
+                : 'tai_lieu.pdf');
 
+    onProgress?.call(0, null, 'Đang mở tệp PDF...');
+    await Future<void>.delayed(Duration.zero);
+
+    if (!kIsWeb) {
+      final importBatchId = _uuid.v4();
+      final targetDir = await _resolvePdfTargetDir(importBatchId);
+      StreamSubscription<({int currentPage, int? totalPages, String stage})>?
+          progressSub;
+      if (onProgress != null) {
+        progressSub =
+            HardwareService.instance.onPdfImportProgress.listen((event) {
+          onProgress(
+            event.currentPage,
+            event.totalPages,
+            event.stage.isNotEmpty
+                ? event.stage
+                : 'Đang nhập trang PDF ${event.currentPage}...',
+          );
+        });
+      }
+      try {
+        final nativePages = await HardwareService.instance.renderPdfToPngs(
+          pdfPath: pdfFile.path,
+          outputDir: targetDir.path,
+          batchId: importBatchId,
+          maxLongEdge: nativeTargetLongEdgePx,
+        );
+        if (nativePages != null) {
+          if (nativePages.isEmpty) {
+            throw const PdfImportException(
+              'Tệp PDF không chứa trang nào hợp lệ.',
+            );
+          }
+          final pages = <NotePage>[];
+          final now = DateTime.now();
+          for (final rendered in nativePages) {
+            pages.add(
+              NotePage(
+                id: _uuid.v4(),
+                index: startIndex + rendered.pageNumber - 1,
+                templateType: PaperTemplateType.blank,
+                paperColor: PaperColorType.white,
+                isLandscape: rendered.isLandscape,
+                // Khóa slide PDF ở lớp nền bất biến (không bao giờ đưa vào imageElements)
+                pdfBackgroundPath: rendered.path,
+                pdfPageNumber: rendered.pageNumber,
+                title: 'Trang ${rendered.pageNumber}',
+                updatedAt: now,
+              ),
+            );
+            onPageRendered?.call(rendered.pageNumber);
+          }
+          onProgress?.call(
+            pages.length,
+            pages.length,
+            'Hoàn tất nhập ${pages.length} trang PDF',
+          );
+          return PdfImportResult(
+            sourceFileName: fileName,
+            suggestedTitle: _stripExtension(fileName),
+            pages: pages,
+          );
+        }
+        if (await targetDir.exists()) {
+          await targetDir.delete(recursive: true);
+        }
+      } on PlatformException catch (e) {
+        if (await targetDir.exists()) {
+          try {
+            await targetDir.delete(recursive: true);
+          } catch (_) {}
+        }
+        if (e.code == 'PDF_PROTECTED') {
+          throw const PdfImportException(
+            'Tệp PDF được bảo vệ bằng mật khẩu nên không thể nhập.',
+          );
+        }
+        final fileSize = await pdfFile.length();
+        if (fileSize > 25 * 1024 * 1024) {
+          throw PdfImportException(
+            e.message ?? 'Không thể giải mã tệp PDF dung lượng lớn.',
+          );
+        }
+        // Fallback sang Printing.raster với tệp nhỏ nếu cần.
+      } finally {
+        await progressSub?.cancel();
+      }
+    }
+
+    final bytes = await pdfFile.readAsBytes();
     return importPdfBytes(
       bytes,
       fileName: fileName,
@@ -175,16 +297,8 @@ class PdfImportService {
     onProgress?.call(0, estimatedTotal, 'Đang chuẩn bị giải mã tệp PDF...');
     await Future<void>.delayed(Duration.zero);
 
-    final baseDir =
-        _overrideBaseDir ?? await getApplicationDocumentsDirectory();
     final importBatchId = _uuid.v4();
-    final targetDir = Directory(
-      '${baseDir.path}${Platform.pathSeparator}chemnote'
-      '${Platform.pathSeparator}pdf_pages${Platform.pathSeparator}$importBatchId',
-    );
-    if (!await targetDir.exists()) {
-      await targetDir.create(recursive: true);
-    }
+    final targetDir = await _resolvePdfTargetDir(importBatchId);
 
     final pages = <NotePage>[];
     final writeFutures = <Future<void>>[];

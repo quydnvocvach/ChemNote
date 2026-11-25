@@ -6,8 +6,10 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('PdfImportService sharpness & page estimation', () {
-    test('uses high default DPI for sharp text on MatePad 11.5"S', () {
-      expect(PdfImportService.defaultPdfDpi, greaterThanOrEqualTo(200.0));
+    test('uses safe fallback DPI and high native long-edge target on MatePad 11.5"S', () {
+      expect(PdfImportService.nativeTargetLongEdgePx, greaterThanOrEqualTo(2000));
+      expect(PdfImportService.defaultPdfDpi, greaterThanOrEqualTo(132.0));
+      expect(PdfImportService.defaultPdfDpi, lessThanOrEqualTo(180.0));
     });
 
     test('estimates page count from /Type /Page and /Count headers', () {
@@ -28,6 +30,10 @@ void main() {
       expect(PdfImportService.estimatePdfPageCount(compressedByCountOnly), 72);
 
       expect(PdfImportService.estimatePdfPageCount(Uint8List(0)), isNull);
+      expect(
+        PdfImportService.estimatePdfPageCount(Uint8List(25 * 1024 * 1024 + 1)),
+        isNull,
+      );
     });
   });
 }
