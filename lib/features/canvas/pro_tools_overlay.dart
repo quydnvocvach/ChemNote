@@ -2,51 +2,95 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
-/// A single timed point in a fading laser pointer trail.
-class LaserTrailPoint {
-  final Offset position;
-  final int timestampMs;
+/// A single continuous laser stroke that remains visible while the pen is held down,
+/// then smoothly fades out after the pen lifts (Huawei Notes behavior).
+class LaserStroke {
+  final List<Offset> points;
+  bool isActive;
+  int? releasedAtMs;
 
-  const LaserTrailPoint(this.position, this.timestampMs);
+  LaserStroke({
+    required this.points,
+    this.isActive = true,
+    this.releasedAtMs,
+  });
 }
 
-/// Manages a glowing, auto-fading laser pointer trail without rebuilding
+/// Manages 144Hz zero-delay laser pointer strokes without rebuilding
 /// the underlying page canvas.
 class LaserPointerController extends ChangeNotifier {
-  final List<LaserTrailPoint> _points = [];
+  final List<LaserStroke> _strokes = [];
   Timer? _fadeTimer;
   Color color;
-  static const int trailDurationMs = 950;
+  String? _activePageId;
+
+  static const int holdAfterReleaseMs = 220;
+  static const int fadeOutDurationMs = 700;
+  static const int totalReleaseFadeMs = holdAfterReleaseMs + fadeOutDurationMs;
 
   LaserPointerController({this.color = const Color(0xFFEF4444)});
 
-  List<LaserTrailPoint> get points => List.unmodifiable(_points);
-  bool get hasPoints => _points.isNotEmpty;
+  List<LaserStroke> get strokes => List.unmodifiable(_strokes);
+  String? get activePageId => _activePageId;
+  bool get hasPoints => _strokes.isNotEmpty;
 
-  void addPoint(Offset pos) {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    _points.add(LaserTrailPoint(pos, now));
-    _pruneExpired(now);
-    _ensureTimer();
+  void beginStroke(Offset pos, {String? pageId}) {
+    if (pageId != null && _activePageId != null && _activePageId != pageId) {
+      _strokes.clear();
+    }
+    if (pageId != null) _activePageId = pageId;
+    for (final s in _strokes) {
+      if (s.isActive) {
+        s.isActive = false;
+        s.releasedAtMs ??= DateTime.now().millisecondsSinceEpoch;
+      }
+    }
+    _strokes.add(LaserStroke(points: [pos], isActive: true));
+    notifyListeners();
+  }
+
+  void addPoint(Offset pos, {String? pageId}) {
+    if (_strokes.isEmpty ||
+        !_strokes.last.isActive ||
+        (pageId != null && _activePageId != null && _activePageId != pageId)) {
+      beginStroke(pos, pageId: pageId);
+      return;
+    }
+    final active = _strokes.last;
+    if ((pos - active.points.last).distance < 1.5) return;
+    active.points.add(pos);
     notifyListeners();
   }
 
   void endStroke() {
-    _ensureTimer();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    bool endedAny = false;
+    for (final s in _strokes) {
+      if (s.isActive) {
+        s.isActive = false;
+        s.releasedAtMs = now;
+        endedAny = true;
+      }
+    }
+    if (endedAny || _strokes.isNotEmpty) {
+      _ensureTimer();
+      notifyListeners();
+    }
   }
 
   void clear() {
-    _points.clear();
+    _strokes.clear();
+    _activePageId = null;
     _fadeTimer?.cancel();
     _fadeTimer = null;
     notifyListeners();
   }
 
   void _ensureTimer() {
-    _fadeTimer ??= Timer.periodic(const Duration(milliseconds: 16), (_) {
+    _fadeTimer ??= Timer.periodic(const Duration(milliseconds: 8), (_) {
       final now = DateTime.now().millisecondsSinceEpoch;
       _pruneExpired(now);
-      if (_points.isEmpty) {
+      if (_strokes.isEmpty || _strokes.every((s) => s.isActive)) {
         _fadeTimer?.cancel();
         _fadeTimer = null;
       }
@@ -55,7 +99,13 @@ class LaserPointerController extends ChangeNotifier {
   }
 
   void _pruneExpired(int nowMs) {
-    _points.removeWhere((p) => nowMs - p.timestampMs > trailDurationMs);
+    _strokes.removeWhere((s) {
+      if (s.isActive || s.releasedAtMs == null) return false;
+      return nowMs - s.releasedAtMs! > totalReleaseFadeMs;
+    });
+    if (_strokes.isEmpty) {
+      _activePageId = null;
+    }
   }
 
   @override
@@ -65,76 +115,101 @@ class LaserPointerController extends ChangeNotifier {
   }
 }
 
-/// Paints the glowing fading laser pointer trail on top of the active page.
+/// Paints smooth glowing laser pointer strokes on top of the active page
+/// with minimal GPU draw calls at 144Hz.
 class LaserPointerPainter extends CustomPainter {
   final LaserPointerController controller;
+  final String? pageId;
 
-  LaserPointerPainter({required this.controller}) : super(repaint: controller);
+  LaserPointerPainter({
+    required this.controller,
+    this.pageId,
+  }) : super(repaint: controller);
 
   @override
   void paint(Canvas canvas, Size size) {
-    final pts = controller.points;
-    if (pts.isEmpty) return;
+    if (pageId != null &&
+        controller.activePageId != null &&
+        controller.activePageId != pageId) {
+      return;
+    }
+    final strokes = controller.strokes;
+    if (strokes.isEmpty) return;
 
     final now = DateTime.now().millisecondsSinceEpoch;
     final baseColor = controller.color;
 
-    for (int i = 1; i < pts.length; i++) {
-      final a = pts[i - 1];
-      final b = pts[i];
-      // Skip large jumps between separate laser strokes
-      if ((b.position - a.position).distance > 90) continue;
+    for (final stroke in strokes) {
+      final pts = stroke.points;
+      if (pts.isEmpty) continue;
 
-      final age = now - b.timestampMs;
-      final t = (1.0 - age / LaserPointerController.trailDurationMs)
-          .clamp(0.0, 1.0);
+      double t = 1.0;
+      if (!stroke.isActive && stroke.releasedAtMs != null) {
+        final ageAfterRelease = now - stroke.releasedAtMs!;
+        if (ageAfterRelease > LaserPointerController.holdAfterReleaseMs) {
+          final fadeElapsed =
+              ageAfterRelease - LaserPointerController.holdAfterReleaseMs;
+          t = (1.0 -
+                  fadeElapsed / LaserPointerController.fadeOutDurationMs)
+              .clamp(0.0, 1.0);
+        }
+      }
       if (t <= 0.01) continue;
 
-      // Outer glow
-      canvas.drawLine(
-        a.position,
-        b.position,
-        Paint()
-          ..color = baseColor.withAlpha((t * 95).round())
-          ..strokeWidth = 10.0 * t + 3.0
-          ..strokeCap = StrokeCap.round
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4.0),
-      );
+      if (pts.length >= 2) {
+        final path = Path()..moveTo(pts.first.dx, pts.first.dy);
+        for (int i = 1; i < pts.length - 1; i++) {
+          final mid = Offset(
+            (pts[i].dx + pts[i + 1].dx) * 0.5,
+            (pts[i].dy + pts[i + 1].dy) * 0.5,
+          );
+          path.quadraticBezierTo(pts[i].dx, pts[i].dy, mid.dx, mid.dy);
+        }
+        path.lineTo(pts.last.dx, pts.last.dy);
 
-      // Bright core
-      canvas.drawLine(
-        a.position,
-        b.position,
-        Paint()
-          ..color = Color.lerp(baseColor, Colors.white, 0.55)!
-              .withAlpha((t * 245).round())
-          ..strokeWidth = 3.2 * t + 1.0
-          ..strokeCap = StrokeCap.round,
-      );
-    }
+        // Outer neon halo (single drawPath call)
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = baseColor.withAlpha((t * 105).round())
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 9.0 * (0.4 + 0.6 * t)
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round,
+        );
 
-    // Glowing tip dot
-    final tip = pts.last;
-    final tipT = (1.0 - (now - tip.timestampMs) / LaserPointerController.trailDurationMs)
-        .clamp(0.0, 1.0);
-    if (tipT > 0.05) {
-      canvas.drawCircle(
-        tip.position,
-        6.5 * tipT,
-        Paint()
-          ..color = baseColor.withAlpha((tipT * 200).round())
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3.0),
-      );
-      canvas.drawCircle(
-        tip.position,
-        3.0 * tipT,
-        Paint()..color = Colors.white.withAlpha((tipT * 245).round()),
-      );
+        // Bright inner laser core (single drawPath call)
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = Color.lerp(baseColor, Colors.white, 0.55)!
+                .withAlpha((t * 245).round())
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 3.6 * (0.4 + 0.6 * t)
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round,
+        );
+      }
+
+      if (stroke.isActive || t > 0.25) {
+        final tip = pts.last;
+        canvas.drawCircle(
+          tip,
+          7.0 * t,
+          Paint()..color = baseColor.withAlpha((t * 130).round()),
+        );
+        canvas.drawCircle(
+          tip,
+          3.4 * t,
+          Paint()..color = Colors.white.withAlpha((t * 250).round()),
+        );
+      }
     }
   }
 
   @override
-  bool shouldRepaint(covariant LaserPointerPainter oldDelegate) => false;
+  bool shouldRepaint(covariant LaserPointerPainter oldDelegate) =>
+      oldDelegate.pageId != pageId;
 }
 
 /// Interactive translucent ruler with centimeter/millimeter ticks (1 cm = 37.8 px,

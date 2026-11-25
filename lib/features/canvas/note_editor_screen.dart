@@ -56,6 +56,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   final ValueNotifier<double> _whiteboardZoomNotifier = ValueNotifier(1.0);
   final ValueNotifier<({String id, double x, double y, double w, double h})?>
       _imageDragNotifier = ValueNotifier(null);
+  ({
+    Offset startGlobal,
+    double startX,
+    double startY,
+    double startW,
+    double startH,
+    double canvasScale,
+  })? _cornerResizeStart;
   final ValueNotifier<({String id, double x, double y, double w, double h})?>
       _stickyDragNotifier = ValueNotifier(null);
   final ValueNotifier<Stroke?> _activeStickyStrokeNotifier = ValueNotifier(null);
@@ -503,17 +511,78 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         ..translate(tx, targetTy)
         ..scale(scale, scale);
     }
+    _prefetchNearbyPdfPages(notebook);
   }
 
   // ===========================================================================
-  // PDF BACKGROUND & ELEMENT IMAGE DECODING
+  // PDF BACKGROUND & ELEMENT IMAGE DECODING (Windowed LRU to prevent OOM)
   // ===========================================================================
+
+  static const int _maxCachedPdfPages = 12;
+  static const int _pdfPreloadRadius = 4;
+
+  void _touchPdfCache(String path) {
+    final existing = _pdfImageCache.remove(path);
+    if (existing != null) {
+      _pdfImageCache[path] = existing;
+    }
+  }
+
+  void _prefetchNearbyPdfPages(Notebook notebook) {
+    if (notebook.pages.isEmpty) return;
+    final int center = _currentPageIndex.clamp(0, notebook.pages.length - 1);
+    final int start = math.max(0, center - _pdfPreloadRadius);
+    final int end = math.min(notebook.pages.length - 1, center + _pdfPreloadRadius);
+    for (int i = start; i <= end; i++) {
+      final path = notebook.pages[i].pdfBackgroundPath;
+      if (path != null && path.isNotEmpty) {
+        if (_pdfImageCache.containsKey(path)) {
+          _touchPdfCache(path);
+        } else {
+          _ensurePdfImageLoaded(path);
+        }
+      }
+    }
+
+    if (_pdfImageCache.length <= _maxCachedPdfPages) return;
+    final int keepStart = math.max(0, center - (_pdfPreloadRadius + 2));
+    final int keepEnd =
+        math.min(notebook.pages.length - 1, center + (_pdfPreloadRadius + 2));
+    final keepPaths = <String>{};
+    for (int i = keepStart; i <= keepEnd; i++) {
+      final p = notebook.pages[i].pdfBackgroundPath;
+      if (p != null && p.isNotEmpty) keepPaths.add(p);
+    }
+
+    final evictedImages = <ui.Image>[];
+    final candidates = _pdfImageCache.keys.toList();
+    for (final key in candidates) {
+      if (_pdfImageCache.length <= _maxCachedPdfPages) break;
+      if (keepPaths.contains(key)) continue;
+      final removed = _pdfImageCache.remove(key);
+      if (removed != null) evictedImages.add(removed);
+    }
+    if (evictedImages.isNotEmpty) {
+      // Wait 2 frames before native ui.Image.dispose() so active display lists stop referencing it.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() => _repaintVersion++);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          for (final img in evictedImages) {
+            img.dispose();
+          }
+        });
+      });
+    }
+  }
 
   void _ensurePdfImageLoaded(String? path) {
     if (path == null || path.isEmpty) return;
-    if (_pdfImageCache.containsKey(path) || _loadingPdfPaths.contains(path)) {
+    if (_pdfImageCache.containsKey(path)) {
+      _touchPdfCache(path);
       return;
     }
+    if (_loadingPdfPaths.contains(path)) return;
     _loadingPdfPaths.add(path);
     _loadPdfImage(path);
   }
@@ -523,16 +592,30 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       final file = File(path);
       if (!await file.exists()) return;
       final bytes = await file.readAsBytes();
-      final codec = await ui.instantiateImageCodec(bytes);
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 1600);
       final frame = await codec.getNextFrame();
       if (!mounted) {
         frame.image.dispose();
         return;
       }
+      final evictedImages = <ui.Image>[];
       setState(() {
         _pdfImageCache[path] = frame.image;
+        while (_pdfImageCache.length > _maxCachedPdfPages + 4) {
+          final oldestKey = _pdfImageCache.keys.first;
+          if (oldestKey == path) break;
+          final removed = _pdfImageCache.remove(oldestKey);
+          if (removed != null) evictedImages.add(removed);
+        }
         _repaintVersion++;
       });
+      if (evictedImages.isNotEmpty) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          for (final img in evictedImages) {
+            img.dispose();
+          }
+        });
+      }
     } catch (_) {
       // Ignore missing/corrupt PDF page image
     } finally {
@@ -697,8 +780,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     // Laser Pointer: lock viewport pan while laser pointer is held down
     if (_activeTool == EditorTool.laserPointer) {
       if (!allowThisPointer) return;
+      _currentPageIndex = pageIndex;
       if (!_isDrawingPointerDown) setState(() => _isDrawingPointerDown = true);
-      _laserController.addPoint(rawPos);
+      _laserController.beginStroke(rawPos, pageId: page.id);
       return;
     }
 
@@ -813,7 +897,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
 
     if (_activeTool == EditorTool.laserPointer) {
-      _laserController.addPoint(rawPos);
+      _laserController.addPoint(rawPos, pageId: page.id);
       return;
     }
 
@@ -2386,7 +2470,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       }
       cursorY += ph + 14.0;
     }
-    _currentPageIndex = visibleIdx;
+    if (visibleIdx != _currentPageIndex) {
+      _currentPageIndex = visibleIdx;
+      _prefetchNearbyPdfPages(notebook);
+    }
 
     final contentBottom = ty + totalContentHeight * scale;
     final thresholdY = viewportSize.height - 50.0;
@@ -4250,7 +4337,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           ? const PageScrollPhysics()
           : const NeverScrollableScrollPhysics(),
       itemCount: notebook.pages.length,
-      onPageChanged: (i) => setState(() => _currentPageIndex = i),
+      onPageChanged: (i) {
+        setState(() => _currentPageIndex = i);
+        _prefetchNearbyPdfPages(notebook);
+      },
       itemBuilder: (ctx, i) {
         return Center(
           child: SingleChildScrollView(
@@ -4269,7 +4359,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     NotePage page,
     int pageIndex,
   ) {
-    _ensurePdfImageLoaded(page.pdfBackgroundPath);
+    if ((pageIndex - _currentPageIndex).abs() <= _pdfPreloadRadius) {
+      _ensurePdfImageLoaded(page.pdfBackgroundPath);
+    }
     for (final img in page.imageElements) {
       _ensureElementImageLoaded(img.filePath);
     }
@@ -4379,13 +4471,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 ),
 
                 // Laser Pointer Fading Trail Overlay in its own RepaintBoundary
-                if (isActivePage)
+                if (isActivePage ||
+                    _laserController.activePageId == page.id ||
+                    (_activeTool == EditorTool.laserPointer &&
+                        (pageIndex - _currentPageIndex).abs() <= 2))
                   Positioned.fill(
                     child: IgnorePointer(
                       child: RepaintBoundary(
                         child: CustomPaint(
-                          painter:
-                              LaserPointerPainter(controller: _laserController),
+                          painter: LaserPointerPainter(
+                            controller: _laserController,
+                            pageId: page.id,
+                          ),
                         ),
                       ),
                     ),
@@ -5431,6 +5528,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
 
     void endDrag() {
+      _cornerResizeStart = null;
       final finalDrag = _imageDragNotifier.value;
       _imageDragNotifier.value = null;
       if (finalDrag != null && finalDrag.id == img.id) {
@@ -5454,6 +5552,65 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       }
     }
 
+    void beginCornerResize(DragStartDetails d) {
+      final double canvasScale = (page.isInfiniteWhiteboard
+              ? _whiteboardTransformController.value
+              : _transformController.value)
+          .getMaxScaleOnAxis()
+          .clamp(0.25, 4.0);
+      _cornerResizeStart = (
+        startGlobal: d.globalPosition,
+        startX: img.x,
+        startY: img.y,
+        startW: img.width,
+        startH: img.height,
+        canvasScale: canvasScale,
+      );
+      beginDrag();
+    }
+
+    void updateCornerResize(
+      DragUpdateDetails d, {
+      required double signX,
+      required double signY,
+      required bool anchorRight,
+      required bool anchorBottom,
+    }) {
+      final st = _cornerResizeStart;
+      if (st == null) return;
+      final screenDelta = d.globalPosition - st.startGlobal;
+      final double pageDx = screenDelta.dx / st.canvasScale;
+      final double pageDy = screenDelta.dy / st.canvasScale;
+      final double cosR = math.cos(-img.rotation);
+      final double sinR = math.sin(-img.rotation);
+      final double localDx = pageDx * cosR - pageDy * sinR;
+      final double localDy = pageDx * sinR + pageDy * cosR;
+      final double diagLen = math.max(
+        1.0,
+        math.sqrt(st.startW * st.startW + st.startH * st.startH),
+      );
+      final double dirX = signX * (st.startW / diagLen);
+      final double dirY = signY * (st.startH / diagLen);
+      final double proj = localDx * dirX + localDy * dirY;
+      final double minScale = math.max(
+        32.0 / math.max(1.0, st.startW),
+        32.0 / math.max(1.0, st.startH),
+      );
+      final double scaleFactor =
+          math.max(minScale, (diagLen + proj) / diagLen);
+      final double nw = st.startW * scaleFactor;
+      final double nh = st.startH * scaleFactor;
+      final double nx = anchorRight ? st.startX + (st.startW - nw) : st.startX;
+      final double ny = anchorBottom ? st.startY + (st.startH - nh) : st.startY;
+      _imageDragNotifier.value = (
+        id: img.id,
+        x: nx,
+        y: ny,
+        w: nw,
+        h: nh,
+      );
+    }
+
     return ValueListenableBuilder<
         ({String id, double x, double y, double w, double h})?>(
       valueListenable: _imageDragNotifier,
@@ -5463,21 +5620,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         final double y = draggingThis ? drag.y : img.y;
         final double w = draggingThis ? drag.w : img.width;
         final double h = draggingThis ? drag.h : img.height;
-        final double aspect = img.width / math.max(1.0, img.height);
-        final double minW = aspect >= 1.0 ? 32.0 * aspect : 32.0;
-
-        ({double w, double h}) scaleKeepingAspect(
-          double curW,
-          double curH,
-          double signedDx,
-          double signedDy,
-        ) {
-          final double rawW = signedDx.abs() >= signedDy.abs() * aspect
-              ? curW + signedDx
-              : (curH + signedDy) * aspect;
-          final double nw = math.max(minW, rawW);
-          return (w: nw, h: nw / aspect);
-        }
 
         // Expand Positioned bounds by 24px on all 4 sides when selected so all 8
         // 48x48 px stylus-friendly circular handles sit 100% INSIDE hit-test bounds!
@@ -5628,28 +5770,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       ),
                     ),
                     // 8 Resize Handles — 100% INSIDE the 24px-padded bounds, ABOVE body drag!
-                    // Top-Left (aspect-locked uniform corner scaling)
+                    // Top-Left (1:1 aspect-locked uniform corner scaling anchored at bottom-right)
                     Positioned(
                       left: 0,
                       top: 0,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
-                        onPanStart: (_) => beginDrag(),
-                        onPanUpdate: (d) => updateDrag((c) {
-                          final s = scaleKeepingAspect(
-                            c.w,
-                            c.h,
-                            -d.delta.dx,
-                            -d.delta.dy,
-                          );
-                          return (
-                            id: c.id,
-                            x: c.x + (c.w - s.w),
-                            y: c.y + (c.h - s.h),
-                            w: s.w,
-                            h: s.h,
-                          );
-                        }),
+                        onPanStart: beginCornerResize,
+                        onPanUpdate: (d) => updateCornerResize(
+                          d,
+                          signX: -1,
+                          signY: -1,
+                          anchorRight: true,
+                          anchorBottom: true,
+                        ),
                         onPanEnd: (_) => endDrag(),
                         onPanCancel: endDrag,
                         child: _buildResizeHandle(),
@@ -5677,28 +5811,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         child: _buildResizeHandle(),
                       ),
                     ),
-                    // Top-Right (aspect-locked uniform corner scaling)
+                    // Top-Right (1:1 aspect-locked uniform corner scaling anchored at bottom-left)
                     Positioned(
                       right: 0,
                       top: 0,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
-                        onPanStart: (_) => beginDrag(),
-                        onPanUpdate: (d) => updateDrag((c) {
-                          final s = scaleKeepingAspect(
-                            c.w,
-                            c.h,
-                            d.delta.dx,
-                            -d.delta.dy,
-                          );
-                          return (
-                            id: c.id,
-                            x: c.x,
-                            y: c.y + (c.h - s.h),
-                            w: s.w,
-                            h: s.h,
-                          );
-                        }),
+                        onPanStart: beginCornerResize,
+                        onPanUpdate: (d) => updateCornerResize(
+                          d,
+                          signX: 1,
+                          signY: -1,
+                          anchorRight: false,
+                          anchorBottom: true,
+                        ),
                         onPanEnd: (_) => endDrag(),
                         onPanCancel: endDrag,
                         child: _buildResizeHandle(),
@@ -5745,28 +5871,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         child: _buildResizeHandle(),
                       ),
                     ),
-                    // Bottom-Left (aspect-locked uniform corner scaling)
+                    // Bottom-Left (1:1 aspect-locked uniform corner scaling anchored at top-right)
                     Positioned(
                       left: 0,
                       bottom: 0,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
-                        onPanStart: (_) => beginDrag(),
-                        onPanUpdate: (d) => updateDrag((c) {
-                          final s = scaleKeepingAspect(
-                            c.w,
-                            c.h,
-                            -d.delta.dx,
-                            d.delta.dy,
-                          );
-                          return (
-                            id: c.id,
-                            x: c.x + (c.w - s.w),
-                            y: c.y,
-                            w: s.w,
-                            h: s.h,
-                          );
-                        }),
+                        onPanStart: beginCornerResize,
+                        onPanUpdate: (d) => updateCornerResize(
+                          d,
+                          signX: -1,
+                          signY: 1,
+                          anchorRight: true,
+                          anchorBottom: false,
+                        ),
                         onPanEnd: (_) => endDrag(),
                         onPanCancel: endDrag,
                         child: _buildResizeHandle(),
@@ -5791,28 +5909,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         child: _buildResizeHandle(),
                       ),
                     ),
-                    // Bottom-Right (aspect-locked uniform corner scaling)
+                    // Bottom-Right (1:1 aspect-locked uniform corner scaling anchored at top-left)
                     Positioned(
                       right: 0,
                       bottom: 0,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
-                        onPanStart: (_) => beginDrag(),
-                        onPanUpdate: (d) => updateDrag((c) {
-                          final s = scaleKeepingAspect(
-                            c.w,
-                            c.h,
-                            d.delta.dx,
-                            d.delta.dy,
-                          );
-                          return (
-                            id: c.id,
-                            x: c.x,
-                            y: c.y,
-                            w: s.w,
-                            h: s.h,
-                          );
-                        }),
+                        onPanStart: beginCornerResize,
+                        onPanUpdate: (d) => updateCornerResize(
+                          d,
+                          signX: 1,
+                          signY: 1,
+                          anchorRight: false,
+                          anchorBottom: false,
+                        ),
                         onPanEnd: (_) => endDrag(),
                         onPanCancel: endDrag,
                         child: _buildResizeHandle(),

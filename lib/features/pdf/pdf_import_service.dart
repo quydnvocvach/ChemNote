@@ -183,7 +183,7 @@ class PdfImportService {
 
         final pngBytes = await raster.toPng();
         final filePath =
-            '${targetDir.path}${Platform.pathSeparator}page_$pageNumber.png';
+            '${targetDir.path}${Platform.pathSeparator}${importBatchId}_page_$pageNumber.png';
         writeFutures.add(File(filePath).writeAsBytes(pngBytes, flush: true));
 
         final isLandscape = raster.width > raster.height;

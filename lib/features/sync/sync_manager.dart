@@ -510,13 +510,18 @@ class SyncManager extends ChangeNotifier {
     }
 
     final localIsNewer = local.updatedAt.isAfter(remote.updatedAt);
-    // Chỉ tạo bản sao xung đột khi CÓ mốc `lastSyncedAt` đã biết VÀ cả hai phía đều sửa
-    // sau mốc đó ít nhất 5 giây (tránh lệch đồng hồ Drive hoặc tạo bản sao thừa sau khi khởi động lại).
-    final bothChangedSinceLastSync = lastSyncedAt != null &&
+    final bool alreadyConflictCopy =
+        local.title.contains('(Bản sao xung đột)') ||
+        remote.title.contains('(Bản sao xung đột)');
+    // Chỉ tạo bản sao xung đột khi CÓ mốc `lastSyncedAt` đã biết, cả hai phía đều sửa
+    // sau mốc đó ít nhất 5 giây VÀ nội dung/tên thực sự khác nhau (tránh tạo bản sao thừa sau sự cố văng app).
+    final bothChangedSinceLastSync = !alreadyConflictCopy &&
+        lastSyncedAt != null &&
         local.updatedAt.isAfter(lastSyncedAt.add(const Duration(seconds: 5))) &&
         remote.updatedAt
             .isAfter(lastSyncedAt.add(const Duration(seconds: 5))) &&
-        local.updatedAt != remote.updatedAt;
+        local.updatedAt != remote.updatedAt &&
+        _hasMeaningfulDifference(local, remote);
 
     if (localIsNewer) {
       Notebook? backup;
@@ -564,6 +569,27 @@ class SyncManager extends ChangeNotifier {
         conflictBackupCopy: backup,
       );
     }
+  }
+
+  bool _hasMeaningfulDifference(Notebook a, Notebook b) {
+    if (a.title != b.title || a.isTrashed != b.isTrashed) return true;
+    if (a.pages.length != b.pages.length) return true;
+    for (int i = 0; i < a.pages.length; i++) {
+      final pa = a.pages[i];
+      final pb = b.pages[i];
+      if (pa.id != pb.id ||
+          pa.strokes.length != pb.strokes.length ||
+          pa.imageElements.length != pb.imageElements.length ||
+          pa.textElements.length != pb.textElements.length ||
+          pa.stickyNotes.length != pb.stickyNotes.length ||
+          pa.pdfBackgroundPath != pb.pdfBackgroundPath) {
+        return true;
+      }
+      if (pa.strokes.isNotEmpty && pa.strokes.last.id != pb.strokes.last.id) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /// Đồng bộ hai chiều ngay lập tức giữa máy và Google Drive (`JSON/`, `PDF/`, `Assets/`).
@@ -793,6 +819,7 @@ class SyncManager extends ChangeNotifier {
       );
       _pendingUploadIds.remove(notebook.id);
       _pendingSnapshots.remove(notebook.id);
+      await _setLastSyncedAt(DateTime.now());
     } catch (e) {
       await _appState?.updateNotebookSyncStatus(notebook.id, SyncStatus.error);
       rethrow;
@@ -806,18 +833,18 @@ class SyncManager extends ChangeNotifier {
     for (final page in notebook.pages) {
       final pdfBg = page.pdfBackgroundPath;
       if (pdfBg != null && pdfBg.isNotEmpty) {
-        final name = _basename(pdfBg);
+        final remoteName = remoteAssetKeyForPath(pdfBg, notebookId: notebook.id);
         try {
           await _driveService.uploadAssetFileIfMissing(
             File(pdfBg),
-            name,
+            remoteName,
             remoteAssetNames,
           );
         } catch (_) {}
       }
       for (final img in page.imageElements) {
         if (img.filePath.isEmpty) continue;
-        final name = _basename(img.filePath);
+        final name = remoteAssetKeyForPath(img.filePath, notebookId: notebook.id);
         try {
           await _driveService.uploadAssetFileIfMissing(
             File(img.filePath),
@@ -857,13 +884,15 @@ class SyncManager extends ChangeNotifier {
       if (pdfBgPath != null &&
           pdfBgPath.isNotEmpty &&
           !await File(pdfBgPath).exists()) {
-        final name = _basename(pdfBgPath);
-        final driveId = remoteAssets[name];
+        final uniqueKey =
+            remoteAssetKeyForPath(pdfBgPath, notebookId: notebook.id);
+        final legacyName = _basename(pdfBgPath);
+        final driveId = remoteAssets[uniqueKey] ?? remoteAssets[legacyName];
         if (driveId != null) {
           try {
             final root = await resolveRootDir();
             final localDest =
-                '${root.path}${Platform.pathSeparator}pdfs${Platform.pathSeparator}$name';
+                '${root.path}${Platform.pathSeparator}pdfs${Platform.pathSeparator}$uniqueKey';
             if (!await File(localDest).exists()) {
               await _driveService.downloadAssetFile(driveId, localDest);
             }
@@ -877,13 +906,15 @@ class SyncManager extends ChangeNotifier {
       final updatedImages = <ImageElement>[];
       for (final img in page.imageElements) {
         if (img.filePath.isNotEmpty && !await File(img.filePath).exists()) {
-          final name = _basename(img.filePath);
-          final driveId = remoteAssets[name];
+          final uniqueKey =
+              remoteAssetKeyForPath(img.filePath, notebookId: notebook.id);
+          final driveId =
+              remoteAssets[uniqueKey] ?? remoteAssets[_basename(img.filePath)];
           if (driveId != null) {
             try {
               final root = await resolveRootDir();
               final localDest =
-                  '${root.path}${Platform.pathSeparator}images${Platform.pathSeparator}$name';
+                  '${root.path}${Platform.pathSeparator}images${Platform.pathSeparator}$uniqueKey';
               if (!await File(localDest).exists()) {
                 await _driveService.downloadAssetFile(driveId, localDest);
               }
@@ -910,6 +941,31 @@ class SyncManager extends ChangeNotifier {
     }
 
     return changed ? notebook.copyWith(pages: updatedPages) : notebook;
+  }
+
+  /// Tạo khóa tệp tài nguyên duy nhất trên Google Drive `Assets/` để tránh
+  /// trùng tên `page_1.png`, `page_94.png` giữa nhiều tài liệu PDF khác nhau.
+  static String remoteAssetKeyForPath(
+    String localPath, {
+    required String notebookId,
+  }) {
+    final normalized = localPath.replaceAll('\\', '/');
+    final parts = normalized.split('/').where((s) => s.isNotEmpty).toList();
+    final fileName = parts.isNotEmpty ? parts.last : normalized;
+    final pdfPagesIdx = parts.lastIndexOf('pdf_pages');
+    if (pdfPagesIdx >= 0 && pdfPagesIdx + 2 < parts.length) {
+      final batchId = parts[pdfPagesIdx + 1];
+      if (batchId.isNotEmpty && !fileName.startsWith('${batchId}_')) {
+        return '${batchId}_$fileName';
+      }
+      return fileName;
+    }
+    if (RegExp(r'^page_\d+\.').hasMatch(fileName) &&
+        notebookId.isNotEmpty &&
+        !fileName.startsWith('${notebookId}_')) {
+      return '${notebookId}_$fileName';
+    }
+    return fileName;
   }
 
   String _basename(String path) {

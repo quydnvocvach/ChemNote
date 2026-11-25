@@ -194,5 +194,68 @@ void main() {
       expect(challenge.contains('+'), isFalse);
       expect(challenge.contains('/'), isFalse);
     });
+
+    test('remoteAssetKeyForPath prevents collisions between multiple PDF batches', () {
+      final keyA = SyncManager.remoteAssetKeyForPath(
+        '/data/user/0/com.chemnote.app/app_flutter/chemnote/pdf_pages/batch-A/page_1.png',
+        notebookId: 'nb-a',
+      );
+      final keyB = SyncManager.remoteAssetKeyForPath(
+        '/data/user/0/com.chemnote.app/app_flutter/chemnote/pdf_pages/batch-B/page_1.png',
+        notebookId: 'nb-b',
+      );
+      expect(keyA, 'batch-A_page_1.png');
+      expect(keyB, 'batch-B_page_1.png');
+      expect(keyA, isNot(equals(keyB)));
+
+      final alreadyPrefixed = SyncManager.remoteAssetKeyForPath(
+        r'C:\chemnote\pdf_pages\batch-C\batch-C_page_94.png',
+        notebookId: 'nb-c',
+      );
+      expect(alreadyPrefixed, 'batch-C_page_94.png');
+    });
+
+    test('resolveConflict skips false conflict copy when identical or already conflict backup', () {
+      final lastSync = DateTime.utc(2026, 5, 1, 10, 0, 0);
+      final localSame = _makeNotebook(
+        id: 'nb-same',
+        title: 'Hóa phân tích',
+        updatedAt: DateTime.utc(2026, 5, 1, 10, 10, 0),
+        driveFileId: 'drive-same',
+      );
+      final remoteSame = _makeNotebook(
+        id: 'nb-same',
+        title: 'Hóa phân tích',
+        updatedAt: DateTime.utc(2026, 5, 1, 10, 20, 0),
+        driveFileId: 'drive-same',
+      );
+
+      final resSame = manager.resolveConflict(
+        local: localSame,
+        remote: remoteSame,
+        lastSyncedAt: lastSync,
+      );
+      expect(resSame.winner, ConflictWinner.remote);
+      expect(resSame.conflictBackupCopy, isNull);
+
+      final localBackup = _makeNotebook(
+        id: 'nb-copy',
+        title: 'Sổ tay (Bản sao xung đột)',
+        updatedAt: DateTime.utc(2026, 5, 1, 10, 10, 0),
+        driveFileId: 'drive-copy',
+      );
+      final remoteBackup = _makeNotebook(
+        id: 'nb-copy',
+        title: 'Sổ tay (Bản sao xung đột) v2',
+        updatedAt: DateTime.utc(2026, 5, 1, 10, 20, 0),
+        driveFileId: 'drive-copy',
+      );
+      final resBackup = manager.resolveConflict(
+        local: localBackup,
+        remote: remoteBackup,
+        lastSyncedAt: lastSync,
+      );
+      expect(resBackup.conflictBackupCopy, isNull);
+    });
   });
 }
