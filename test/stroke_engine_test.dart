@@ -213,11 +213,11 @@ void main() {
       expect(rTilted, greaterThan(rUpright));
     });
 
-    test('detects tuned scribble-to-erase zig-zag (>=4 reversals) and ignores short handwriting waves', () {
-      // Create a 5-pass back-and-forth scribble (4 sharp reversals > 130 deg, ~120px segments)
+    test('detects tuned scribble-to-erase zig-zag (>=3 reversals / 4 passes) and ignores short handwriting waves', () {
+      // Create a 4-pass back-and-forth scribble (3 sharp reversals > 130 deg, ~120px segments)
       final scribble = <StrokePoint>[];
       int ts = 1000;
-      const passes = 5;
+      const passes = 4;
       for (int pass = 0; pass < passes; pass++) {
         final xStart = (pass % 2 == 0) ? 100.0 : 220.0;
         final xEnd = (pass % 2 == 0) ? 220.0 : 100.0;

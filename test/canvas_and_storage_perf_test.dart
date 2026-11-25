@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 import 'package:chemnote/core/models/drawing_elements.dart';
 import 'package:chemnote/core/models/note_page.dart';
 import 'package:chemnote/core/models/notebook.dart';
+import 'package:chemnote/core/providers/app_state.dart';
 import 'package:chemnote/core/storage/local_storage_service.dart';
 import 'package:chemnote/features/canvas/canvas_painter.dart';
 import 'package:flutter/material.dart';
@@ -172,6 +173,51 @@ void main() {
       expect(loaded.first.id, 'nb-large');
       expect(loaded.first.pages.first.strokes.first.points.length, 900);
       expect(loaded.last.id, 'nb-small');
+    });
+
+    test('AppState supports insertPagesAt, reorderPages, toggleBookmark & deletePages', () async {
+      final storage = LocalStorageService(baseDirectory: tempDir);
+      final appState = AppState(storage: storage);
+      final now = DateTime.utc(2026, 11, 25);
+      final nb = await appState.createNotebook(
+        title: 'Sổ thử trang',
+        initialPages: [
+          NotePage(id: 'p1', index: 0, title: 'T1', updatedAt: now),
+          NotePage(id: 'p2', index: 1, title: 'T2', updatedAt: now),
+          NotePage(id: 'p3', index: 2, title: 'T3', updatedAt: now),
+        ],
+      );
+
+      // Insert duplicated page after p1 (index 1)
+      await appState.insertPagesAt(
+        nb.id,
+        [NotePage(id: 'p1_copy', index: 0, title: 'T1 Copy', updatedAt: now)],
+        insertIndex: 1,
+      );
+      var updated = appState.getNotebookById(nb.id)!;
+      expect(updated.pages.map((p) => p.id).toList(), ['p1', 'p1_copy', 'p2', 'p3']);
+      expect(updated.pages.map((p) => p.index).toList(), [0, 1, 2, 3]);
+
+      // Reorder p3 (index 3) -> index 0
+      await appState.reorderPages(nb.id, 3, 0);
+      updated = appState.getNotebookById(nb.id)!;
+      expect(updated.pages.map((p) => p.id).toList(), ['p3', 'p1', 'p1_copy', 'p2']);
+
+      // Toggle bookmark on p1
+      await appState.toggleBookmark(nb.id, 'p1');
+      updated = appState.getNotebookById(nb.id)!;
+      expect(updated.pages[1].isBookmarked, isTrue);
+
+      // Batch delete p1_copy & p2
+      await appState.deletePages(nb.id, {'p1_copy', 'p2'});
+      updated = appState.getNotebookById(nb.id)!;
+      expect(updated.pages.map((p) => p.id).toList(), ['p3', 'p1']);
+      expect(updated.pages.map((p) => p.index).toList(), [0, 1]);
+
+      // Deleting all pages preserves at least 1 page safely
+      await appState.deletePages(nb.id, {'p3', 'p1'});
+      updated = appState.getNotebookById(nb.id)!;
+      expect(updated.pages.length, 1);
     });
   });
 }

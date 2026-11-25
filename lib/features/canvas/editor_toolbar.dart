@@ -132,6 +132,13 @@ class EditorColors {
   static const Color obsidianBg = Color(0xFF0B0C10);
   static const Color obsidianSurface = Color(0xFF16181D);
   static const Color obsidianPill = Color(0xFF22252E);
+  static const Color lightBackdrop = Color(0xFFE3DFD6);
+  static const Color lightSurface = Color(0xFFF6F4EE);
+  static const Color lightToolbar = Color(0xFFF0EDE6);
+  static const Color lightPill = Color(0xFFE5E0D6);
+  static const Color lightBorder = Color(0xFFD6D0C4);
+  static const Color lightTextPrimary = Color(0xFF1F2329);
+  static const Color lightTextMuted = Color(0xFF5F6670);
   static const Color activeBlue = Color(0xFF3B82F6);
   static const Color starGold = Color(0xFFFACC15);
 
@@ -192,12 +199,14 @@ class EditorTabBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final bg = isDark ? EditorColors.obsidianSurface : Colors.white;
-    final pillBg = isDark ? EditorColors.obsidianPill : const Color(0xFFF1F5F9);
+    final bg = isDark ? EditorColors.obsidianSurface : EditorColors.lightSurface;
+    final pillBg = isDark ? EditorColors.obsidianPill : EditorColors.lightPill;
     final border =
-        isDark ? Colors.white.withAlpha(20) : Colors.black.withAlpha(18);
-    final fg = isDark ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A);
-    final muted = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
+        isDark ? Colors.white.withAlpha(20) : EditorColors.lightBorder;
+    final fg =
+        isDark ? const Color(0xFFF1F5F9) : EditorColors.lightTextPrimary;
+    final muted =
+        isDark ? const Color(0xFF94A3B8) : EditorColors.lightTextMuted;
 
     return Container(
       color: bg,
@@ -504,10 +513,11 @@ class EditorToolBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final bg = isDark ? EditorColors.obsidianSurface : const Color(0xFFF8FAFC);
+    final bg = isDark ? EditorColors.obsidianSurface : EditorColors.lightToolbar;
     final border =
-        isDark ? Colors.white.withAlpha(18) : Colors.black.withAlpha(16);
-    final fg = isDark ? const Color(0xFFE2E8F0) : const Color(0xFF1E293B);
+        isDark ? Colors.white.withAlpha(18) : EditorColors.lightBorder;
+    final fg =
+        isDark ? const Color(0xFFE2E8F0) : EditorColors.lightTextPrimary;
 
     final quickColors = activeTool == EditorTool.highlighter
         ? EditorColors.highlighterSwatches.take(3).toList()
@@ -903,8 +913,8 @@ class _QuickPenFavoritesDockState extends State<QuickPenFavoritesDock> {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final dockBg = isDark
         ? EditorColors.obsidianSurface.withAlpha(232)
-        : Colors.white.withAlpha(240);
-    final border = isDark ? Colors.white12 : Colors.black12;
+        : EditorColors.lightSurface.withAlpha(242);
+    final border = isDark ? Colors.white12 : EditorColors.lightBorder;
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 180),
@@ -2208,7 +2218,8 @@ class EditorSettingsDrawer extends StatelessWidget {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     return Drawer(
       width: 320,
-      backgroundColor: isDark ? EditorColors.obsidianSurface : Colors.white,
+      backgroundColor:
+          isDark ? EditorColors.obsidianSurface : EditorColors.lightSurface,
       child: SafeArea(
         child: ListView(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -2551,9 +2562,9 @@ class AudioReplayBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final bg = isDark ? EditorColors.obsidianSurface : Colors.white;
+    final bg = isDark ? EditorColors.obsidianSurface : EditorColors.lightToolbar;
     final border =
-        isDark ? Colors.white.withAlpha(20) : Colors.black.withAlpha(18);
+        isDark ? Colors.white.withAlpha(20) : EditorColors.lightBorder;
     final maxMs = recording.durationMs > 0 ? recording.durationMs : 1000;
     final clampedPos = positionMs.clamp(0, maxMs);
 
@@ -2746,9 +2757,9 @@ class AudioLiveRecordingBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final bg = isDark ? EditorColors.obsidianSurface : Colors.white;
+    final bg = isDark ? EditorColors.obsidianSurface : EditorColors.lightToolbar;
     final border =
-        isDark ? Colors.white.withAlpha(20) : Colors.black.withAlpha(18);
+        isDark ? Colors.white.withAlpha(20) : EditorColors.lightBorder;
 
     return Container(
       height: 44,

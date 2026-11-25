@@ -160,21 +160,22 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.7.5 with APK
+      - name: Publish Release v3.7.6 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.7.5
-          name: ChemNote Pro v3.7.5 (Tối ưu độ mượt 144Hz toàn diện trên mọi tác vụ viết, cuộn, audio, lưu nền & thư viện)
+          tag_name: v3.7.6
+          name: ChemNote Pro v3.7.6 (Quản lý Danh sách trang đa năng, Giao diện Nền sáng dịu mắt & Gạch xóa 4 nét)
           body: |
-            ### ChemNote Pro v3.7.5 — Mượt mà tối đa 144Hz trên toàn bộ ứng dụng!
-            - **Viết & Vẽ nét 144Hz không giật ([canvas_painter.dart](lib/features/canvas/canvas_painter.dart), [note_editor_screen.dart](lib/features/canvas/note_editor_screen.dart)):**
-              - Bộ nhớ đệm hình học `Expando` cho từng `Stroke` đã viết (cache sẵn đường dẫn mượt, AABB `strokeBounds` và gộp các đoạn bút máy/cọ/chì đồng độ dày `±0.14px` thành ít `Path` hơn **4×–15×** mỗi khung hình), loại bỏ sao chép mảng điểm `O(N²)` khi đang kéo bút bằng bộ đệm `_liveStrokePoints`.
-              - Kích hoạt tạm hoãn tự động lưu nền (`setStylusDrawingActive`) trong lúc bút M-Pencil đang chạm màn hình.
-            - **Cuộn, Xóa & Phát Audio/Ghi âm không làm rebuild cây UI:**
-              - Đổi đồng hồ ghi âm (`500ms`) và đồng bộ phát Audio (`80ms`) sang `ValueNotifier` (`_recordingElapsedMsNotifier`, `_audioPositionMsNotifier`) — cập nhật trực tiếp thanh Audio và `CanvasPainter` mà không gọi `setState()` toàn màn hình Editor.
-              - Đệm hóa tọa độ Y tích lũy của từng trang (`_ensureVerticalLayoutCache`) + tìm kiếm nhị phân `O(log N)` vị trí trang khi cuộn, xóa bỏ vòng lặp 800 trang mỗi khung hình.
-            - **Khởi động, Lưu trữ Isolate & Thư viện sổ tay siêu nhẹ ([local_storage_service.dart](lib/core/storage/local_storage_service.dart), [app_state.dart](lib/core/providers/app_state.dart), [main.dart](lib/main.dart)):**
-              - Đẩy cả `notebook.toJson()` + `jsonEncode()` ra Isolate phụ (`compute`), giải mã song song theo lô khi khởi động (`loadAll` chạy `Future.wait`), mở rộng `imageCache` (`250` ảnh / `160 MB`), bọc `RepaintBoundary` từng bìa sổ và thêm `cacheWidth` + `cacheExtent: 420` cho kệ sách & chọn bìa.
+            ### ChemNote Pro v3.7.6 — Quản lý trang chuyên nghiệp, Nền sáng Warm Paper-Stone dịu mắt & Gạch xóa nhanh nhạy hơn!
+            - **Nâng cấp toàn diện Danh sách trang (`_openPageGridModal`):**
+              - **Đổi thứ tự trang trực tiếp:** Kéo biểu tượng góc trái trên từng thẻ trang để kéo-thả sang vị trí mới trong sổ tay.
+              - **Đánh dấu & lọc trang đánh dấu:** Chạm biểu tượng dấu trang ngay ở góc phải từng thẻ để bật/tắt đánh dấu và dùng nút lọc trên tiêu đề để xem riêng các trang đã đánh dấu.
+              - **Chọn nhiều trang (Nhấn giữ bất kỳ trang nào hoặc bấm "Chọn"):** Hiện ô chọn tròn ở góc trên bên trái mọi trang để chọn 1 hoặc nhiều trang, hỗ trợ **Sao chép → Dán**, **Nhân bản**, **Xuất PDF riêng các trang đã chọn**, hoặc **Xóa hàng loạt** (luôn giữ tối thiểu 1 trang).
+            - **Tinh chỉnh Giao diện Nền Sáng dịu mắt (`Warm Paper-Stone`):**
+              - Thay thế nền trắng chói `#FFFFFF` bằng bảng màu **giấy ấm / đá nhạt chống lóa (`#EEECE6`, `#F6F4EE`, `#E7E3DA`, `#D6D0C4`)** hài hòa trên màn hình PaperMatte cả ở Thư viện, Thanh tab, Thanh công cụ, Ngăn cài đặt, Thanh Audio và Nền vùng viết (`#E3DFD6`).
+            - **Gạch xóa nhanh (Scribble-to-Erase) nhạy còn 4 nét:**
+              - Giảm ngưỡng từ 5 lượt qua lại (`>= 4` lần đảo chiều) xuống **4 lượt qua lại (`>= 3` lần đảo chiều, `1.85×` đường chéo)** trong `StrokeEngine.isScribbleGesture` để gạch xóa tự nhiên mà không xóa nhầm chữ viết thường.
+            - **Kèm trọn vẹn toàn bộ tối ưu độ mượt từ v3.7.5.**
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

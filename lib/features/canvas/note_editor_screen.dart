@@ -2280,9 +2280,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         barrierDismissible: false,
         builder: (dialogCtx) {
           final isDark = Theme.of(dialogCtx).brightness == Brightness.dark;
-          final bg = isDark ? EditorColors.obsidianSurface : Colors.white;
-          final fg = isDark ? Colors.white : const Color(0xFF0F172A);
-          final sub = isDark ? Colors.white70 : const Color(0xFF475569);
+          final bg =
+              isDark ? EditorColors.obsidianSurface : EditorColors.lightSurface;
+          final fg =
+              isDark ? Colors.white : EditorColors.lightTextPrimary;
+          final sub =
+              isDark ? Colors.white70 : EditorColors.lightTextMuted;
           return PopScope(
             canPop: false,
             child: AlertDialog(
@@ -2958,6 +2961,19 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   // MODALS: TAB PICKER & PAGE GRID / OUTLINE
   // ===========================================================================
 
+  static List<NotePage> _copiedPagesClipboard = <NotePage>[];
+
+  List<NotePage> _clonePagesForPaste(List<NotePage> sources) {
+    final now = DateTime.now();
+    return [
+      for (final src in sources)
+        NotePage.fromJson(src.toJson()).copyWith(
+          id: _uuid.v4(),
+          updatedAt: now,
+        ),
+    ];
+  }
+
   void _openTabPickerModal(AppState appState) {
     showModalBottomSheet<void>(
       context: context,
@@ -3002,267 +3018,837 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   }
 
   void _openPageGridModal(Notebook notebook) {
+    bool selectionMode = false;
+    final Set<String> selectedPageIds = <String>{};
+    bool showBookmarkedOnly = false;
+
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
       showDragHandle: true,
-      builder: (ctx) => FractionallySizedBox(
-        heightFactor: 0.78,
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-              child: Row(
+      builder: (ctx) => StatefulBuilder(
+        builder: (modalCtx, setModalState) {
+          final appState = modalCtx.watch<AppState>();
+          final liveNotebook = appState.getNotebookById(notebook.id) ?? notebook;
+          final isDark = Theme.of(modalCtx).brightness == Brightness.dark;
+          final cardBorderMuted =
+              isDark ? Colors.white24 : EditorColors.lightBorder;
+          final cardFooterBg =
+              isDark ? EditorColors.obsidianSurface : EditorColors.lightToolbar;
+          final mutedText =
+              isDark ? Colors.white70 : EditorColors.lightTextMuted;
+
+          final validIds = liveNotebook.pages.map((p) => p.id).toSet();
+          selectedPageIds.removeWhere((id) => !validIds.contains(id));
+
+          final visibleEntries = <({int originalIndex, NotePage page})>[
+            for (int idx = 0; idx < liveNotebook.pages.length; idx++)
+              if (!showBookmarkedOnly || liveNotebook.pages[idx].isBookmarked)
+                (originalIndex: idx, page: liveNotebook.pages[idx]),
+          ];
+
+          List<NotePage> selectedPagesOrdered() => [
+                for (final pg in liveNotebook.pages)
+                  if (selectedPageIds.contains(pg.id)) pg,
+              ];
+
+          Widget buildPageCardBody({
+            required NotePage p,
+            required int origIdx,
+            required bool isCur,
+            required bool isSelected,
+            bool isDropHover = false,
+          }) {
+            final bool highlight =
+                isDropHover || (selectionMode ? isSelected : isCur);
+            final Color borderColor = highlight
+                ? EditorColors.activeBlue
+                : cardBorderMuted;
+            final double borderWidth = highlight ? 2.4 : 1.0;
+
+            final dragHandleBadge = Container(
+              width: 26,
+              height: 26,
+              decoration: BoxDecoration(
+                color: Colors.black.withAlpha(115),
+                borderRadius: BorderRadius.circular(7),
+              ),
+              child: const Icon(
+                Icons.drag_indicator_rounded,
+                size: 16,
+                color: Colors.white,
+              ),
+            );
+
+            return Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: borderColor,
+                  width: borderWidth,
+                ),
+              ),
+              child: Column(
                 children: [
-                  const Icon(Icons.grid_view_rounded, size: 20),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Danh sách trang (${notebook.pages.length})',
-                    style: const TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.w700),
+                  Expanded(
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: ClipRRect(
+                            borderRadius: const BorderRadius.vertical(
+                              top: Radius.circular(8),
+                            ),
+                            child: () {
+                              final thumbSize = PaperMetrics.pageSize(
+                                isLandscape: p.isLandscape,
+                              );
+                              return RepaintBoundary(
+                                child: FittedBox(
+                                  fit: BoxFit.contain,
+                                  child: SizedBox(
+                                    width: thumbSize.width,
+                                    height: thumbSize.height,
+                                    child: IgnorePointer(
+                                      child: Stack(
+                                        children: [
+                                          Positioned.fill(
+                                            child: (p.pdfBackgroundPath !=
+                                                        null &&
+                                                    _pdfImageCache[p
+                                                            .pdfBackgroundPath!] ==
+                                                        null)
+                                                ? ColoredBox(
+                                                    color: Colors.white,
+                                                    child: Image.file(
+                                                      File(p.pdfBackgroundPath!),
+                                                      fit: BoxFit.contain,
+                                                      cacheWidth: liveNotebook
+                                                                  .pages
+                                                                  .length <=
+                                                              80
+                                                          ? 720
+                                                          : 480,
+                                                      filterQuality:
+                                                          FilterQuality.medium,
+                                                      gaplessPlayback: true,
+                                                      errorBuilder: (
+                                                        _,
+                                                        __,
+                                                        ___,
+                                                      ) =>
+                                                          const SizedBox
+                                                              .shrink(),
+                                                    ),
+                                                  )
+                                                : CustomPaint(
+                                                    size: thumbSize,
+                                                    painter: CanvasPainter(
+                                                      page: p,
+                                                      pdfBackgroundImage:
+                                                          p.pdfBackgroundPath !=
+                                                                  null
+                                                              ? _pdfImageCache[p
+                                                                  .pdfBackgroundPath!]
+                                                              : null,
+                                                      elementImageCache:
+                                                          _elementImageCache,
+                                                      repaintVersion:
+                                                          _repaintVersion,
+                                                    ),
+                                                  ),
+                                          ),
+                                          for (final txt in p.textElements)
+                                            Positioned(
+                                              left: txt.x,
+                                              top: txt.y,
+                                              width: txt.width,
+                                              child: Text(
+                                                txt.text,
+                                                style: TextStyle(
+                                                  color: Color(txt.colorValue),
+                                                  fontSize: txt.fontSize,
+                                                ),
+                                              ),
+                                            ),
+                                          for (final st in p.stickyNotes)
+                                            Positioned(
+                                              left: st.x,
+                                              top: st.y,
+                                              width: st.isCollapsed
+                                                  ? math.min(st.width, 210.0)
+                                                  : st.width,
+                                              height: st.isCollapsed
+                                                  ? 40.0
+                                                  : st.height,
+                                              child: Container(
+                                                decoration: BoxDecoration(
+                                                  color: Color(st.colorValue),
+                                                  borderRadius:
+                                                      BorderRadius.circular(10),
+                                                  border: Border.all(
+                                                    color: Colors.black26,
+                                                  ),
+                                                ),
+                                                child: st.isCollapsed
+                                                    ? null
+                                                    : CustomPaint(
+                                                        painter:
+                                                            _StickyCanvasPainter(
+                                                          strokes: st.strokes,
+                                                          activeStrokeNotifier:
+                                                              _activeStickyStrokeNotifier,
+                                                          noteId: st.id,
+                                                          getActiveNoteId: () =>
+                                                              null,
+                                                        ),
+                                                      ),
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }(),
+                          ),
+                        ),
+                        // Top-left corner: Selection checkbox OR Drag-to-reorder handle
+                        if (selectionMode)
+                          Positioned(
+                            top: 5,
+                            left: 5,
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 120),
+                              width: 24,
+                              height: 24,
+                              decoration: BoxDecoration(
+                                color: isSelected
+                                    ? EditorColors.activeBlue
+                                    : Colors.black.withAlpha(120),
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: Colors.white,
+                                  width: 1.6,
+                                ),
+                              ),
+                              child: isSelected
+                                  ? const Icon(
+                                      Icons.check_rounded,
+                                      size: 15,
+                                      color: Colors.white,
+                                    )
+                                  : null,
+                            ),
+                          )
+                        else if (!showBookmarkedOnly &&
+                            liveNotebook.pages.length > 1)
+                          Positioned(
+                            top: 5,
+                            left: 5,
+                            child: Tooltip(
+                              message: 'Kéo để đổi vị trí trang',
+                              child: Draggable<int>(
+                                data: origIdx,
+                                feedback: Material(
+                                  elevation: 8,
+                                  borderRadius: BorderRadius.circular(10),
+                                  color: cardFooterBg,
+                                  child: Container(
+                                    width: 108,
+                                    height: 68,
+                                    alignment: Alignment.center,
+                                    padding: const EdgeInsets.all(8),
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(
+                                        color: EditorColors.activeBlue,
+                                        width: 2,
+                                      ),
+                                    ),
+                                    child: Text(
+                                      'Trang ${origIdx + 1}',
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                        fontSize: 13,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                childWhenDragging: Opacity(
+                                  opacity: 0.35,
+                                  child: dragHandleBadge,
+                                ),
+                                child: dragHandleBadge,
+                              ),
+                            ),
+                          ),
+                        // Top-right corner: Interactive Bookmark toggle
+                        Positioned(
+                          top: 4,
+                          right: 4,
+                          child: Material(
+                            color: Colors.black.withAlpha(
+                              p.isBookmarked ? 130 : 85,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(8),
+                              onTap: () => appState.toggleBookmark(
+                                liveNotebook.id,
+                                p.id,
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.all(4),
+                                child: Icon(
+                                  p.isBookmarked
+                                      ? Icons.bookmark_rounded
+                                      : Icons.bookmark_border_rounded,
+                                  size: 17,
+                                  color: p.isBookmarked
+                                      ? const Color(0xFFF59E0B)
+                                      : Colors.white,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                  const Spacer(),
-                  FilledButton.icon(
-                    onPressed: () async {
-                      Navigator.pop(ctx);
-                      final last = notebook.pages.last;
-                      await context.read<AppState>().addPage(
-                            notebook.id,
-                            templateType: last.templateType,
-                            paperColor: last.paperColor,
-                            isLandscape: last.isLandscape,
-                          );
-                      if (mounted) _jumpToPage(notebook.pages.length);
-                    },
-                    icon: const Icon(Icons.add_rounded, size: 18),
-                    label: const Text('Thêm trang'),
+                  Container(
+                    decoration: BoxDecoration(
+                      color: cardFooterBg,
+                      borderRadius: const BorderRadius.vertical(
+                        bottom: Radius.circular(9),
+                      ),
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 6,
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          'Trang ${origIdx + 1}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: (isCur || isSelected)
+                                ? FontWeight.w700
+                                : FontWeight.w500,
+                          ),
+                        ),
+                        if (!selectionMode && liveNotebook.pages.length > 1)
+                          GestureDetector(
+                            onTap: () async {
+                              await appState.deletePage(liveNotebook.id, p.id);
+                              if (mounted &&
+                                  _currentPageIndex >=
+                                      liveNotebook.pages.length - 1) {
+                                setState(() {
+                                  _currentPageIndex = math.max(
+                                    0,
+                                    liveNotebook.pages.length - 2,
+                                  );
+                                  _renderedWindowCenter = _currentPageIndex;
+                                });
+                              }
+                            },
+                            child: const Icon(
+                              Icons.delete_outline_rounded,
+                              size: 16,
+                              color: Color(0xFFEF4444),
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                 ],
               ),
-            ),
-            Expanded(
-              child: GridView.builder(
-                padding: const EdgeInsets.all(16),
-                cacheExtent: 360,
-                gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                  maxCrossAxisExtent: 170,
-                  mainAxisSpacing: 14,
-                  crossAxisSpacing: 14,
-                  childAspectRatio: 0.72,
-                ),
-                itemCount: notebook.pages.length,
-                itemBuilder: (c, i) {
-                  final p = notebook.pages[i];
-                  final isCur = i == _currentPageIndex;
-                  return InkWell(
-                    onTap: () {
-                      Navigator.pop(ctx);
-                      _jumpToPage(i);
-                    },
-                    borderRadius: BorderRadius.circular(10),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: isCur
-                              ? EditorColors.activeBlue
-                              : Colors.white24,
-                          width: isCur ? 2.4 : 1.0,
+            );
+          }
+
+          return FractionallySizedBox(
+            heightFactor: 0.84,
+            child: Column(
+              children: [
+                // Header
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 6,
+                  ),
+                  child: selectionMode
+                      ? Row(
+                          children: [
+                            const Icon(
+                              Icons.check_circle_outline_rounded,
+                              size: 20,
+                              color: EditorColors.activeBlue,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Đã chọn ${selectedPageIds.length}/${liveNotebook.pages.length} trang',
+                                style: const TextStyle(
+                                  fontSize: 15.5,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () {
+                                setModalState(() {
+                                  final allVisibleSelected =
+                                      visibleEntries.isNotEmpty &&
+                                          visibleEntries.every(
+                                            (e) => selectedPageIds
+                                                .contains(e.page.id),
+                                          );
+                                  if (allVisibleSelected) {
+                                    selectedPageIds.clear();
+                                  } else {
+                                    for (final e in visibleEntries) {
+                                      selectedPageIds.add(e.page.id);
+                                    }
+                                  }
+                                });
+                              },
+                              child: Text(
+                                visibleEntries.isNotEmpty &&
+                                        visibleEntries.every(
+                                          (e) => selectedPageIds
+                                              .contains(e.page.id),
+                                        )
+                                    ? 'Bỏ chọn'
+                                    : 'Chọn hết',
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            FilledButton(
+                              onPressed: () {
+                                setModalState(() {
+                                  selectionMode = false;
+                                  selectedPageIds.clear();
+                                });
+                              },
+                              child: const Text('Xong'),
+                            ),
+                          ],
+                        )
+                      : Row(
+                          children: [
+                            const Icon(Icons.grid_view_rounded, size: 20),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Danh sách trang (${liveNotebook.pages.length})',
+                                style: const TextStyle(
+                                  fontSize: 15.5,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: showBookmarkedOnly
+                                  ? 'Hiện tất cả trang'
+                                  : 'Lọc trang đã đánh dấu',
+                              icon: Icon(
+                                showBookmarkedOnly
+                                    ? Icons.bookmark_rounded
+                                    : Icons.bookmark_border_rounded,
+                                color: showBookmarkedOnly
+                                    ? const Color(0xFFF59E0B)
+                                    : mutedText,
+                              ),
+                              onPressed: () => setModalState(
+                                () => showBookmarkedOnly = !showBookmarkedOnly,
+                              ),
+                            ),
+                            if (_copiedPagesClipboard.isNotEmpty)
+                              TextButton.icon(
+                                onPressed: () async {
+                                  final pasted = _clonePagesForPaste(
+                                    _copiedPagesClipboard,
+                                  );
+                                  final insertPos = (_currentPageIndex + 1)
+                                      .clamp(0, liveNotebook.pages.length);
+                                  await appState.insertPagesAt(
+                                    liveNotebook.id,
+                                    pasted,
+                                    insertIndex: insertPos,
+                                  );
+                                  if (mounted) {
+                                    setState(() {
+                                      _currentPageIndex = insertPos;
+                                      _renderedWindowCenter = insertPos;
+                                    });
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          'Đã dán ${pasted.length} trang sau trang $insertPos',
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                },
+                                icon: const Icon(
+                                  Icons.content_paste_rounded,
+                                  size: 17,
+                                ),
+                                label: Text(
+                                  'Dán (${_copiedPagesClipboard.length})',
+                                ),
+                              ),
+                            OutlinedButton.icon(
+                              onPressed: () {
+                                setModalState(() {
+                                  selectionMode = true;
+                                });
+                              },
+                              icon: const Icon(
+                                Icons.checklist_rounded,
+                                size: 17,
+                              ),
+                              label: const Text('Chọn'),
+                            ),
+                            const SizedBox(width: 6),
+                            FilledButton.icon(
+                              onPressed: () async {
+                                Navigator.pop(ctx);
+                                final last = liveNotebook.pages.last;
+                                await appState.addPage(
+                                  liveNotebook.id,
+                                  templateType: last.templateType,
+                                  paperColor: last.paperColor,
+                                  isLandscape: last.isLandscape,
+                                );
+                                if (mounted) {
+                                  _jumpToPage(liveNotebook.pages.length);
+                                }
+                              },
+                              icon: const Icon(Icons.add_rounded, size: 18),
+                              label: const Text('Thêm'),
+                            ),
+                          ],
                         ),
+                ),
+                // Hint line in normal mode
+                if (!selectionMode && liveNotebook.pages.length > 1)
+                  Padding(
+                    padding: const EdgeInsets.only(
+                      left: 16,
+                      right: 16,
+                      bottom: 4,
+                    ),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Nhấn giữ trang bất kỳ để chọn nhiều trang • Kéo góc trái để đổi thứ tự • Chạm dấu trang ở góc phải',
+                        style: TextStyle(fontSize: 11.5, color: mutedText),
                       ),
-                      child: Column(
+                    ),
+                  ),
+                // Grid body
+                Expanded(
+                  child: visibleEntries.isEmpty
+                      ? Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.bookmark_border_rounded,
+                                size: 42,
+                                color: mutedText,
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                'Chưa có trang nào được đánh dấu',
+                                style: TextStyle(color: mutedText),
+                              ),
+                              const SizedBox(height: 10),
+                              TextButton(
+                                onPressed: () => setModalState(
+                                  () => showBookmarkedOnly = false,
+                                ),
+                                child: const Text('Hiện tất cả trang'),
+                              ),
+                            ],
+                          ),
+                        )
+                      : GridView.builder(
+                          padding: const EdgeInsets.all(16),
+                          cacheExtent: 360,
+                          gridDelegate:
+                              const SliverGridDelegateWithMaxCrossAxisExtent(
+                            maxCrossAxisExtent: 170,
+                            mainAxisSpacing: 14,
+                            crossAxisSpacing: 14,
+                            childAspectRatio: 0.72,
+                          ),
+                          itemCount: visibleEntries.length,
+                          itemBuilder: (c, i) {
+                            final entry = visibleEntries[i];
+                            final p = entry.page;
+                            final origIdx = entry.originalIndex;
+                            final isCur = origIdx == _currentPageIndex;
+                            final isSelected = selectedPageIds.contains(p.id);
+
+                            Widget tile(bool isDropHover) => InkWell(
+                                  onTap: () {
+                                    if (selectionMode) {
+                                      setModalState(() {
+                                        if (isSelected) {
+                                          selectedPageIds.remove(p.id);
+                                        } else {
+                                          selectedPageIds.add(p.id);
+                                        }
+                                      });
+                                    } else {
+                                      Navigator.pop(ctx);
+                                      _jumpToPage(origIdx);
+                                    }
+                                  },
+                                  onLongPress: () {
+                                    setModalState(() {
+                                      selectionMode = true;
+                                      selectedPageIds.add(p.id);
+                                    });
+                                  },
+                                  borderRadius: BorderRadius.circular(10),
+                                  child: buildPageCardBody(
+                                    p: p,
+                                    origIdx: origIdx,
+                                    isCur: isCur,
+                                    isSelected: isSelected,
+                                    isDropHover: isDropHover,
+                                  ),
+                                );
+
+                            if (selectionMode ||
+                                showBookmarkedOnly ||
+                                liveNotebook.pages.length <= 1) {
+                              return tile(false);
+                            }
+
+                            return DragTarget<int>(
+                              onWillAcceptWithDetails: (details) =>
+                                  details.data != origIdx,
+                              onAcceptWithDetails: (details) async {
+                                final fromIdx = details.data;
+                                final toIdx = origIdx;
+                                if (fromIdx == toIdx) return;
+                                await appState.reorderPages(
+                                  liveNotebook.id,
+                                  fromIdx,
+                                  toIdx,
+                                );
+                                if (mounted) {
+                                  var nextCur = _currentPageIndex;
+                                  if (nextCur == fromIdx) {
+                                    nextCur = toIdx;
+                                  } else if (fromIdx < nextCur &&
+                                      toIdx >= nextCur) {
+                                    nextCur--;
+                                  } else if (fromIdx > nextCur &&
+                                      toIdx <= nextCur) {
+                                    nextCur++;
+                                  }
+                                  setState(() {
+                                    _currentPageIndex = nextCur.clamp(
+                                      0,
+                                      liveNotebook.pages.length - 1,
+                                    );
+                                    _renderedWindowCenter = _currentPageIndex;
+                                  });
+                                  if (!appState.verticalContinuousScroll &&
+                                      _horizontalPageController.hasClients) {
+                                    _horizontalPageController
+                                        .jumpToPage(_currentPageIndex);
+                                  }
+                                }
+                              },
+                              builder: (_, candidateData, __) =>
+                                  tile(candidateData.isNotEmpty),
+                            );
+                          },
+                        ),
+                ),
+                // Multi-select bottom action bar
+                if (selectionMode)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: cardFooterBg,
+                      border: Border(
+                        top: BorderSide(color: cardBorderMuted),
+                      ),
+                    ),
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
                         children: [
-                          Expanded(
-                            child: Stack(
-                              children: [
-                                Positioned.fill(
-                                  child: ClipRRect(
-                                    borderRadius: const BorderRadius.vertical(
-                                      top: Radius.circular(8),
-                                    ),
-                                    child: () {
-                                      final thumbSize = PaperMetrics.pageSize(
-                                        isLandscape: p.isLandscape,
-                                      );
-                                      return RepaintBoundary(
-                                        child: FittedBox(
-                                          fit: BoxFit.contain,
-                                          child: SizedBox(
-                                            width: thumbSize.width,
-                                            height: thumbSize.height,
-                                            child: IgnorePointer(
-                                              child: Stack(
-                                                children: [
-                                                  Positioned.fill(
-                                                    child: (p.pdfBackgroundPath !=
-                                                                null &&
-                                                            _pdfImageCache[p
-                                                                    .pdfBackgroundPath!] ==
-                                                                null)
-                                                        ? ColoredBox(
-                                                            color: Colors.white,
-                                                            child: Image.file(
-                                                              File(p
-                                                                  .pdfBackgroundPath!),
-                                                              fit: BoxFit.contain,
-                                                              cacheWidth:
-                                                                  notebook.pages
-                                                                              .length <=
-                                                                          80
-                                                                      ? 720
-                                                                      : 480,
-                                                              filterQuality:
-                                                                  FilterQuality
-                                                                      .medium,
-                                                              gaplessPlayback:
-                                                                  true,
-                                                              errorBuilder: (
-                                                                _,
-                                                                __,
-                                                                ___,
-                                                              ) =>
-                                                                  const SizedBox
-                                                                      .shrink(),
-                                                            ),
-                                                          )
-                                                        : CustomPaint(
-                                                            size: thumbSize,
-                                                            painter:
-                                                                CanvasPainter(
-                                                              page: p,
-                                                              pdfBackgroundImage:
-                                                                  p.pdfBackgroundPath !=
-                                                                          null
-                                                                      ? _pdfImageCache[
-                                                                          p.pdfBackgroundPath!]
-                                                                      : null,
-                                                              elementImageCache:
-                                                                  _elementImageCache,
-                                                              repaintVersion:
-                                                                  _repaintVersion,
-                                                            ),
-                                                          ),
-                                                  ),
-                                                  for (final txt
-                                                      in p.textElements)
-                                                    Positioned(
-                                                      left: txt.x,
-                                                      top: txt.y,
-                                                      width: txt.width,
-                                                      child: Text(
-                                                        txt.text,
-                                                        style: TextStyle(
-                                                          color: Color(
-                                                              txt.colorValue),
-                                                          fontSize:
-                                                              txt.fontSize,
-                                                        ),
-                                                      ),
-                                                    ),
-                                                  for (final st in p.stickyNotes)
-                                                    Positioned(
-                                                      left: st.x,
-                                                      top: st.y,
-                                                      width: st.isCollapsed
-                                                          ? math.min(
-                                                              st.width, 210.0)
-                                                          : st.width,
-                                                      height: st.isCollapsed
-                                                          ? 40.0
-                                                          : st.height,
-                                                      child: Container(
-                                                        decoration:
-                                                            BoxDecoration(
-                                                          color: Color(
-                                                              st.colorValue),
-                                                          borderRadius:
-                                                              BorderRadius
-                                                                  .circular(10),
-                                                          border: Border.all(
-                                                              color: Colors
-                                                                  .black26),
-                                                        ),
-                                                        child: st.isCollapsed
-                                                            ? null
-                                                            : CustomPaint(
-                                                                painter:
-                                                                    _StickyCanvasPainter(
-                                                                  strokes: st
-                                                                      .strokes,
-                                                                  activeStrokeNotifier:
-                                                                      _activeStickyStrokeNotifier,
-                                                                  noteId: st.id,
-                                                                  getActiveNoteId:
-                                                                      () =>
-                                                                          null,
-                                                                ),
-                                                              ),
-                                                      ),
-                                                    ),
-                                                ],
-                                              ),
-                                            ),
+                          OutlinedButton.icon(
+                            onPressed: selectedPageIds.isEmpty
+                                ? null
+                                : () {
+                                    final selected = selectedPagesOrdered();
+                                    _copiedPagesClipboard =
+                                        _clonePagesForPaste(selected);
+                                    setModalState(() {
+                                      selectionMode = false;
+                                      selectedPageIds.clear();
+                                    });
+                                    if (mounted) {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            'Đã sao chép ${selected.length} trang. Nhấn "Dán" để chèn.',
                                           ),
                                         ),
                                       );
-                                    }(),
-                                  ),
-                                ),
-                                if (p.isBookmarked)
-                                  const Positioned(
-                                    top: 4,
-                                    right: 4,
-                                    child: Icon(
-                                      Icons.bookmark_rounded,
-                                      size: 18,
-                                      color: Color(0xFFD97706),
-                                    ),
-                                  ),
-                              ],
+                                    }
+                                  },
+                            icon: const Icon(Icons.copy_rounded, size: 17),
+                            label: const Text('Sao chép'),
+                          ),
+                          const SizedBox(width: 8),
+                          OutlinedButton.icon(
+                            onPressed: selectedPageIds.isEmpty
+                                ? null
+                                : () async {
+                                    final selected = selectedPagesOrdered();
+                                    final lastSelectedIdx =
+                                        liveNotebook.pages.lastIndexWhere(
+                                      (pg) => selectedPageIds.contains(pg.id),
+                                    );
+                                    final dupes =
+                                        _clonePagesForPaste(selected);
+                                    final insertPos = (lastSelectedIdx + 1)
+                                        .clamp(0, liveNotebook.pages.length);
+                                    await appState.insertPagesAt(
+                                      liveNotebook.id,
+                                      dupes,
+                                      insertIndex: insertPos,
+                                    );
+                                    setModalState(() {
+                                      selectionMode = false;
+                                      selectedPageIds.clear();
+                                    });
+                                    if (mounted) {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            'Đã nhân bản ${dupes.length} trang',
+                                          ),
+                                        ),
+                                      );
+                                    }
+                                  },
+                            icon: const Icon(
+                              Icons.control_point_duplicate_rounded,
+                              size: 17,
+                            ),
+                            label: const Text('Nhân bản'),
+                          ),
+                          const SizedBox(width: 8),
+                          FilledButton.icon(
+                            onPressed: selectedPageIds.isEmpty
+                                ? null
+                                : () async {
+                                    final chosen = selectedPagesOrdered();
+                                    Navigator.pop(ctx);
+                                    final filteredNotebook =
+                                        liveNotebook.copyWith(
+                                      title: chosen.length == 1
+                                          ? '${liveNotebook.title}_Trang_${chosen.first.index + 1}'
+                                          : '${liveNotebook.title}_${chosen.length}_trang',
+                                      pages: chosen,
+                                    );
+                                    await _handleExportPdf(filteredNotebook);
+                                  },
+                            icon: const Icon(
+                              Icons.picture_as_pdf_rounded,
+                              size: 17,
+                            ),
+                            label: Text(
+                              'Xuất PDF (${selectedPageIds.length})',
                             ),
                           ),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 6),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text(
-                                  'Trang ${i + 1}',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: isCur
-                                        ? FontWeight.w700
-                                        : FontWeight.w500,
-                                  ),
-                                ),
-                                if (notebook.pages.length > 1)
-                                  GestureDetector(
-                                    onTap: () async {
-                                      await context
-                                          .read<AppState>()
-                                          .deletePage(notebook.id, p.id);
-                                      if (ctx.mounted) Navigator.pop(ctx);
-                                    },
-                                    child: const Icon(
-                                      Icons.delete_outline_rounded,
-                                      size: 16,
-                                      color: Color(0xFFEF4444),
-                                    ),
-                                  ),
-                              ],
+                          const SizedBox(width: 8),
+                          TextButton.icon(
+                            onPressed: selectedPageIds.isEmpty ||
+                                    liveNotebook.pages.length <= 1
+                                ? null
+                                : () async {
+                                    if (liveNotebook.pages.length -
+                                            selectedPageIds.length <
+                                        1) {
+                                      if (mounted) {
+                                        ScaffoldMessenger.of(context)
+                                            .showSnackBar(
+                                          const SnackBar(
+                                            content: Text(
+                                              'Cần giữ lại ít nhất 1 trang trong sổ tay.',
+                                            ),
+                                          ),
+                                        );
+                                      }
+                                      return;
+                                    }
+                                    final countToDelete =
+                                        selectedPageIds.length;
+                                    await appState.deletePages(
+                                      liveNotebook.id,
+                                      Set<String>.from(selectedPageIds),
+                                    );
+                                    setModalState(() {
+                                      selectionMode = false;
+                                      selectedPageIds.clear();
+                                    });
+                                    if (mounted) {
+                                      setState(() {
+                                        _currentPageIndex =
+                                            _currentPageIndex.clamp(
+                                          0,
+                                          math.max(
+                                            0,
+                                            liveNotebook.pages.length -
+                                                countToDelete -
+                                                1,
+                                          ),
+                                        );
+                                        _renderedWindowCenter =
+                                            _currentPageIndex;
+                                      });
+                                    }
+                                  },
+                            style: TextButton.styleFrom(
+                              foregroundColor: const Color(0xFFEF4444),
                             ),
+                            icon: const Icon(
+                              Icons.delete_outline_rounded,
+                              size: 18,
+                            ),
+                            label: const Text('Xóa'),
                           ),
                         ],
                       ),
                     ),
-                  );
-                },
-              ),
+                  ),
+              ],
             ),
-          ],
-        ),
+          );
+        },
       ),
     );
   }
@@ -3276,7 +3862,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     final appState = context.watch<AppState>();
     final notebook = appState.getNotebookById(_activeNotebookId);
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final backdrop = isDark ? EditorColors.obsidianBg : const Color(0xFFE5E7EB);
+    final backdrop =
+        isDark ? EditorColors.obsidianBg : EditorColors.lightBackdrop;
 
     if (notebook == null) {
       return Scaffold(

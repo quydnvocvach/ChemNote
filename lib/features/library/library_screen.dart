@@ -574,7 +574,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       end: Alignment.bottomCenter,
                       colors: isDark
                           ? const [Color(0xFF232732), Color(0xFF13151B)]
-                          : const [Color(0xFFE2E8F0), Color(0xFFCBD5E1)],
+                          : const [Color(0xFFDFD9CC), Color(0xFFCCC4B5)],
                     ),
                     boxShadow: [
                       BoxShadow(

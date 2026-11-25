@@ -603,11 +603,11 @@ class StrokeEngine {
 
   /// Detects a rapid back-and-forth scribble/scratch-out gesture used to erase
   /// strokes underneath it without switching to the eraser tool.
-  /// Tuned for real MatePad 11.5"S handwriting: requires >= 4 reversals > 130 deg
-  /// with segment length >= 16px and overlap ratio >= 2.2x bounding-box diagonal
-  /// (reliably erases intentional scribbles while rejecting 1-2 turn letters).
+  /// Tuned for real MatePad 11.5"S handwriting: requires >= 3 reversals > 130 deg
+  /// (4 back-and-forth passes) with segment length >= 16px and overlap ratio >= 1.85x bounding-box diagonal
+  /// (reliably erases intentional 4-pass scribbles while rejecting 1-3 pass handwriting waves).
   static bool isScribbleGesture(List<StrokePoint> rawPoints) {
-    if (rawPoints.length < 10) return false;
+    if (rawPoints.length < 8) return false;
 
     final bounds = _boundingBox(rawPoints);
     final diag = math.sqrt(
@@ -616,13 +616,13 @@ class StrokeEngine {
     if (diag < 18.0) return false;
 
     final totalLen = _polylineLength(rawPoints);
-    if (totalLen < diag * 2.2) return false;
+    if (totalLen < diag * 1.85) return false;
 
     final simplified = _douglasPeucker(
       rawPoints,
       epsilon: math.max(3.5, diag * 0.045),
     );
-    if (simplified.length < 6) return false;
+    if (simplified.length < 5) return false;
 
     // cos(130 deg) ≈ -0.6428 -> use -0.65
     const double minReversalCos = -0.65;
@@ -644,7 +644,7 @@ class StrokeEngine {
       }
     }
 
-    return sharpReversals >= 4;
+    return sharpReversals >= 3;
   }
 
   /// Alias for [isScribbleGesture] returning the intersected stroke IDs when

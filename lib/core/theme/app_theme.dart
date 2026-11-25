@@ -9,11 +9,13 @@ class AppTheme {
   static const Color accentBlue = Color(0xFF3B82F6);
   static const Color accentTeal = Color(0xFF14B8A6);
 
-  // Bảng màu Light Mode tinh gọn, hiện đại
-  static const Color lightBg = Color(0xFFF3F5F8);
-  static const Color lightSurface = Color(0xFFFFFFFF);
-  static const Color lightCard = Color(0xFFF8FAFC);
-  static const Color lightBorder = Color(0xFFE2E8F0);
+  // Bảng màu Light Mode êm mắt (Warm Paper-Stone / Alabaster giảm chói)
+  static const Color lightBg = Color(0xFFEEECE6);
+  static const Color lightSurface = Color(0xFFF6F4EE);
+  static const Color lightCard = Color(0xFFE7E3DA);
+  static const Color lightBorder = Color(0xFFD6D0C4);
+  static const Color lightInk = Color(0xFF1F2329);
+  static const Color lightMuted = Color(0xFF5F6670);
   static const Color primaryNavy = Color(0xFF1E3A5F);
 
   static const List<int> notebookCoverColors = [
@@ -119,11 +121,15 @@ class AppTheme {
 
   static ThemeData lightTheme() {
     final colorScheme = ColorScheme.fromSeed(
-      seedColor: accentBlue,
+      seedColor: primaryNavy,
       brightness: Brightness.light,
-      primary: accentBlue,
+      primary: const Color(0xFF2563EB),
       secondary: accentTeal,
       surface: lightSurface,
+      onSurface: lightInk,
+      onSurfaceVariant: lightMuted,
+      surfaceContainerHighest: lightCard,
+      outlineVariant: lightBorder,
     );
 
     return ThemeData(
@@ -132,12 +138,12 @@ class AppTheme {
       scaffoldBackgroundColor: lightBg,
       appBarTheme: const AppBarTheme(
         backgroundColor: lightSurface,
-        foregroundColor: Color(0xFF0F172A),
+        foregroundColor: lightInk,
         elevation: 0,
         scrolledUnderElevation: 0.5,
         centerTitle: false,
         titleTextStyle: TextStyle(
-          color: Color(0xFF0F172A),
+          color: lightInk,
           fontSize: 20,
           fontWeight: FontWeight.w700,
           letterSpacing: -0.3,
@@ -186,6 +192,14 @@ class AppTheme {
       dividerTheme: const DividerThemeData(
         color: lightBorder,
         thickness: 1,
+      ),
+      chipTheme: ChipThemeData(
+        backgroundColor: lightCard,
+        selectedColor: accentBlue.withValues(alpha: 0.16),
+        side: const BorderSide(color: lightBorder),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+        ),
       ),
     );
   }

@@ -1082,6 +1082,42 @@ class AppState extends ChangeNotifier {
     await updateNotebook(notebook.copyWith(pages: reindexed));
   }
 
+  /// Chèn một hoặc nhiều trang vào vị trí [insertIndex] (mặc định cuối sổ tay) và đánh số lại chỉ mục.
+  Future<void> insertPagesAt(
+    String notebookId,
+    List<NotePage> newPages, {
+    int? insertIndex,
+  }) async {
+    if (newPages.isEmpty) return;
+    final notebook = getNotebookById(notebookId);
+    if (notebook == null) return;
+    final targetIdx = (insertIndex ?? notebook.pages.length)
+        .clamp(0, notebook.pages.length);
+    final updatedList = [...notebook.pages]..insertAll(targetIdx, newPages);
+    final reindexed = [
+      for (int i = 0; i < updatedList.length; i++)
+        updatedList[i].copyWith(index: i)
+    ];
+    await updateNotebook(notebook.copyWith(pages: reindexed));
+  }
+
+  /// Xóa hàng loạt trang theo [pageIds] nhưng luôn giữ lại tối thiểu 1 trang trong sổ tay.
+  Future<void> deletePages(String notebookId, Set<String> pageIds) async {
+    if (pageIds.isEmpty) return;
+    final notebook = getNotebookById(notebookId);
+    if (notebook == null || notebook.pages.length <= 1) return;
+    var remaining =
+        notebook.pages.where((p) => !pageIds.contains(p.id)).toList();
+    if (remaining.isEmpty) {
+      remaining = [notebook.pages.first];
+    }
+    if (remaining.length == notebook.pages.length) return;
+    final reindexed = [
+      for (int i = 0; i < remaining.length; i++) remaining[i].copyWith(index: i)
+    ];
+    await updateNotebook(notebook.copyWith(pages: reindexed));
+  }
+
   Future<void> toggleBookmark(String notebookId, String pageId) async {
     final notebook = getNotebookById(notebookId);
     if (notebook == null) return;
