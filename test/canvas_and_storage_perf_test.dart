@@ -9,6 +9,8 @@ import 'package:chemnote/core/providers/app_state.dart';
 import 'package:chemnote/core/storage/local_storage_service.dart';
 import 'package:chemnote/features/canvas/canvas_painter.dart';
 import 'package:chemnote/features/canvas/paper_templates.dart';
+import 'package:chemnote/features/canvas/stroke_engine.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -448,6 +450,70 @@ void main() {
       addTearDown(reloaded.dispose);
       await reloaded.loadAll();
       expect(reloaded.activeNotebooks.first.id, 'nb-older');
+    });
+  });
+
+  group('PalmRejectionFilter triple-layer unit guards', () {
+    test('isLikelyPalmTouch rejects large palm contact but accepts fingertip and stylus', () {
+      const palmByRadius = PointerDownEvent(
+        pointer: 101,
+        kind: PointerDeviceKind.touch,
+        position: Offset(200, 300),
+        radiusMajor: 28.0,
+        size: 0.12,
+      );
+      const palmBySize = PointerDownEvent(
+        pointer: 102,
+        kind: PointerDeviceKind.touch,
+        position: Offset(220, 320),
+        radiusMajor: 10.0,
+        size: 0.35,
+      );
+      const normalFinger = PointerDownEvent(
+        pointer: 103,
+        kind: PointerDeviceKind.touch,
+        position: Offset(240, 340),
+        radiusMajor: 8.0,
+        size: 0.08,
+      );
+      const largeStylus = PointerDownEvent(
+        pointer: 104,
+        kind: PointerDeviceKind.stylus,
+        position: Offset(260, 360),
+        radiusMajor: 35.0,
+        size: 0.5,
+      );
+
+      expect(PalmRejectionFilter.isLikelyPalmTouch(palmByRadius), isTrue);
+      expect(PalmRejectionFilter.isLikelyPalmTouch(palmBySize), isTrue);
+      expect(PalmRejectionFilter.isLikelyPalmTouch(normalFinger), isFalse);
+      expect(PalmRejectionFilter.isLikelyPalmTouch(largeStylus), isFalse);
+    });
+
+    test('notifyStylusActivity enables 550ms cooldown blocking touch while accepting stylus', () {
+      expect(PalmRejectionFilter.stylusCooldownMs, 550);
+      final filter = PalmRejectionFilter(stylusOnlyMode: false);
+
+      const touch = PointerDownEvent(
+        pointer: 201,
+        kind: PointerDeviceKind.touch,
+        position: Offset(180, 220),
+        radiusMajor: 8.0,
+        size: 0.08,
+      );
+      const stylus = PointerDownEvent(
+        pointer: 202,
+        kind: PointerDeviceKind.stylus,
+        position: Offset(180, 220),
+      );
+
+      expect(filter.isStylusRecentlyActive, isFalse);
+      expect(filter.shouldAccept(touch), isTrue);
+
+      filter.notifyStylusActivity();
+      expect(filter.isStylusRecentlyActive, isTrue);
+      expect(filter.shouldAccept(touch), isFalse);
+      expect(filter.shouldAccept(stylus), isTrue);
     });
   });
 }

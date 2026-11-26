@@ -21,20 +21,36 @@ class ShapeRecognitionResult {
 /// (NearLink) and Samsung S-Pen, supporting stylus hover preemption and strict
 /// palm rejection while still allowing multi-finger navigation gestures.
 class PalmRejectionFilter {
+  static const int stylusCooldownMs = 550;
+
   bool stylusOnlyMode;
   DateTime? _lastStylusEventTime;
 
   PalmRejectionFilter({this.stylusOnlyMode = false});
 
-  /// Call when a stylus hover event is detected to preempt accidental palm rest
-  /// before the nib even touches the screen.
-  void notifyStylusHover() {
+  /// Record any stylus hover, down, move, or lift activity so touch palm
+  /// events immediately before or after a stroke are suppressed cleanly.
+  void notifyStylusActivity() {
     _lastStylusEventTime = DateTime.now();
   }
 
+  /// Call when a stylus hover event is detected to preempt accidental palm rest
+  /// before the nib even touches the screen.
+  void notifyStylusHover() => notifyStylusActivity();
+
   bool get isStylusRecentlyActive {
     if (_lastStylusEventTime == null) return false;
-    return DateTime.now().difference(_lastStylusEventTime!).inMilliseconds < 280;
+    return DateTime.now().difference(_lastStylusEventTime!).inMilliseconds <
+        stylusCooldownMs;
+  }
+
+  /// Returns true when a touch event carries palm-sized contact geometry.
+  static bool isLikelyPalmTouch(PointerEvent event) {
+    if (event.kind != PointerDeviceKind.touch) return false;
+    final bool largeRadius =
+        event.radiusMajor > 20.0 && event.radiusMajor < 400.0;
+    final bool largeSize = event.size > 0.28;
+    return largeRadius || largeSize;
   }
 
   /// Returns true if the incoming pointer event should be accepted for drawing.
@@ -43,7 +59,7 @@ class PalmRejectionFilter {
 
     if (kind == PointerDeviceKind.stylus ||
         kind == PointerDeviceKind.invertedStylus) {
-      _lastStylusEventTime = DateTime.now();
+      notifyStylusActivity();
       return true;
     }
 
@@ -64,7 +80,7 @@ class PalmRejectionFilter {
     }
 
     // 2) Reject large contact areas typical of a resting palm
-    if (event.radiusMajor > 26.0 || event.size > 0.32) {
+    if (isLikelyPalmTouch(event)) {
       return false;
     }
 

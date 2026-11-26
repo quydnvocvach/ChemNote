@@ -38,6 +38,10 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val HARDWARE_CHANNEL = "com.chemnote.app/hardware"
         private const val STYLUS_BUTTON_DEBOUNCE_MS = 450L
+        private const val STYLUS_PALM_COOLDOWN_MS = 480L
+        private const val TOOL_TYPE_PALM_VALUE = 5
+        private const val PALM_TOUCH_MAJOR_MM = 18.5f
+        private const val PALM_SIZE_THRESHOLD = 0.28f
         private const val REQ_RECORD_AUDIO = 4012
         private const val REQ_READ_IMAGES = 4013
         private const val REQ_PICK_GALLERY = 4014
@@ -49,6 +53,14 @@ class MainActivity : FlutterActivity() {
     private var lastStylusTriggerEventTime: Long = -1L
     private var stylusPrimaryButtonDown: Boolean = false
     private var keyEventHandlesStylusButton: Boolean = false
+
+    private var editorPalmShieldEnabled: Boolean = false
+    private var editorStylusPanMode: Boolean = false
+    private var isNativeStylusDown: Boolean = false
+    private var isNativeStylusHovering: Boolean = false
+    private var lastNativeStylusActiveMs: Long = 0L
+    private var activeCanvasTouchStream: Boolean = false
+    private var suppressCurrentTouchStream: Boolean = false
 
     private var mediaRecorder: MediaRecorder? = null
     private var recordingStartMs: Long = 0L
@@ -187,6 +199,19 @@ class MainActivity : FlutterActivity() {
                             maxLongEdge = maxLongEdge,
                             result = result
                         )
+                    }
+                    "setEditorPalmShield" -> {
+                        val enabled = call.argument<Boolean>("enabled") ?: false
+                        val stylusPanMode = call.argument<Boolean>("stylusPanMode") ?: false
+                        editorPalmShieldEnabled = enabled
+                        editorStylusPanMode = stylusPanMode
+                        if (!enabled) {
+                            activeCanvasTouchStream = false
+                            suppressCurrentTouchStream = false
+                            isNativeStylusDown = false
+                            isNativeStylusHovering = false
+                        }
+                        result.success(null)
                     }
                     else -> result.notImplemented()
                 }
@@ -771,12 +796,174 @@ class MainActivity : FlutterActivity() {
 
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
         checkStylusMotionButton(ev)
+        if (isStylusMotionEvent(ev)) {
+            val action = ev.actionMasked
+            when (action) {
+                MotionEvent.ACTION_HOVER_ENTER,
+                MotionEvent.ACTION_HOVER_MOVE -> {
+                    isNativeStylusHovering = true
+                    lastNativeStylusActiveMs = SystemClock.uptimeMillis()
+                    if (editorPalmShieldEnabled && !editorStylusPanMode && activeCanvasTouchStream) {
+                        cancelActiveCanvasTouchStream(ev)
+                    }
+                }
+                MotionEvent.ACTION_HOVER_EXIT -> {
+                    isNativeStylusHovering = false
+                    lastNativeStylusActiveMs = SystemClock.uptimeMillis()
+                }
+            }
+        }
         return super.dispatchGenericMotionEvent(ev)
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
         checkStylusMotionButton(ev)
+        val now = SystemClock.uptimeMillis()
+        val action = ev.actionMasked
+
+        if (isStylusMotionEvent(ev)) {
+            isNativeStylusDown = when (action) {
+                MotionEvent.ACTION_DOWN,
+                MotionEvent.ACTION_POINTER_DOWN,
+                MotionEvent.ACTION_MOVE -> true
+                MotionEvent.ACTION_UP,
+                MotionEvent.ACTION_CANCEL -> false
+                else -> isNativeStylusDown
+            }
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                isNativeStylusHovering = false
+            }
+            lastNativeStylusActiveMs = now
+            if (editorPalmShieldEnabled && !editorStylusPanMode && activeCanvasTouchStream) {
+                cancelActiveCanvasTouchStream(ev)
+            }
+            return super.dispatchTouchEvent(ev)
+        }
+
+        if (!editorPalmShieldEnabled || editorStylusPanMode || isMouseMotionEvent(ev)) {
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                suppressCurrentTouchStream = false
+                activeCanvasTouchStream = false
+            }
+            return super.dispatchTouchEvent(ev)
+        }
+
+        if (action == MotionEvent.ACTION_DOWN) {
+            suppressCurrentTouchStream = false
+        }
+
+        if (suppressCurrentTouchStream) {
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                suppressCurrentTouchStream = false
+            }
+            return true
+        }
+
+        val stylusEngaged = isNativeStylusDown ||
+            isNativeStylusHovering ||
+            (now - lastNativeStylusActiveMs) < STYLUS_PALM_COOLDOWN_MS
+        val hasPalm = hasNativePalmPointer(ev)
+
+        if (action == MotionEvent.ACTION_DOWN) {
+            val inCanvas = isInsideCanvasShieldRect(ev.x, ev.y)
+            if (inCanvas && (stylusEngaged || hasPalm)) {
+                suppressCurrentTouchStream = true
+                activeCanvasTouchStream = false
+                return true
+            }
+            activeCanvasTouchStream = inCanvas
+        } else if (activeCanvasTouchStream) {
+            if (stylusEngaged || hasPalm) {
+                cancelActiveCanvasTouchStream(ev)
+                return true
+            }
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                activeCanvasTouchStream = false
+            }
+        }
+
         return super.dispatchTouchEvent(ev)
+    }
+
+    private fun isStylusMotionEvent(ev: MotionEvent): Boolean {
+        if (ev.isFromSource(InputDevice.SOURCE_STYLUS)) return true
+        for (i in 0 until ev.pointerCount) {
+            val toolType = ev.getToolType(i)
+            if (toolType == MotionEvent.TOOL_TYPE_STYLUS ||
+                toolType == MotionEvent.TOOL_TYPE_ERASER
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun isMouseMotionEvent(ev: MotionEvent): Boolean {
+        if (ev.isFromSource(InputDevice.SOURCE_MOUSE)) return true
+        for (i in 0 until ev.pointerCount) {
+            if (ev.getToolType(i) == MotionEvent.TOOL_TYPE_MOUSE) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun isInsideCanvasShieldRect(x: Float, y: Float): Boolean {
+        val density = resources.displayMetrics.density
+        val widthPx = window?.decorView?.width?.takeIf { it > 0 }?.toFloat()
+            ?: resources.displayMetrics.widthPixels.toFloat()
+        val heightPx = window?.decorView?.height?.takeIf { it > 0 }?.toFloat()
+            ?: resources.displayMetrics.heightPixels.toFloat()
+        val topMargin = 124f * density
+        val leftMargin = 54f * density
+        val rightMargin = 82f * density
+        return x >= leftMargin &&
+            x <= (widthPx - rightMargin) &&
+            y >= topMargin &&
+            y <= heightPx
+    }
+
+    private fun hasNativePalmPointer(ev: MotionEvent): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            (ev.flags and MotionEvent.FLAG_CANCELED) != 0
+        ) {
+            return true
+        }
+        val xdpi = resources.displayMetrics.xdpi.takeIf { it >= 72f }
+            ?: (resources.displayMetrics.density * 160f)
+        for (i in 0 until ev.pointerCount) {
+            if (ev.getToolType(i) == TOOL_TYPE_PALM_VALUE) {
+                return true
+            }
+            val touchMajorPx = ev.getTouchMajor(i)
+            val touchMajorMm = if (touchMajorPx > 0f && touchMajorPx < 2500f) {
+                (touchMajorPx / xdpi) * 25.4f
+            } else {
+                0f
+            }
+            if (touchMajorMm > PALM_TOUCH_MAJOR_MM) {
+                return true
+            }
+            if (ev.getSize(i) > PALM_SIZE_THRESHOLD) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun cancelActiveCanvasTouchStream(triggerEv: MotionEvent) {
+        activeCanvasTouchStream = false
+        suppressCurrentTouchStream = true
+        val cancelEv = MotionEvent.obtain(
+            triggerEv.downTime,
+            triggerEv.eventTime,
+            MotionEvent.ACTION_CANCEL,
+            0f,
+            0f,
+            0
+        )
+        super.dispatchTouchEvent(cancelEv)
+        cancelEv.recycle()
     }
 
     private fun checkStylusMotionButton(ev: MotionEvent) {

@@ -160,16 +160,18 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.7.8 with APK
+      - name: Publish Release v3.7.9 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.7.8
-          name: ChemNote Pro v3.7.8 (Khôi phục chọn tệp Huawei Files, Cuộn dọc 1.2× & Sắp xếp theo thời gian mở)
+          tag_name: v3.7.9
+          name: ChemNote Pro v3.7.9 (Chống tì tay 3 tầng & Khóa zoom nổi kiểu Huawei Notes)
           body: |
-            ### ChemNote Pro v3.7.8
-            - **Khôi phục trình chọn tệp Huawei (`com.huawei.filemanager`):** Ưu tiên mở lại ứng dụng quản lý tệp gốc của Huawei khi nhập PDF/DOC thay cho Google DocumentsUI. *(Ghi chú: Android/HarmonyOS không cung cấp cờ công khai để ép thứ tự sắp xếp qua Intent; Huawei Files ghi nhớ chế độ sắp xếp "Mới nhất trước" khi bạn chọn trực tiếp trong app).*
-            - **Cuộn dọc thông minh hệ số `1.2`:** Điều chỉnh tỷ lệ khóa trục ngang xuống `|dy| ≥ 1.2 × |dx|` giúp cuộn dọc nhạy và dễ kích hoạt hơn khi bật *Chuyển động giấy tự do*.
-            - **Màn hình chính sắp xếp theo thời gian mở gần đây nhất (`lastOpenedAt`):** Sổ tay vừa mở hoặc vừa chuyển tab sẽ tự động lên đầu danh sách và được lưu lại qua các lần khởi động mà không kích hoạt đồng bộ lại không cần thiết.
+            ### ChemNote Pro v3.7.9
+            - **Chống tì tay 3 tầng triệt để:**
+              1. *Lá chắn phần cứng Android (`MainActivity`)*: Lọc và hủy tức thì chạm lòng bàn tay (`TOOL_TYPE_PALM`, diện tích chạm lớn, `FLAG_CANCELED`) hoặc chạm phát sinh khi M-Pencil 3 đang lơ lửng/viết và trong thời gian trễ 480ms ngay trong vùng giấy viết.
+              2. *Tầng `PalmRejectionFilter` (`StrokeEngine`)*: Mở rộng cooldown 550ms và nhận diện `isLikelyPalmTouch` theo bán kính/kích thước tiếp xúc.
+              3. *Khóa viewport & hoàn tác dịch chuyển sớm (`NoteEditorScreen`)*: Thêm ngưỡng trượt ngón đơn 12px, giữ nguyên trạng thái hover khi đặt tay và tự động hoàn tác ngay các vi dịch chuyển/zoom do lòng bàn tay chạm trước bút vài trăm ms.
+            - **Viên thuốc Khóa Zoom kèm % phóng đại (`Huawei Notes style`):** Khi zoom trang một chút, viên thuốc mờ nổi ở đáy màn hình sẽ hiện ra với biểu tượng khóa + `%` zoom theo thời gian thực; chạm để khóa/mở khóa tỉ lệ zoom (giữ nguyên khả năng cuộn/di chuyển trang), tự ẩn khi không thao tác và tự hiện lại khi bạn chụm/giãn ngón tay để nhắc trạng thái khóa.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

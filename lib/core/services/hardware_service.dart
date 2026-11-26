@@ -377,6 +377,22 @@ class HardwareService {
     }
   }
 
+  /// Kích hoạt lá chắn chống tì tay ở tầng phần cứng Android khi mở trình soạn thảo.
+  Future<void> setEditorPalmShield({
+    required bool enabled,
+    bool stylusPanMode = false,
+  }) async {
+    if (kIsWeb) return;
+    try {
+      await _channel.invokeMethod<void>('setEditorPalmShield', {
+        'enabled': enabled,
+        'stylusPanMode': stylusPanMode,
+      });
+    } on MissingPluginException {
+      // Ignore on desktop/test environments without native Android channel
+    } catch (_) {}
+  }
+
   /// Kích hoạt sự kiện gõ đúp bút giả lập phục vụ kiểm thử đơn vị.
   @visibleForTesting
   void emitStylusDoubleTapForTesting() {
