@@ -427,7 +427,9 @@ void main() {
       final appState = AppState(storage: storage);
       addTearDown(appState.dispose);
       int syncHookCalls = 0;
-      appState.onNotebookChangedForSync = (_) => syncHookCalls++;
+      appState.onNotebookChangedForSync = (_) async {
+        syncHookCalls++;
+      };
       await appState.loadAll();
 
       expect(appState.activeNotebooks.map((n) => n.id).toList(), ['nb-newer', 'nb-older']);
