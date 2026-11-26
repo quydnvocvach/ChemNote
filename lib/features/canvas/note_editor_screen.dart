@@ -741,7 +741,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     stack.add(
       _EditorUndoEntry.notebookPages(
         List<NotePage>.of(notebook.pages),
-        _currentPageIndex.clamp(0, math.max(0, notebook.pages.length - 1)),
+        _currentPageIndex
+            .clamp(0, math.max(0, notebook.pages.length - 1))
+            .toInt(),
       ),
     );
     if (stack.length > _maxHistory) stack.removeAt(0);
@@ -804,7 +806,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         toStack.add(
           _EditorUndoEntry.notebookPages(
             List<NotePage>.of(notebook.pages),
-            _currentPageIndex.clamp(0, math.max(0, notebook.pages.length - 1)),
+            _currentPageIndex
+                .clamp(0, math.max(0, notebook.pages.length - 1))
+                .toInt(),
           ),
         );
         if (toStack.length > _maxHistory) toStack.removeAt(0);
@@ -813,8 +817,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         final appState = context.read<AppState>();
         await appState.replaceNotebookPages(notebook.id, targetPages);
         if (!mounted) return;
-        final targetIdx = (entry.activePageIndex ?? _currentPageIndex)
-            .clamp(0, math.max(0, targetPages.length - 1));
+        final int targetIdx = (entry.activePageIndex ?? _currentPageIndex)
+            .clamp(0, math.max(0, targetPages.length - 1))
+            .toInt();
         _jumpToPage(targetIdx);
         return;
       }

@@ -607,7 +607,7 @@ void main() {
       final sageNb = Notebook(
         id: 'nb-sage',
         title: 'Sage Watermark Test',
-        coverColor: 0xFFB4C3AC,
+        coverColorValue: 0xFFB4C3AC,
         defaultTemplate: PaperTemplateType.sageRibbon,
         pages: [
           NotePage(
@@ -624,7 +624,7 @@ void main() {
       final blankNb = Notebook(
         id: 'nb-blank',
         title: 'Blank Test',
-        coverColor: 0xFF3B82F6,
+        coverColorValue: 0xFF3B82F6,
         defaultTemplate: PaperTemplateType.blank,
         pages: [
           NotePage(
