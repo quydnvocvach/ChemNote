@@ -274,6 +274,7 @@ class MainActivity : FlutterActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri)
             }
+            putExtra(Intent.EXTRA_LOCAL_ONLY, true)
             putExtra("android.content.extra.SHOW_ADVANCED", true)
         }
     }
@@ -292,37 +293,58 @@ class MainActivity : FlutterActivity() {
                 .filter { it.isNotEmpty() }
                 .distinct()
 
-            // Ưu tiên ACTION_OPEN_DOCUMENT (DocumentsUI chuẩn Android/HarmonyOS) vì hỗ trợ EXTRA_INITIAL_URI mở thẳng vào Download / thư mục chọn sẵn.
-            val openDocIntent = buildFilePickerIntent(
+            // Luôn ưu tiên trình quản lý Tệp tin Huawei (com.huawei.filemanager / hidisk) trước Google DocumentsUI.
+            val huaweiOpenDocIntent = buildFilePickerIntent(
                 Intent.ACTION_OPEN_DOCUMENT,
-                null,
+                "com.huawei.filemanager",
                 mimeTypes,
                 initialUri
             )
-            val genericGetIntent = buildFilePickerIntent(
-                Intent.ACTION_GET_CONTENT,
-                null,
-                mimeTypes,
-                initialUri
-            )
-            val huaweiIntent = buildFilePickerIntent(
+            val huaweiGetContentIntent = buildFilePickerIntent(
                 Intent.ACTION_GET_CONTENT,
                 "com.huawei.filemanager",
                 mimeTypes,
                 initialUri
             )
-            val honorIntent = buildFilePickerIntent(
+            val hidiskGetContentIntent = buildFilePickerIntent(
+                Intent.ACTION_GET_CONTENT,
+                "com.huawei.hidisk",
+                mimeTypes,
+                initialUri
+            )
+            val honorOpenDocIntent = buildFilePickerIntent(
+                Intent.ACTION_OPEN_DOCUMENT,
+                "com.hihonor.filemanager",
+                mimeTypes,
+                initialUri
+            )
+            val honorGetContentIntent = buildFilePickerIntent(
                 Intent.ACTION_GET_CONTENT,
                 "com.hihonor.filemanager",
                 mimeTypes,
                 initialUri
             )
+            val fallbackOpenDocIntent = buildFilePickerIntent(
+                Intent.ACTION_OPEN_DOCUMENT,
+                null,
+                mimeTypes,
+                initialUri
+            )
+            val fallbackGetContentIntent = buildFilePickerIntent(
+                Intent.ACTION_GET_CONTENT,
+                null,
+                mimeTypes,
+                initialUri
+            )
 
             val chosenIntent = when {
-                openDocIntent.resolveActivity(packageManager) != null -> openDocIntent
-                huaweiIntent.resolveActivity(packageManager) != null -> huaweiIntent
-                honorIntent.resolveActivity(packageManager) != null -> honorIntent
-                else -> genericGetIntent
+                huaweiOpenDocIntent.resolveActivity(packageManager) != null -> huaweiOpenDocIntent
+                huaweiGetContentIntent.resolveActivity(packageManager) != null -> huaweiGetContentIntent
+                hidiskGetContentIntent.resolveActivity(packageManager) != null -> hidiskGetContentIntent
+                honorOpenDocIntent.resolveActivity(packageManager) != null -> honorOpenDocIntent
+                honorGetContentIntent.resolveActivity(packageManager) != null -> honorGetContentIntent
+                fallbackOpenDocIntent.resolveActivity(packageManager) != null -> fallbackOpenDocIntent
+                else -> fallbackGetContentIntent
             }
             @Suppress("DEPRECATION")
             startActivityForResult(chosenIntent, REQ_PICK_DOCUMENT)

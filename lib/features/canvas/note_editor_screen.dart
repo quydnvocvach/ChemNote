@@ -438,6 +438,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     if (notebookId == _activeNotebookId) return;
     _stopScrollFling();
     _commitActiveTextEdit();
+    unawaited(context.read<AppState>().markNotebookOpened(notebookId));
     // Auto-stop and save active audio recording on current page before switching tabs
     if (_isRecordingAudio) {
       final curNb = _getNotebook(context, listen: false);
@@ -4591,7 +4592,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       if (_panAxisLock == _ScrollAxisLock.none &&
                           _panAccumDelta.distance >= 8.0) {
                         _panAxisLock =
-                            _panAccumDelta.dy.abs() >= _panAccumDelta.dx.abs() * 1.35
+                            _panAccumDelta.dy.abs() >= _panAccumDelta.dx.abs() * 1.2
                                 ? _ScrollAxisLock.vertical
                                 : _ScrollAxisLock.free;
                       }
@@ -4605,7 +4606,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       final bool lockHorizontal =
                           _panAxisLock == _ScrollAxisLock.vertical ||
                               (_panAxisLock == _ScrollAxisLock.none &&
-                                  e.delta.dy.abs() >= e.delta.dx.abs() * 1.35);
+                                  e.delta.dy.abs() >= e.delta.dx.abs() * 1.2);
                       final double rawDx = lockHorizontal
                           ? 0.0
                           : ((appState.freePaperMovement ||

@@ -286,7 +286,11 @@ class LocalStorageService {
           if (nb != null) notebooks.add(nb);
         }
       }
-      notebooks.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      notebooks.sort((a, b) {
+        final cmp = b.effectiveOpenedAt.compareTo(a.effectiveOpenedAt);
+        if (cmp != 0) return cmp;
+        return b.updatedAt.compareTo(a.updatedAt);
+      });
       return notebooks;
     } catch (_) {
       return [];

@@ -622,6 +622,7 @@ class AppState extends ChangeNotifier {
       ]);
       _folders = results[0] as List<Folder>;
       _notebooks = results[1] as List<Notebook>;
+      _notebooks.sort(_compareByLastOpened);
       _favoritePens = results[2] as List<PenPreset>;
       _customStickers = results[3] as List<String>;
       _customCoverPaths = results[4] as List<String>;
@@ -730,11 +731,17 @@ class AppState extends ChangeNotifier {
     return count;
   }
 
+  static int _compareByLastOpened(Notebook a, Notebook b) {
+    final cmp = b.effectiveOpenedAt.compareTo(a.effectiveOpenedAt);
+    if (cmp != 0) return cmp;
+    return b.updatedAt.compareTo(a.updatedAt);
+  }
+
   List<Notebook> getNotebooksInFolder(String? folderId) {
     final result = _notebooks
         .where((n) => !n.isTrashed && n.folderId == folderId)
         .toList();
-    result.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    result.sort(_compareByLastOpened);
     return result;
   }
 
@@ -867,10 +874,12 @@ class AppState extends ChangeNotifier {
       pages: pages,
       createdAt: now,
       updatedAt: now,
+      lastOpenedAt: now,
       syncStatus: SyncStatus.pendingUpload,
     );
 
     _notebooks = [notebook, ..._notebooks];
+    _notebooks.sort(_compareByLastOpened);
     await _storage.saveNotebook(notebook);
     notifyListeners();
     onNotebookChangedForSync?.call(notebook);
@@ -894,12 +903,25 @@ class AppState extends ChangeNotifier {
     } else {
       _notebooks = [updated, ..._notebooks];
     }
-    _notebooks.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    _notebooks.sort(_compareByLastOpened);
     await _storage.saveNotebook(updated);
     notifyListeners();
     if (markPendingSync) {
       onNotebookChangedForSync?.call(updated);
     }
+  }
+
+  /// Cập nhật mốc thời gian mở gần nhất của sổ tay để đưa lên đầu màn hình chính
+  /// (chỉ lưu cục bộ, không làm thay đổi `updatedAt` hay đánh dấu cần đồng bộ Drive).
+  Future<void> markNotebookOpened(String notebookId) async {
+    final notebook = getNotebookById(notebookId);
+    if (notebook == null) return;
+    final updated = notebook.copyWith(lastOpenedAt: DateTime.now());
+    _notebooks =
+        _notebooks.map((n) => n.id == notebookId ? updated : n).toList();
+    _notebooks.sort(_compareByLastOpened);
+    notifyListeners();
+    await _storage.saveNotebook(updated);
   }
 
   Future<void> deleteNotebook(
@@ -1021,6 +1043,7 @@ class AppState extends ChangeNotifier {
         pages: clonedPages,
         createdAt: now,
         updatedAt: now,
+        lastOpenedAt: now,
         syncStatus: SyncStatus.pendingUpload,
         isFavorite: false,
         isLocked: false,
@@ -1034,7 +1057,7 @@ class AppState extends ChangeNotifier {
 
     if (created.isEmpty) return const [];
     _notebooks = [...created, ..._notebooks];
-    _notebooks.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    _notebooks.sort(_compareByLastOpened);
     for (final copy in created) {
       await _storage.saveNotebook(copy);
     }
@@ -1065,7 +1088,7 @@ class AppState extends ChangeNotifier {
       return updated;
     }).toList();
     if (updatedList.isEmpty) return;
-    _notebooks.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    _notebooks.sort(_compareByLastOpened);
     for (final nb in updatedList) {
       await _storage.saveNotebook(nb);
     }
@@ -1104,7 +1127,7 @@ class AppState extends ChangeNotifier {
       return updated;
     }).toList();
     if (updatedList.isEmpty) return;
-    _notebooks.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    _notebooks.sort(_compareByLastOpened);
     for (final nb in updatedList) {
       await _storage.saveNotebook(nb);
     }
@@ -1136,7 +1159,7 @@ class AppState extends ChangeNotifier {
       return updated;
     }).toList();
     if (updatedList.isEmpty) return;
-    _notebooks.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    _notebooks.sort(_compareByLastOpened);
     for (final nb in updatedList) {
       await _storage.saveNotebook(nb);
     }
@@ -1165,7 +1188,7 @@ class AppState extends ChangeNotifier {
       return updated;
     }).toList();
     if (updatedList.isEmpty) return;
-    _notebooks.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    _notebooks.sort(_compareByLastOpened);
     for (final nb in updatedList) {
       await _storage.saveNotebook(nb);
     }
@@ -1189,15 +1212,19 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> upsertNotebookFromSync(Notebook remoteNotebook) async {
-    final synced = remoteNotebook.copyWith(syncStatus: SyncStatus.synced);
-    final exists = _notebooks.any((n) => n.id == synced.id);
+    final existing = getNotebookById(remoteNotebook.id);
+    final synced = remoteNotebook.copyWith(
+      syncStatus: SyncStatus.synced,
+      lastOpenedAt: existing?.lastOpenedAt ?? remoteNotebook.lastOpenedAt,
+    );
+    final exists = existing != null;
     if (exists) {
       _notebooks =
           _notebooks.map((n) => n.id == synced.id ? synced : n).toList();
     } else {
       _notebooks = [synced, ..._notebooks];
     }
-    _notebooks.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    _notebooks.sort(_compareByLastOpened);
     await _storage.saveNotebook(synced);
     notifyListeners();
   }

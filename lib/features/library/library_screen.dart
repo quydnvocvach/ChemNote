@@ -1404,7 +1404,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final unlocked = await _promptPinVerification(context, notebook);
       if (!unlocked || !context.mounted) return;
     }
-    context.read<AppState>().openTab(notebook.id);
+    final appState = context.read<AppState>();
+    appState.openTab(notebook.id);
+    unawaited(appState.markNotebookOpened(notebook.id));
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => NoteEditorScreen(notebookId: notebook.id),

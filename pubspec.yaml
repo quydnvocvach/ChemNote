@@ -3,7 +3,7 @@ description: >-
   ChemNote - Ứng dụng ghi chú viết tay kiểu GoodNotes dành cho sinh viên Hóa học
   trên Android và Huawei HarmonyOS 2/3/4 với đồng bộ Google Drive không cần GMS.
 publish_to: 'none'
-version: 3.7.7+33
+version: 3.7.8+34
 
 environment:
   sdk: '>=3.4.0 <4.0.0'

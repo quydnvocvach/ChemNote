@@ -32,6 +32,7 @@ class Notebook {
   final List<NotePage> pages;
   final DateTime createdAt;
   final DateTime updatedAt;
+  final DateTime? lastOpenedAt;
   final SyncStatus syncStatus;
   final String? driveFileId;
   final String? drivePdfFileId;
@@ -56,6 +57,7 @@ class Notebook {
     this.pages = const [],
     required this.createdAt,
     required this.updatedAt,
+    this.lastOpenedAt,
     this.syncStatus = SyncStatus.localOnly,
     this.driveFileId,
     this.drivePdfFileId,
@@ -68,6 +70,8 @@ class Notebook {
     this.customCoverImagePath,
     this.useFirstPageAsCover = false,
   });
+
+  DateTime get effectiveOpenedAt => lastOpenedAt ?? updatedAt;
 
   Notebook copyWith({
     String? id,
@@ -82,6 +86,8 @@ class Notebook {
     List<NotePage>? pages,
     DateTime? createdAt,
     DateTime? updatedAt,
+    DateTime? lastOpenedAt,
+    bool clearLastOpenedAt = false,
     SyncStatus? syncStatus,
     String? driveFileId,
     bool clearDriveFileId = false,
@@ -112,6 +118,8 @@ class Notebook {
       pages: pages ?? this.pages,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      lastOpenedAt:
+          clearLastOpenedAt ? null : (lastOpenedAt ?? this.lastOpenedAt),
       syncStatus: syncStatus ?? this.syncStatus,
       driveFileId: clearDriveFileId ? null : (driveFileId ?? this.driveFileId),
       drivePdfFileId: clearDrivePdfFileId
@@ -143,6 +151,7 @@ class Notebook {
       'pages': pages.map((p) => p.toJson()).toList(),
       'createdAt': createdAt.toIso8601String(),
       'updatedAt': updatedAt.toIso8601String(),
+      'lastOpenedAt': lastOpenedAt?.toIso8601String(),
       'syncStatus': syncStatus.name,
       'driveFileId': driveFileId,
       'drivePdfFileId': drivePdfFileId,
@@ -179,6 +188,9 @@ class Notebook {
       updatedAt: json['updatedAt'] != null
           ? DateTime.tryParse(json['updatedAt'] as String) ?? now
           : now,
+      lastOpenedAt: json['lastOpenedAt'] != null
+          ? DateTime.tryParse(json['lastOpenedAt'] as String)
+          : null,
       syncStatus: _syncStatusFromJson(json['syncStatus']),
       driveFileId: json['driveFileId'] as String?,
       drivePdfFileId: json['drivePdfFileId'] as String?,

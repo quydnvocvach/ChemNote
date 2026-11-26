@@ -1,3 +1,5 @@
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -128,9 +130,9 @@ class _SearchScreenState extends State<SearchScreen> {
                         ),
                         trailing: const Icon(Icons.chevron_right_rounded),
                         onTap: () {
-                          context
-                              .read<AppState>()
-                              .openTab(item.notebook.id);
+                          final appState = context.read<AppState>();
+                          appState.openTab(item.notebook.id);
+                          unawaited(appState.markNotebookOpened(item.notebook.id));
                           Navigator.of(context).push(
                             MaterialPageRoute(
                               builder: (_) => NoteEditorScreen(

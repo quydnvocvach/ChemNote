@@ -160,17 +160,16 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.7.7 with APK
+      - name: Publish Release v3.7.8 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.7.7
-          name: ChemNote Pro v3.7.7 (Cuộn dọc thông minh chuẩn Huawei Notes, Phân cấp thư mục & Chọn nhiều sổ tay)
+          tag_name: v3.7.8
+          name: ChemNote Pro v3.7.8 (Khôi phục chọn tệp Huawei Files, Cuộn dọc 1.2× & Sắp xếp theo thời gian mở)
           body: |
-            ### ChemNote Pro v3.7.7
-            - **Khắc phục triệt để lỗi đồng bộ Drive tiếp tục upload `Assets/` sau khi xóa ghi chú & dọn thùng rác:** Dừng ngay luồng upload khi ghi chú bị xóa vĩnh viễn và tự chạy lượt dọn sạch trên Drive ngay sau khi đồng bộ kết thúc.
-            - **Cuộn dọc thông minh chuẩn Huawei Notes:** Khóa trục ngang thông minh khi vuốt dọc ngay cả khi bật *Chuyển động giấy tự do*, tăng tốc theo vận tốc vuốt tay và hỗ trợ quán tính lướt 144Hz siêu mượt; cập nhật số trang tức thì ở thanh cuộn bên phải và cho phép kéo lên xuống thanh bút yêu thích bên trái.
-            - **Nâng cấp Thư mục & Thư viện:** Phân cấp thư mục đa tầng với breadcrumb điều hướng, thẻ thư mục con trực quan, di chuyển/đổi màu/đổi tên; nhấn giữ sổ tay để **chọn hàng loạt** (**Xóa, Nhân bản, Di chuyển thư mục, Đổi bìa đồng loạt, Xuất PDF đồng loạt**); bỏ phần chữ & icon rườm rà ngoài màn hình chính.
-            - **Mẫu giấy & Cài đặt:** Đồng bộ mẫu giấy **Kẻ ngang ruy-băng xanh** chuẩn 1:1 kèm nền trắng làm mặc định, sửa lỗi xem trước mẫu giấy bị phóng lệch; chỉnh **Insert PDF/DOC** mở thẳng vào thư mục `Download` (tùy chỉnh được trong Cài đặt ngoài); thêm nút **Sao chép link PDF Google Drive**; bỏ *Gõ đúp đổi Tẩy* & *Chạm đúp thu phóng* trong Cài đặt sổ.
+            ### ChemNote Pro v3.7.8
+            - **Khôi phục trình chọn tệp Huawei (`com.huawei.filemanager`):** Ưu tiên mở lại ứng dụng quản lý tệp gốc của Huawei khi nhập PDF/DOC thay cho Google DocumentsUI. *(Ghi chú: Android/HarmonyOS không cung cấp cờ công khai để ép thứ tự sắp xếp qua Intent; Huawei Files ghi nhớ chế độ sắp xếp "Mới nhất trước" khi bạn chọn trực tiếp trong app).*
+            - **Cuộn dọc thông minh hệ số `1.2`:** Điều chỉnh tỷ lệ khóa trục ngang xuống `|dy| ≥ 1.2 × |dx|` giúp cuộn dọc nhạy và dễ kích hoạt hơn khi bật *Chuyển động giấy tự do*.
+            - **Màn hình chính sắp xếp theo thời gian mở gần đây nhất (`lastOpenedAt`):** Sổ tay vừa mở hoặc vừa chuyển tab sẽ tự động lên đầu danh sách và được lưu lại qua các lần khởi động mà không kích hoạt đồng bộ lại không cần thiết.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

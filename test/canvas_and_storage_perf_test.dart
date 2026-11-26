@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:chemnote/core/models/drawing_elements.dart';
+import 'package:chemnote/core/models/folder.dart';
 import 'package:chemnote/core/models/note_page.dart';
 import 'package:chemnote/core/models/notebook.dart';
 import 'package:chemnote/core/providers/app_state.dart';
@@ -376,6 +377,75 @@ void main() {
           picture.dispose();
         }
       }
+    });
+
+    test('Notebook lastOpenedAt roundtrips and AppState.markNotebookOpened sorts recently opened notebooks first', () async {
+      final tOld = DateTime.utc(2026, 11, 10, 8, 0);
+      final tNew = DateTime.utc(2026, 11, 26, 9, 0);
+      final legacy = Notebook(
+        id: 'nb-legacy',
+        title: 'Legacy',
+        createdAt: tOld,
+        updatedAt: tOld,
+      );
+      expect(legacy.lastOpenedAt, isNull);
+      expect(legacy.effectiveOpenedAt, tOld);
+
+      final withOpened = Notebook.fromJson({
+        ...legacy.toJson(),
+        'lastOpenedAt': tNew.toIso8601String(),
+      });
+      expect(withOpened.lastOpenedAt, tNew);
+      expect(withOpened.effectiveOpenedAt, tNew);
+
+      final storage = LocalStorageService(baseDirectory: tempDir);
+      final folder = Folder(
+        id: 'f-open-sort',
+        name: 'Sắp xếp',
+        createdAt: tOld,
+        updatedAt: tOld,
+      );
+      final olderNb = Notebook(
+        id: 'nb-older',
+        title: 'Sổ Mở Lại',
+        folderId: folder.id,
+        createdAt: tOld,
+        updatedAt: tOld,
+        lastOpenedAt: tOld,
+      );
+      final newerNb = Notebook(
+        id: 'nb-newer',
+        title: 'Sổ Mới Hơn',
+        folderId: folder.id,
+        createdAt: tNew,
+        updatedAt: tNew,
+        lastOpenedAt: tNew,
+      );
+      await storage.saveFolders([folder]);
+      await storage.saveNotebooks([olderNb, newerNb]);
+
+      final appState = AppState(storage: storage);
+      addTearDown(appState.dispose);
+      int syncHookCalls = 0;
+      appState.onNotebookChangedForSync = (_) => syncHookCalls++;
+      await appState.loadAll();
+
+      expect(appState.activeNotebooks.map((n) => n.id).toList(), ['nb-newer', 'nb-older']);
+      expect(appState.getNotebooksInFolder(folder.id).map((n) => n.id).toList(), ['nb-newer', 'nb-older']);
+
+      // Opening olderNb puts it first without changing updatedAt or triggering Drive upload
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      await appState.markNotebookOpened('nb-older');
+      expect(syncHookCalls, 0);
+      expect(appState.activeNotebooks.first.id, 'nb-older');
+      expect(appState.getNotebooksInFolder(folder.id).first.id, 'nb-older');
+      expect(appState.getNotebookById('nb-older')!.updatedAt, tOld);
+
+      // Persists across reload
+      final reloaded = AppState(storage: storage);
+      addTearDown(reloaded.dispose);
+      await reloaded.loadAll();
+      expect(reloaded.activeNotebooks.first.id, 'nb-older');
     });
   });
 }
