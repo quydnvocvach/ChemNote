@@ -941,24 +941,21 @@ class _QuickPenFavoritesDockState extends State<QuickPenFavoritesDock> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Tooltip(
-            message: 'Kéo lên / xuống để di chuyển thanh bút yêu thích',
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onVerticalDragStart: (_) => widget.onVerticalDragStart?.call(),
-              onVerticalDragUpdate: (d) =>
-                  widget.onVerticalDragDelta?.call(d.delta.dy),
-              onVerticalDragEnd: (_) => widget.onVerticalDragEnd?.call(),
-              onVerticalDragCancel: () => widget.onVerticalDragEnd?.call(),
-              child: Container(
-                width: 34,
-                height: 22,
-                alignment: Alignment.center,
-                child: Icon(
-                  Icons.drag_handle_rounded,
-                  size: 16,
-                  color: isDark ? Colors.white54 : Colors.black45,
-                ),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onVerticalDragStart: (_) => widget.onVerticalDragStart?.call(),
+            onVerticalDragUpdate: (d) =>
+                widget.onVerticalDragDelta?.call(d.delta.dy),
+            onVerticalDragEnd: (_) => widget.onVerticalDragEnd?.call(),
+            onVerticalDragCancel: () => widget.onVerticalDragEnd?.call(),
+            child: Container(
+              width: 34,
+              height: 22,
+              alignment: Alignment.center,
+              child: Icon(
+                Icons.drag_handle_rounded,
+                size: 16,
+                color: isDark ? Colors.white54 : Colors.black45,
               ),
             ),
           ),

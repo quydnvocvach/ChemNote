@@ -160,21 +160,24 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.8.2 with APK
+      - name: Publish Release v3.8.3 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.8.2
-          name: ChemNote Pro v3.8.2 (Tối ưu 144Hz siêu mượt, Sửa miss chạm đầu tiên & Menu giữ lâu Lasso)
+          tag_name: v3.8.3
+          name: ChemNote Pro v3.8.3 (Menu Lasso tại chỗ, Ẩn thanh thông báo, Xuất ảnh PNG + Watermark & Undo/Redo toàn trang)
           body: |
-            ### ChemNote Pro v3.8.2
-            - **Tối ưu 144Hz không khựng khi viết/lướt/chạm/zoom:**
-              - Loại bỏ toàn bộ các lần `setState` rebuild cây giao diện lớn khi bút hover, chạm, nhấc hoặc hết cooldown bằng `ValueListenableBuilder` bọc riêng `InteractiveViewer` (`_viewportGateNotifier`) kèm gom Timer hover/cooldown (không cấp phát Timer thừa ở 240Hz).
-              - Bỏ double-rebuild khi lưu nét (`_commitPage`, `_undo`, `_redo`) và giảm ngưỡng kích hoạt vuốt 1 ngón xuống `2.5px` (cộng bù quãng đầu ngay khi kích hoạt) cho cảm giác lướt trang tức thì, mượt như trước.
-            - **Sửa triệt để lỗi miss thao tác ngón tay đầu tiên sau khi nghỉ hoặc sau khi viết:**
-              - Áp dụng nguyên tắc toàn vẹn luồng chạm ở `MainActivity.kt` (chỉ chặn trọn vẹn từ `ACTION_DOWN` đến `ACTION_UP`, không phát `ACTION_CANCEL` giả làm lệch bộ đếm pointer của Flutter).
-              - Hạ cooldown sau bút xuống `250ms`/`300ms`, tự dọn trạng thái chạm cũ sau `700ms` cho **Hoàn tác 2 ngón** ăn ngay từ lần đầu, và phân biệt vi dịch chuyển còn giữ tay với thao tác lướt có chủ đích.
-            - **Nhấn giữ lâu trong công cụ Lasso (`420ms` bằng bút hoặc ngón tay):**
-              - Bật ngay thanh tính năng Lasso để **Dán** trực tiếp tại vị trí nhấn giữ (ngay cả khi chưa khoanh chọn gì), **Chọn tất cả**, **Đổi màu**, **Đổi cỡ nét / Kích thước (50%–150%, 1.5–7.0 px)**, **Cắt / Sao chép / Nhân bản / Xoay / Xóa**.
+            ### ChemNote Pro v3.8.3
+            - **Menu Lasso neo ngay tại vị trí nhấn giữ hoặc vùng chọn:**
+              - Khi giữ lâu hoặc khoanh vùng Lasso, thanh công cụ nổi xuất hiện sát phía trên (tự động lật xuống dưới nếu sát mép trên) và di chuyển theo vùng chọn khi cuộn/zoom.
+            - **Ẩn thanh thông báo hệ thống (Immersive Status Bar):**
+              - Tự động ẩn thanh trạng thái Android/HarmonyOS để tối đa không gian viết, vuốt nhẹ từ cạnh trên xuống để xem lại khi cần.
+            - **Gọn gàng thanh bút yêu thích:**
+              - Xoá dòng chú thích "Kéo lên / xuống để di chuyển thanh bút yêu thích" mà vẫn giữ nguyên thao tác kéo thả.
+            - **Xuất trang ra ảnh PNG & Watermark "Đinh Ngọc Quý" (Cormorant Garamond SemiBold Italic):**
+              - Thêm nút **Xuất ảnh PNG** cho từng trang hoặc nhiều trang đã chọn trong danh sách trang (lưu vào Thư viện ảnh hoặc chia sẻ ngay).
+              - Tự động gắn chữ ký *"Đinh Ngọc Quý"* màu đen in nghiêng ở góc dưới bên phải vùng xanh lá của mẫu giấy xanh lá trên tất cả ảnh PNG xuất ra, tệp PDF xuất trong app và PDF tự động đồng bộ lên Google Drive.
+            - **Mở rộng Hoàn tác / Làm lại (2 mũi tên & chạm 2/3 ngón):**
+              - Hỗ trợ đầy đủ Undo / Redo cho **chèn/xoá/sửa ảnh**, **thêm trang**, **xoá trang (lẻ hoặc hàng loạt)**, **dán trang**, **nhân bản trang**, **sắp xếp lại thứ tự trang** và **nhập PDF** song song với các nét vẽ tay.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

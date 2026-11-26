@@ -21,6 +21,7 @@ import '../../core/services/hardware_service.dart';
 import '../chemistry/chemistry_hub_sheet.dart';
 import '../chemistry/widgets/stencil_picker_sheet.dart';
 import '../library/search_screen.dart';
+import '../pdf/page_image_export_service.dart';
 import '../pdf/pdf_export_service.dart';
 import '../pdf/pdf_import_progress_overlay.dart';
 import '../pdf/pdf_import_service.dart';
@@ -94,6 +95,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   final ImagePicker _imagePicker = ImagePicker();
   final PdfImportService _pdfImportService = PdfImportService();
   final PdfExportService _pdfExportService = PdfExportService();
+  final PageImageExportService _pageImageExportService =
+      PageImageExportService();
 
   // 144Hz zero-rebuild ValueNotifiers for ActiveStrokePainter (hover ring removed)
   final ValueNotifier<Stroke?> _activeStrokeNotifier = ValueNotifier(null);
@@ -194,6 +197,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   bool _lassoLongPressMenuVisible = false;
   Offset? _lassoLongPressPagePos;
   String? _lassoLongPressPageId;
+  Offset? _lassoLongPressViewportPos;
 
   // Smoothing & M-Pencil 3 curve
   bool _autoNeatenEnabled = true;
@@ -223,9 +227,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   bool _eraserChangedPage = false;
   NotePage? _pageBeforeGesture;
 
-  // Undo / Redo per page
-  final Map<String, List<NotePage>> _undoStacks = {};
-  final Map<String, List<NotePage>> _redoStacks = {};
+  // Unified Undo / Redo per notebook (covers canvas edits, images, AND page add/delete/paste/duplicate/reorder)
+  final Map<String, List<_EditorUndoEntry>> _notebookUndoStacks = {};
+  final Map<String, List<_EditorUndoEntry>> _notebookRedoStacks = {};
   static const int _maxHistory = 40;
 
   // Interactive overlay selection (Text, Image, Stencil)
@@ -720,16 +724,28 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     return notebook.pages[idx];
   }
 
-  List<NotePage> _undoFor(String pageId) =>
-      _undoStacks.putIfAbsent(pageId, () => <NotePage>[]);
-  List<NotePage> _redoFor(String pageId) =>
-      _redoStacks.putIfAbsent(pageId, () => <NotePage>[]);
+  List<_EditorUndoEntry> _undoStackFor(String notebookId) =>
+      _notebookUndoStacks.putIfAbsent(notebookId, () => <_EditorUndoEntry>[]);
+  List<_EditorUndoEntry> _redoStackFor(String notebookId) =>
+      _notebookRedoStacks.putIfAbsent(notebookId, () => <_EditorUndoEntry>[]);
 
   void _pushUndo(NotePage snapshot) {
-    final stack = _undoFor(snapshot.id);
-    stack.add(snapshot);
+    final stack = _undoStackFor(_activeNotebookId);
+    stack.add(_EditorUndoEntry.page(snapshot));
     if (stack.length > _maxHistory) stack.removeAt(0);
-    _redoFor(snapshot.id).clear();
+    _redoStackFor(_activeNotebookId).clear();
+  }
+
+  void _pushNotebookPagesUndo(Notebook notebook) {
+    final stack = _undoStackFor(notebook.id);
+    stack.add(
+      _EditorUndoEntry.notebookPages(
+        List<NotePage>.of(notebook.pages),
+        _currentPageIndex.clamp(0, math.max(0, notebook.pages.length - 1)),
+      ),
+    );
+    if (stack.length > _maxHistory) stack.removeAt(0);
+    _redoStackFor(notebook.id).clear();
   }
 
   Future<void> _commitPage(
@@ -741,25 +757,96 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     await context.read<AppState>().updatePage(_activeNotebookId, updatedPage);
   }
 
-  Future<void> _undo(NotePage currentPage) async {
-    final stack = _undoFor(currentPage.id);
-    if (stack.isEmpty) return;
-    final previous = stack.removeLast();
-    _redoFor(currentPage.id).add(currentPage);
+  void _clearActiveSelectionOverlaysAfterHistory({NotePage? targetPage}) {
     _lassoController.clear();
-    _repaintVersion++;
-    await context.read<AppState>().updatePage(_activeNotebookId, previous);
+    _lassoLongPressMenuVisible = false;
+    _lassoLongPressPagePos = null;
+    _lassoLongPressPageId = null;
+    _lassoLongPressViewportPos = null;
+    if (targetPage == null) {
+      _selectedImageId = null;
+      _croppingImageId = null;
+      _cropDraftNotifier.value = null;
+      _selectedTextId = null;
+      _editingTextId = null;
+      _selectedStencilId = null;
+      return;
+    }
+    if (_selectedImageId != null &&
+        !targetPage.imageElements.any((e) => e.id == _selectedImageId)) {
+      _selectedImageId = null;
+      _croppingImageId = null;
+      _cropDraftNotifier.value = null;
+    }
+    if (_selectedTextId != null &&
+        !targetPage.textElements.any((e) => e.id == _selectedTextId)) {
+      _selectedTextId = null;
+      _editingTextId = null;
+    }
+    if (_selectedStencilId != null &&
+        !targetPage.stencilElements.any((e) => e.id == _selectedStencilId)) {
+      _selectedStencilId = null;
+    }
   }
 
-  Future<void> _redo(NotePage currentPage) async {
-    final stack = _redoFor(currentPage.id);
-    if (stack.isEmpty) return;
-    final next = stack.removeLast();
-    _undoFor(currentPage.id).add(currentPage);
-    _lassoController.clear();
-    _repaintVersion++;
-    await context.read<AppState>().updatePage(_activeNotebookId, next);
+  Future<void> _applyHistoryStep(
+    Notebook notebook, {
+    required bool isUndo,
+  }) async {
+    final fromStack =
+        isUndo ? _undoStackFor(notebook.id) : _redoStackFor(notebook.id);
+    final toStack =
+        isUndo ? _redoStackFor(notebook.id) : _undoStackFor(notebook.id);
+    while (fromStack.isNotEmpty) {
+      final entry = fromStack.removeLast();
+      if (entry.isNotebookLevel) {
+        final targetPages = entry.notebookPagesSnapshot!;
+        toStack.add(
+          _EditorUndoEntry.notebookPages(
+            List<NotePage>.of(notebook.pages),
+            _currentPageIndex.clamp(0, math.max(0, notebook.pages.length - 1)),
+          ),
+        );
+        if (toStack.length > _maxHistory) toStack.removeAt(0);
+        _clearActiveSelectionOverlaysAfterHistory();
+        _repaintVersion++;
+        final appState = context.read<AppState>();
+        await appState.replaceNotebookPages(notebook.id, targetPages);
+        if (!mounted) return;
+        final targetIdx = (entry.activePageIndex ?? _currentPageIndex)
+            .clamp(0, math.max(0, targetPages.length - 1));
+        _jumpToPage(targetIdx);
+        return;
+      }
+
+      final targetPage = entry.pageSnapshot!;
+      final currentPageMatch =
+          notebook.pages.where((p) => p.id == targetPage.id).firstOrNull;
+      if (currentPageMatch == null) {
+        // Skip orphaned page entry if that page no longer exists.
+        continue;
+      }
+      toStack.add(_EditorUndoEntry.page(currentPageMatch));
+      if (toStack.length > _maxHistory) toStack.removeAt(0);
+      _clearActiveSelectionOverlaysAfterHistory(targetPage: targetPage);
+      _repaintVersion++;
+      final appState = context.read<AppState>();
+      await appState.updatePage(notebook.id, targetPage);
+      if (!mounted) return;
+      final restoredIdx =
+          notebook.pages.indexWhere((p) => p.id == targetPage.id);
+      if (restoredIdx >= 0 && restoredIdx != _currentPageIndex) {
+        _jumpToPage(restoredIdx);
+      }
+      return;
+    }
   }
+
+  Future<void> _undo(Notebook notebook) =>
+      _applyHistoryStep(notebook, isUndo: true);
+
+  Future<void> _redo(Notebook notebook) =>
+      _applyHistoryStep(notebook, isUndo: false);
 
   void _syncCurrentPageIndex(int idx) {
     _currentPageIndex = idx;
@@ -807,6 +894,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       _lassoLongPressMenuVisible = false;
       _lassoLongPressPagePos = null;
       _lassoLongPressPageId = null;
+      _lassoLongPressViewportPos = null;
       _lassoController.clear();
       _selectedTextId = null;
       _selectedImageId = null;
@@ -882,6 +970,45 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _ensureVerticalLayoutCache(notebook);
     final clamped = pageIndex.clamp(0, _cachedPageTops.length - 1);
     return _cachedPageTops[clamped];
+  }
+
+  Offset? _pagePointToViewport(
+    Notebook notebook,
+    NotePage page,
+    Offset pagePoint,
+    AppState appState,
+    Size vpSize,
+  ) {
+    if (page.isInfiniteWhiteboard || notebook.isWhiteboard) {
+      return MatrixUtils.transformPoint(
+        _whiteboardTransformController.value,
+        pagePoint,
+      );
+    }
+    final Size pageSize = PaperMetrics.pageSize(
+      isLandscape: page.isLandscape,
+      isInfiniteWhiteboard: page.isInfiniteWhiteboard,
+    );
+    if (appState.verticalContinuousScroll) {
+      final int pageIdx = notebook.pages.indexWhere((p) => p.id == page.id);
+      if (pageIdx < 0) return null;
+      final double pageTopY = _pageTopOffsetY(notebook, pageIdx);
+      final double maxW = _maxVerticalPageWidth(notebook);
+      final double pageLeftX = 24.0 + (maxW - pageSize.width) * 0.5;
+      return MatrixUtils.transformPoint(
+        _transformController.value,
+        Offset(pageLeftX + pagePoint.dx, pageTopY + pagePoint.dy),
+      );
+    }
+    final double effW = vpSize.width > 0 ? vpSize.width : _editorViewportSize.width;
+    final double effH =
+        vpSize.height > 0 ? vpSize.height : _editorViewportSize.height;
+    final double pageLeftX = math.max(20.0, (effW - pageSize.width) * 0.5);
+    final double pageTopY = math.max(20.0, (effH - pageSize.height) * 0.5);
+    return MatrixUtils.transformPoint(
+      _transformController.value,
+      Offset(pageLeftX + pagePoint.dx, pageTopY + pagePoint.dy),
+    );
   }
 
   void _jumpToPage(int index) {
@@ -1264,6 +1391,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         _lassoLongPressMenuVisible = false;
         _lassoLongPressPagePos = null;
         _lassoLongPressPageId = null;
+        _lassoLongPressViewportPos = null;
       });
     }
 
@@ -1402,7 +1530,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       if (_isDraggingLassoSelection && _lastLassoDragPos != null) {
         final delta = rawPos - _lastLassoDragPos!;
         _lastLassoDragPos = rawPos;
-        _lassoDragOffsetNotifier.value = _lassoDragOffsetNotifier.value + delta;
+        final nextOffset = _lassoDragOffsetNotifier.value + delta;
+        if (_lassoLongPressMenuVisible && nextOffset.distance > 6.0) {
+          _lassoLongPressMenuVisible = false;
+          _lassoLongPressPagePos = null;
+          _lassoLongPressPageId = null;
+          _lassoLongPressViewportPos = null;
+        }
+        _lassoDragOffsetNotifier.value = nextOffset;
       } else if (_lassoController.isDrawingLasso) {
         _lassoController.updateLasso(rawPos);
       }
@@ -1549,7 +1684,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         }
         _pageBeforeGesture = null;
       } else if (_lassoController.isDrawingLasso) {
-        _lassoController.finishLasso(page);
+        final sel = _lassoController.finishLasso(page);
+        if (sel.isNotEmpty && _lassoLongPressMenuVisible) {
+          setState(() {
+            _lassoLongPressMenuVisible = false;
+            _lassoLongPressPagePos = null;
+            _lassoLongPressPageId = null;
+            _lassoLongPressViewportPos = null;
+          });
+        }
       }
       return;
     }
@@ -1681,10 +1824,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         _syncStylusDrawingState();
         _bumpViewportGate();
       }
+      Offset? vpPos;
+      final RenderBox? stackBox =
+          _viewportStackKey.currentContext?.findRenderObject() as RenderBox?;
+      if (stackBox != null && stackBox.hasSize) {
+        vpPos = stackBox.globalToLocal(globalPos);
+      }
       setState(() {
         _lassoLongPressMenuVisible = true;
         _lassoLongPressPagePos = rawPos;
         _lassoLongPressPageId = page.id;
+        _lassoLongPressViewportPos = vpPos;
       });
     });
   }
@@ -2100,7 +2250,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         w = (maxDim * ratio).clamp(48.0, 520.0);
       }
     }
-    final center = _visibleCenterOnPage(page, _currentPageIndex);
+    final liveNb = _getNotebook(context, listen: false);
+    final livePage =
+        liveNb?.pages.where((p) => p.id == page.id).firstOrNull ?? page;
+    final center = _visibleCenterOnPage(livePage, _currentPageIndex);
     final imgEl = ImageElement(
       id: _uuid.v4(),
       x: (center.dx - w * 0.5).clamp(16.0, 5600.0),
@@ -2112,8 +2265,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       zIndex: DateTime.now().millisecondsSinceEpoch,
     );
     await _commitPage(
-      page.copyWith(imageElements: [...page.imageElements, imgEl]),
-      undoSnapshot: page,
+      livePage.copyWith(imageElements: [...livePage.imageElements, imgEl]),
+      undoSnapshot: livePage,
     );
     if (mounted) {
       setState(() {
@@ -2664,6 +2817,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   ) async {
     switch (action) {
       case InsertMenuAction.newPage:
+        _pushNotebookPagesUndo(notebook);
         await context.read<AppState>().addPage(
               notebook.id,
               templateType: currentPage.templateType,
@@ -2683,6 +2837,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         }
         break;
       case InsertMenuAction.newWhiteboard:
+        _pushNotebookPagesUndo(notebook);
         await context.read<AppState>().addPage(
               notebook.id,
               templateType: PaperTemplateType.dotted,
@@ -3001,13 +3156,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       progressBar.hide();
       if (result == null || !mounted) return;
 
-      final firstNewIndex = notebook.pages.length;
-      await context.read<AppState>().updateNotebook(
-            notebook.copyWith(
-              pages: [...notebook.pages, ...result.pages],
-              updatedAt: DateTime.now(),
-            ),
-          );
+      final appState = context.read<AppState>();
+      final liveNb = appState.getNotebookById(notebook.id) ?? notebook;
+      _pushNotebookPagesUndo(liveNb);
+      final firstNewIndex = liveNb.pages.length;
+      await appState.updateNotebook(
+        liveNb.copyWith(
+          pages: [...liveNb.pages, ...result.pages],
+          updatedAt: DateTime.now(),
+        ),
+      );
       if (mounted) {
         _jumpToPage(firstNewIndex);
         ScaffoldMessenger.of(context).showSnackBar(
@@ -3280,6 +3438,201 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     }
   }
 
+  Future<void> _handleExportPagesAsImages(
+    Notebook notebook,
+    List<NotePage> pages,
+  ) async {
+    if (pages.isEmpty || !mounted) return;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text(
+                pages.length == 1
+                    ? 'Xuất trang ${pages.first.index + 1} dưới dạng ảnh PNG'
+                    : 'Xuất ${pages.length} trang dưới dạng ảnh PNG',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              subtitle: const Text(
+                'Độ phân giải cao kèm nền giấy, nét viết tay & chữ ký góc giấy xanh',
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.save_alt_rounded),
+              title: const Text('Lưu ảnh PNG vào máy (Thư viện ảnh)'),
+              onTap: () => Navigator.pop(ctx, 'save'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.share_outlined),
+              title: const Text('Xuất & Chia sẻ ảnh PNG'),
+              onTap: () => Navigator.pop(ctx, 'share'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action == null || !mounted) return;
+
+    final customDir = context.read<AppState>().pdfExportDirectory;
+    final progressNotifier =
+        ValueNotifier<({int current, int total, String stage})>((
+      current: 0,
+      total: math.max(1, pages.length),
+      stage: 'Đang chuẩn bị xuất ảnh PNG...',
+    ));
+    bool dialogOpen = true;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogCtx) {
+        final isDark = Theme.of(dialogCtx).brightness == Brightness.dark;
+        final bg =
+            isDark ? EditorColors.obsidianSurface : EditorColors.lightSurface;
+        final fg = isDark ? Colors.white : EditorColors.lightTextPrimary;
+        final sub = isDark ? Colors.white70 : EditorColors.lightTextMuted;
+        return PopScope(
+          canPop: false,
+          child: AlertDialog(
+            backgroundColor: bg,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+              side: BorderSide(
+                color: isDark ? Colors.white12 : Colors.black12,
+              ),
+            ),
+            contentPadding: const EdgeInsets.fromLTRB(22, 20, 22, 20),
+            content: ValueListenableBuilder<
+                ({int current, int total, String stage})>(
+              valueListenable: progressNotifier,
+              builder: (_, state, __) {
+                final double ratio = state.total > 0
+                    ? (state.current / state.total).clamp(0.0, 1.0)
+                    : 0.0;
+                final int pct = (ratio * 100).round();
+                return SizedBox(
+                  width: 310,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.image_outlined,
+                            color: EditorColors.activeBlue,
+                            size: 22,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              action == 'share'
+                                  ? 'Đang tạo & chia sẻ ảnh PNG'
+                                  : 'Đang xuất ảnh PNG',
+                              style: TextStyle(
+                                color: fg,
+                                fontSize: 15.5,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            '$pct%',
+                            style: const TextStyle(
+                              color: EditorColors.activeBlue,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: LinearProgressIndicator(
+                          value: state.current == 0 ? null : ratio,
+                          minHeight: 7,
+                          backgroundColor: isDark
+                              ? Colors.white12
+                              : const Color(0xFFE2E8F0),
+                          valueColor: const AlwaysStoppedAnimation<Color>(
+                            EditorColors.activeBlue,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        state.stage,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: sub, fontSize: 12.5),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+      },
+    );
+
+    void closeProgressDialog() {
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+    }
+
+    try {
+      void updateProgress(int current, int total, String stage) {
+        progressNotifier.value = (
+          current: current,
+          total: total,
+          stage: stage,
+        );
+      }
+
+      if (action == 'share') {
+        await _pageImageExportService.sharePagesAsPngs(
+          notebook: notebook,
+          pages: pages,
+          onProgress: updateProgress,
+        );
+        closeProgressDialog();
+      } else {
+        final saved = await _pageImageExportService.exportPagesToPngFiles(
+          notebook: notebook,
+          pages: pages,
+          customDirectory: customDir,
+          onProgress: updateProgress,
+        );
+        closeProgressDialog();
+        if (mounted) {
+          final String summary = saved.length == 1
+              ? 'Đã lưu ảnh PNG tại: ${saved.first.path}'
+              : 'Đã lưu ${saved.length} ảnh PNG vào: ${saved.first.parent.path}';
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(summary)),
+          );
+        }
+      }
+    } catch (e) {
+      closeProgressDialog();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Lỗi xuất ảnh PNG: $e')),
+        );
+      }
+    } finally {
+      closeProgressDialog();
+      progressNotifier.dispose();
+    }
+  }
+
   void _stopScrollFling() {
     _scrollFlingTicker?.stop();
     _flingVx = 0.0;
@@ -3465,6 +3818,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     if (_isAddingPullPage) return;
     _isAddingPullPage = true;
     try {
+      _pushNotebookPagesUndo(notebook);
       await context.read<AppState>().addPage(
             notebook.id,
             templateType: lastPage.templateType,
@@ -4322,26 +4676,59 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                 : FontWeight.w500,
                           ),
                         ),
-                        if (!selectionMode && liveNotebook.pages.length > 1)
-                          GestureDetector(
-                            onTap: () async {
-                              await appState.deletePage(liveNotebook.id, p.id);
-                              if (mounted &&
-                                  _currentPageIndex >=
-                                      liveNotebook.pages.length - 1) {
-                                setState(() {
-                                  _syncCurrentPageIndex(
-                                    math.max(0, liveNotebook.pages.length - 2),
+                        if (!selectionMode)
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              GestureDetector(
+                                onTap: () async {
+                                  Navigator.pop(ctx);
+                                  await _handleExportPagesAsImages(
+                                    liveNotebook,
+                                    [p],
                                   );
-                                  _renderedWindowCenter = _currentPageIndex;
-                                });
-                              }
-                            },
-                            child: const Icon(
-                              Icons.delete_outline_rounded,
-                              size: 16,
-                              color: Color(0xFFEF4444),
-                            ),
+                                },
+                                child: const Padding(
+                                  padding: EdgeInsets.symmetric(horizontal: 2),
+                                  child: Icon(
+                                    Icons.image_outlined,
+                                    size: 16,
+                                    color: EditorColors.activeBlue,
+                                  ),
+                                ),
+                              ),
+                              if (liveNotebook.pages.length > 1) ...[
+                                const SizedBox(width: 6),
+                                GestureDetector(
+                                  onTap: () async {
+                                    _pushNotebookPagesUndo(liveNotebook);
+                                    await appState.deletePage(
+                                      liveNotebook.id,
+                                      p.id,
+                                    );
+                                    if (mounted &&
+                                        _currentPageIndex >=
+                                            liveNotebook.pages.length - 1) {
+                                      setState(() {
+                                        _syncCurrentPageIndex(
+                                          math.max(
+                                            0,
+                                            liveNotebook.pages.length - 2,
+                                          ),
+                                        );
+                                        _renderedWindowCenter =
+                                            _currentPageIndex;
+                                      });
+                                    }
+                                  },
+                                  child: const Icon(
+                                    Icons.delete_outline_rounded,
+                                    size: 16,
+                                    color: Color(0xFFEF4444),
+                                  ),
+                                ),
+                              ],
+                            ],
                           ),
                       ],
                     ),
@@ -4458,6 +4845,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                   );
                                   final insertPos = (_currentPageIndex + 1)
                                       .clamp(0, liveNotebook.pages.length);
+                                  _pushNotebookPagesUndo(liveNotebook);
                                   await appState.insertPagesAt(
                                     liveNotebook.id,
                                     pasted,
@@ -4501,6 +4889,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                             FilledButton.icon(
                               onPressed: () async {
                                 Navigator.pop(ctx);
+                                _pushNotebookPagesUndo(liveNotebook);
                                 final last = liveNotebook.pages.last;
                                 await appState.addPage(
                                   liveNotebook.id,
@@ -4623,6 +5012,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                 final fromIdx = details.data;
                                 final toIdx = origIdx;
                                 if (fromIdx == toIdx) return;
+                                _pushNotebookPagesUndo(liveNotebook);
                                 await appState.reorderPages(
                                   liveNotebook.id,
                                   fromIdx,
@@ -4717,6 +5107,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                         _clonePagesForPaste(selected);
                                     final insertPos = (lastSelectedIdx + 1)
                                         .clamp(0, liveNotebook.pages.length);
+                                    _pushNotebookPagesUndo(liveNotebook);
                                     await appState.insertPagesAt(
                                       liveNotebook.id,
                                       dupes,
@@ -4768,6 +5159,26 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                             ),
                           ),
                           const SizedBox(width: 8),
+                          FilledButton.tonalIcon(
+                            onPressed: selectedPageIds.isEmpty
+                                ? null
+                                : () async {
+                                    final chosen = selectedPagesOrdered();
+                                    Navigator.pop(ctx);
+                                    await _handleExportPagesAsImages(
+                                      liveNotebook,
+                                      chosen,
+                                    );
+                                  },
+                            icon: const Icon(
+                              Icons.image_outlined,
+                              size: 17,
+                            ),
+                            label: Text(
+                              'Xuất ảnh (${selectedPageIds.length})',
+                            ),
+                          ),
+                          const SizedBox(width: 8),
                           TextButton.icon(
                             onPressed: selectedPageIds.isEmpty ||
                                     liveNotebook.pages.length <= 1
@@ -4790,6 +5201,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                     }
                                     final countToDelete =
                                         selectedPageIds.length;
+                                    _pushNotebookPagesUndo(liveNotebook);
                                     await appState.deletePages(
                                       liveNotebook.id,
                                       Set<String>.from(selectedPageIds),
@@ -4864,7 +5276,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         appBar: AppBar(title: Text(notebook.title)),
         body: Center(
           child: FilledButton.icon(
-            onPressed: () => appState.addPage(notebook.id),
+            onPressed: () {
+              _pushNotebookPagesUndo(notebook);
+              appState.addPage(notebook.id);
+            },
             icon: const Icon(Icons.add_rounded),
             label: const Text('Thêm trang đầu tiên'),
           ),
@@ -4929,6 +5344,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
           undoSnapshot: currentPage,
         ),
         onDeletePage: () async {
+          if (notebook.pages.length <= 1) return;
+          _pushNotebookPagesUndo(notebook);
           await appState.deletePage(notebook.id, currentPage.id);
           if (mounted) {
             setState(
@@ -5000,15 +5417,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
             activeTool: _activeTool,
             lastPenTool: _lastPenTool,
             activeColor: _effectiveColor,
-            canUndo: _undoFor(currentPage.id).isNotEmpty,
-            canRedo: _redoFor(currentPage.id).isNotEmpty,
+            canUndo: _undoStackFor(notebook.id).isNotEmpty,
+            canRedo: _redoStackFor(notebook.id).isNotEmpty,
             zoomWindowEnabled: _zoomWindowEnabled,
             rulerVisible: _rulerVisible,
             palmRejectionEnabled: appState.palmRejectionEnabled,
             stylusPanMode: _stylusPanMode,
             isRecordingAudio: _isRecordingAudio,
-            onUndo: () => _undo(currentPage),
-            onRedo: () => _redo(currentPage),
+            onUndo: () => _undo(notebook),
+            onRedo: () => _redo(notebook),
             onSelectTool: (tool) {
               _commitActiveTextEdit();
               setState(() {
@@ -5027,6 +5444,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                   _lassoLongPressMenuVisible = false;
                   _lassoLongPressPagePos = null;
                   _lassoLongPressPageId = null;
+                  _lassoLongPressViewportPos = null;
                 }
                 if (_activeTool != EditorTool.image) _selectedImageId = null;
               });
@@ -5652,9 +6070,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                           elapsed < 350 &&
                           maxFingers >= 2) {
                         if (maxFingers == 2) {
-                          _undo(currentPage);
+                          _undo(notebook);
                         } else {
-                          _redo(currentPage);
+                          _redo(notebook);
                         }
                       }
                     }
@@ -6440,181 +6858,259 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     );
                   }(),
 
-                // Pro Lasso Floating Context Menu (selection OR long-press)
+                // Pro Lasso Floating Context Menu anchored right next to selection or long-press point
                 if (_lassoController.hasSelection ||
                     (_activeTool == EditorTool.lasso &&
                         _lassoLongPressMenuVisible))
-                  Positioned(
-                    top: 12,
-                    left: 58,
-                    right: 58,
-                    child: Center(
-                      child: Listener(
-                        onPointerDown: (e) =>
-                            _overlayTouchPointers.add(e.pointer),
-                        onPointerUp: (e) =>
-                            _overlayTouchPointers.remove(e.pointer),
-                        onPointerCancel: (e) =>
-                            _overlayTouchPointers.remove(e.pointer),
-                        child: Builder(
-                          builder: (_) {
-                            final NotePage activeSelectionPage =
-                                (_lassoController.activePageId != null
-                                        ? notebook.pages
-                                            .where(
-                                              (p) =>
-                                                  p.id ==
-                                                  _lassoController
-                                                      .activePageId,
-                                            )
-                                            .firstOrNull
-                                        : null) ??
-                                    currentPage;
-                            final NotePage pasteTargetPage =
-                                (_lassoLongPressPageId != null
-                                        ? notebook.pages
-                                            .where(
-                                              (p) =>
-                                                  p.id == _lassoLongPressPageId,
-                                            )
-                                            .firstOrNull
-                                        : null) ??
-                                    currentPage;
-                            return LassoFloatingMenu(
-                              selectedCount:
-                                  _lassoController.selection.totalCount,
-                              hasClipboard: _lassoController.hasClipboard,
-                              onCut: () {
-                                final updated = _lassoController
-                                    .cutSelection(activeSelectionPage);
-                                _commitPage(
-                                  updated,
-                                  undoSnapshot: activeSelectionPage,
-                                );
-                              },
-                              onCopy: () {
-                                _lassoController
-                                    .copySelection(activeSelectionPage);
-                              },
-                              onPaste: () {
-                                final Offset? targetCenter =
-                                    _lassoLongPressPageId == pasteTargetPage.id
-                                        ? _lassoLongPressPagePos
-                                        : null;
-                                final updated = _lassoController.pasteClipboard(
-                                  pasteTargetPage,
-                                  idGenerator: _uuid.v4,
-                                  targetCenter: targetCenter,
-                                );
-                                _commitPage(
-                                  updated,
-                                  undoSnapshot: pasteTargetPage,
-                                );
-                                setState(() {
-                                  _lassoLongPressMenuVisible = false;
-                                  _lassoLongPressPagePos = null;
-                                  _lassoLongPressPageId = null;
-                                });
-                              },
-                              onSelectAll: () {
-                                _lassoController.selectAll(pasteTargetPage);
-                              },
-                              onDuplicate: () {
-                                final updated =
-                                    _lassoController.duplicateSelection(
-                                  activeSelectionPage,
-                                  idGenerator: _uuid.v4,
-                                );
-                                _commitPage(
-                                  updated,
-                                  undoSnapshot: activeSelectionPage,
-                                );
-                              },
-                              onRotate: () {
-                                final updated = _lassoController.rotateSelection(
-                                  activeSelectionPage,
-                                  math.pi / 12,
-                                );
-                                _commitPage(
-                                  updated,
-                                  undoSnapshot: activeSelectionPage,
-                                );
-                              },
-                              onScaleUp: () {
-                                final updated = _lassoController.scaleSelection(
-                                  activeSelectionPage,
-                                  1.15,
-                                );
-                                _commitPage(
-                                  updated,
-                                  undoSnapshot: activeSelectionPage,
-                                );
-                              },
-                              onScaleDown: () {
-                                final updated = _lassoController.scaleSelection(
-                                  activeSelectionPage,
-                                  0.85,
-                                );
-                                _commitPage(
-                                  updated,
-                                  undoSnapshot: activeSelectionPage,
-                                );
-                              },
-                              onScaleBy: (factor) {
-                                final updated = _lassoController.scaleSelection(
-                                  activeSelectionPage,
-                                  factor,
-                                );
-                                _commitPage(
-                                  updated,
-                                  undoSnapshot: activeSelectionPage,
-                                );
-                              },
-                              onSetStrokeWidth: (width) {
-                                final updated = _lassoController
-                                    .setSelectionStrokeWidth(
-                                  activeSelectionPage,
-                                  width,
-                                );
-                                _commitPage(
-                                  updated,
-                                  undoSnapshot: activeSelectionPage,
-                                );
-                              },
-                              onRecolor: (color) {
-                                final updated =
-                                    _lassoController.recolorSelection(
-                                  activeSelectionPage,
-                                  // ignore: deprecated_member_use
-                                  color.value,
-                                );
-                                _commitPage(
-                                  updated,
-                                  undoSnapshot: activeSelectionPage,
-                                );
-                              },
-                              onDelete: () {
-                                final updated = _lassoController
-                                    .deleteSelection(activeSelectionPage);
-                                _commitPage(
-                                  updated,
-                                  undoSnapshot: activeSelectionPage,
-                                );
-                              },
-                              onClear: () {
-                                _lassoController.clear();
-                                setState(() {
-                                  _lassoLongPressMenuVisible = false;
-                                  _lassoLongPressPagePos = null;
-                                  _lassoLongPressPageId = null;
-                                });
-                              },
-                            );
-                          },
-                        ),
+                  () {
+                    final NotePage activeSelectionPage =
+                        (_lassoController.activePageId != null
+                                ? notebook.pages
+                                    .where(
+                                      (p) =>
+                                          p.id ==
+                                          _lassoController.activePageId,
+                                    )
+                                    .firstOrNull
+                                : null) ??
+                            currentPage;
+                    final NotePage pasteTargetPage =
+                        (_lassoLongPressPageId != null
+                                ? notebook.pages
+                                    .where(
+                                      (p) => p.id == _lassoLongPressPageId,
+                                    )
+                                    .firstOrNull
+                                : null) ??
+                            currentPage;
+                    final Widget menuWidget = Listener(
+                      onPointerDown: (e) =>
+                          _overlayTouchPointers.add(e.pointer),
+                      onPointerUp: (e) =>
+                          _overlayTouchPointers.remove(e.pointer),
+                      onPointerCancel: (e) =>
+                          _overlayTouchPointers.remove(e.pointer),
+                      child: LassoFloatingMenu(
+                        selectedCount: _lassoController.selection.totalCount,
+                        hasClipboard: _lassoController.hasClipboard,
+                        onCut: () {
+                          final updated = _lassoController
+                              .cutSelection(activeSelectionPage);
+                          _commitPage(
+                            updated,
+                            undoSnapshot: activeSelectionPage,
+                          );
+                        },
+                        onCopy: () {
+                          _lassoController.copySelection(activeSelectionPage);
+                        },
+                        onPaste: () {
+                          final Offset? targetCenter =
+                              _lassoLongPressPageId == pasteTargetPage.id
+                                  ? _lassoLongPressPagePos
+                                  : null;
+                          final updated = _lassoController.pasteClipboard(
+                            pasteTargetPage,
+                            idGenerator: _uuid.v4,
+                            targetCenter: targetCenter,
+                          );
+                          _commitPage(
+                            updated,
+                            undoSnapshot: pasteTargetPage,
+                          );
+                          setState(() {
+                            _lassoLongPressMenuVisible = false;
+                            _lassoLongPressPagePos = null;
+                            _lassoLongPressPageId = null;
+                            _lassoLongPressViewportPos = null;
+                          });
+                        },
+                        onSelectAll: () {
+                          _lassoController.selectAll(pasteTargetPage);
+                        },
+                        onDuplicate: () {
+                          final updated = _lassoController.duplicateSelection(
+                            activeSelectionPage,
+                            idGenerator: _uuid.v4,
+                          );
+                          _commitPage(
+                            updated,
+                            undoSnapshot: activeSelectionPage,
+                          );
+                        },
+                        onRotate: () {
+                          final updated = _lassoController.rotateSelection(
+                            activeSelectionPage,
+                            math.pi / 12,
+                          );
+                          _commitPage(
+                            updated,
+                            undoSnapshot: activeSelectionPage,
+                          );
+                        },
+                        onScaleUp: () {
+                          final updated = _lassoController.scaleSelection(
+                            activeSelectionPage,
+                            1.15,
+                          );
+                          _commitPage(
+                            updated,
+                            undoSnapshot: activeSelectionPage,
+                          );
+                        },
+                        onScaleDown: () {
+                          final updated = _lassoController.scaleSelection(
+                            activeSelectionPage,
+                            0.85,
+                          );
+                          _commitPage(
+                            updated,
+                            undoSnapshot: activeSelectionPage,
+                          );
+                        },
+                        onScaleBy: (factor) {
+                          final updated = _lassoController.scaleSelection(
+                            activeSelectionPage,
+                            factor,
+                          );
+                          _commitPage(
+                            updated,
+                            undoSnapshot: activeSelectionPage,
+                          );
+                        },
+                        onSetStrokeWidth: (width) {
+                          final updated =
+                              _lassoController.setSelectionStrokeWidth(
+                            activeSelectionPage,
+                            width,
+                          );
+                          _commitPage(
+                            updated,
+                            undoSnapshot: activeSelectionPage,
+                          );
+                        },
+                        onRecolor: (color) {
+                          final updated = _lassoController.recolorSelection(
+                            activeSelectionPage,
+                            // ignore: deprecated_member_use
+                            color.value,
+                          );
+                          _commitPage(
+                            updated,
+                            undoSnapshot: activeSelectionPage,
+                          );
+                        },
+                        onDelete: () {
+                          final updated = _lassoController
+                              .deleteSelection(activeSelectionPage);
+                          _commitPage(
+                            updated,
+                            undoSnapshot: activeSelectionPage,
+                          );
+                        },
+                        onClear: () {
+                          _lassoController.clear();
+                          setState(() {
+                            _lassoLongPressMenuVisible = false;
+                            _lassoLongPressPagePos = null;
+                            _lassoLongPressPageId = null;
+                            _lassoLongPressViewportPos = null;
+                          });
+                        },
                       ),
-                    ),
-                  ),
+                    );
+
+                    return Positioned.fill(
+                      child: AnimatedBuilder(
+                        animation: Listenable.merge([
+                          _transformController,
+                          _whiteboardTransformController,
+                          _lassoDragOffsetNotifier,
+                          _lassoController,
+                        ]),
+                        child: menuWidget,
+                        builder: (_, child) {
+                          Offset? anchorTop;
+                          Offset? anchorBottom;
+                          if (_lassoLongPressMenuVisible &&
+                              (_lassoLongPressPagePos != null ||
+                                  _lassoLongPressViewportPos != null)) {
+                            final Offset? lpAnchor = _lassoLongPressPagePos !=
+                                    null
+                                ? _pagePointToViewport(
+                                    notebook,
+                                    pasteTargetPage,
+                                    _lassoLongPressPagePos!,
+                                    appState,
+                                    vpSize,
+                                  )
+                                : null;
+                            anchorTop = lpAnchor ?? _lassoLongPressViewportPos;
+                            anchorBottom = anchorTop;
+                          } else if (_lassoController.hasSelection &&
+                              _lassoController.selectionBounds != null) {
+                            final Rect movedBounds = _lassoController
+                                .selectionBounds!
+                                .shift(_lassoDragOffsetNotifier.value);
+                            anchorTop = _pagePointToViewport(
+                              notebook,
+                              activeSelectionPage,
+                              Offset(movedBounds.center.dx, movedBounds.top),
+                              appState,
+                              vpSize,
+                            );
+                            anchorBottom = _pagePointToViewport(
+                              notebook,
+                              activeSelectionPage,
+                              Offset(movedBounds.center.dx, movedBounds.bottom),
+                              appState,
+                              vpSize,
+                            );
+                          }
+
+                          const double estMenuH = 52.0;
+                          const double gap = 14.0;
+                          double menuTop = 12.0;
+                          Alignment alignment = Alignment.topCenter;
+                          if (anchorTop != null) {
+                            menuTop = anchorTop.dy - estMenuH - gap;
+                            if (menuTop < 10.0) {
+                              menuTop =
+                                  (anchorBottom?.dy ?? anchorTop.dy) + gap;
+                            }
+                            final double maxTop = math.max(
+                              10.0,
+                              vpSize.height - estMenuH - 14.0,
+                            );
+                            menuTop = menuTop.clamp(10.0, maxTop).toDouble();
+                            final double usableW =
+                                math.max(1.0, vpSize.width - 24.0);
+                            final double alignX =
+                                (((anchorTop.dx - 12.0) / usableW) * 2.0 - 1.0)
+                                    .clamp(-1.0, 1.0)
+                                    .toDouble();
+                            alignment = Alignment(alignX, -1.0);
+                          }
+
+                          return Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              Positioned(
+                                top: menuTop,
+                                left: 12,
+                                right: 12,
+                                child: Align(
+                                  alignment: alignment,
+                                  heightFactor: 1.0,
+                                  child: child!,
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+                    );
+                  }(),
 
                     // Busy PDF overlay
                     if (_isBusyPdf)
@@ -9852,4 +10348,30 @@ class _DraggableTextBoxOverlayState extends State<_DraggableTextBoxOverlay> {
       },
     );
   }
+}
+
+class _EditorUndoEntry {
+  final NotePage? pageSnapshot;
+  final List<NotePage>? notebookPagesSnapshot;
+  final int? activePageIndex;
+
+  const _EditorUndoEntry._({
+    this.pageSnapshot,
+    this.notebookPagesSnapshot,
+    this.activePageIndex,
+  });
+
+  factory _EditorUndoEntry.page(NotePage snapshot) =>
+      _EditorUndoEntry._(pageSnapshot: snapshot);
+
+  factory _EditorUndoEntry.notebookPages(
+    List<NotePage> pages,
+    int activePageIndex,
+  ) =>
+      _EditorUndoEntry._(
+        notebookPagesSnapshot: List<NotePage>.unmodifiable(pages),
+        activePageIndex: activePageIndex,
+      );
+
+  bool get isNotebookLevel => notebookPagesSnapshot != null;
 }

@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -31,6 +32,30 @@ class PdfExportService {
   static const double defaultCanvasWidth = 794.0;
   static const double defaultCanvasHeight = 1123.0;
 
+  static const String kWatermarkText = 'Đinh Ngọc Quý';
+  static const String kWatermarkFontAsset =
+      'assets/fonts/CormorantGaramond-SemiBoldItalic.ttf';
+  static pw.Font? _cachedWatermarkFont;
+
+  Future<pw.Font?> _loadWatermarkFont() async {
+    if (_cachedWatermarkFont != null) return _cachedWatermarkFont;
+    try {
+      final data = await rootBundle.load(kWatermarkFontAsset);
+      _cachedWatermarkFont = pw.Font.ttf(data);
+      return _cachedWatermarkFont;
+    } catch (_) {
+      try {
+        final file = File(kWatermarkFontAsset);
+        if (await file.exists()) {
+          final bytes = await file.readAsBytes();
+          _cachedWatermarkFont = pw.Font.ttf(ByteData.sublistView(bytes));
+          return _cachedWatermarkFont;
+        }
+      } catch (_) {}
+      return null;
+    }
+  }
+
   /// Tạo dữ liệu nhị phân PDF nhiều trang từ một `Notebook`.
   Future<Uint8List> buildNotebookPdfBytes(
     Notebook notebook, {
@@ -58,6 +83,15 @@ class PdfExportService {
         : notebook.pages;
 
     final totalPages = pages.length;
+    final bool needsWatermark = pages.any(
+      (p) =>
+          !(p.isInfiniteWhiteboard || notebook.isWhiteboard) &&
+          (p.pdfBackgroundPath == null || p.pdfBackgroundPath!.isEmpty) &&
+          p.templateType == PaperTemplateType.sageRibbon,
+    );
+    final pw.Font? watermarkFont =
+        needsWatermark ? await _loadWatermarkFont() : null;
+
     // Bộ nhớ đệm ảnh đã giải mã theo đường dẫn tệp để tránh đọc lại đĩa nhiều lần.
     final imageCache = <String, pw.MemoryImage>{};
 
@@ -285,6 +319,28 @@ class PdfExportService {
                       scaleY,
                       originX: originX,
                       originY: originY,
+                    ),
+
+                  // 8. Chữ ký watermark trên góc dưới phải dải xanh lá của mẫu giấy sageRibbon
+                  if (!isWhiteboard &&
+                      pdfBgImage == null &&
+                      page.templateType == PaperTemplateType.sageRibbon &&
+                      watermarkFont != null)
+                    pw.Positioned(
+                      right: pageFormat.width * (48.0 / 1600.0),
+                      bottom: 0,
+                      child: pw.Container(
+                        height: pageFormat.height * (100.0 / 2263.0),
+                        alignment: pw.Alignment.centerRight,
+                        child: pw.Text(
+                          kWatermarkText,
+                          style: pw.TextStyle(
+                            font: watermarkFont,
+                            fontSize: pageFormat.height * (38.0 / 2263.0),
+                            color: PdfColor.fromInt(0xFF141815),
+                          ),
+                        ),
+                      ),
                     ),
                 ],
               ),

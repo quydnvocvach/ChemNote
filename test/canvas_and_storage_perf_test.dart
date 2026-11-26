@@ -11,6 +11,8 @@ import 'package:chemnote/features/canvas/canvas_painter.dart';
 import 'package:chemnote/features/canvas/lasso_controller.dart';
 import 'package:chemnote/features/canvas/paper_templates.dart';
 import 'package:chemnote/features/canvas/stroke_engine.dart';
+import 'package:chemnote/features/pdf/page_image_export_service.dart';
+import 'package:chemnote/features/pdf/pdf_export_service.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -595,6 +597,153 @@ void main() {
       final allSel = lasso.selectAll(pastedPage);
       expect(allSel.strokeIds.length, 3);
       expect(lasso.selectionBounds, isNotNull);
+    });
+  });
+
+  group('Watermark PDF/PNG export & page-level Undo/Redo storage (v3.8.3)', () {
+    test('PdfExportService embeds Cormorant watermark on sageRibbon pages only', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final now = DateTime.utc(2026, 11, 26);
+      final sageNb = Notebook(
+        id: 'nb-sage',
+        title: 'Sage Watermark Test',
+        coverColor: 0xFFB4C3AC,
+        defaultTemplate: PaperTemplateType.sageRibbon,
+        pages: [
+          NotePage(
+            id: 'p-sage',
+            index: 0,
+            templateType: PaperTemplateType.sageRibbon,
+            paperColor: PaperColorType.white,
+            updatedAt: now,
+          ),
+        ],
+        createdAt: now,
+        updatedAt: now,
+      );
+      final blankNb = Notebook(
+        id: 'nb-blank',
+        title: 'Blank Test',
+        coverColor: 0xFF3B82F6,
+        defaultTemplate: PaperTemplateType.blank,
+        pages: [
+          NotePage(
+            id: 'p-blank',
+            index: 0,
+            templateType: PaperTemplateType.blank,
+            paperColor: PaperColorType.white,
+            updatedAt: now,
+          ),
+        ],
+        createdAt: now,
+        updatedAt: now,
+      );
+
+      final pdfService = PdfExportService();
+      final sageBytes = await pdfService.buildNotebookPdfBytes(sageNb);
+      final blankBytes = await pdfService.buildNotebookPdfBytes(blankNb);
+
+      expect(String.fromCharCodes(sageBytes.take(5)), '%PDF-');
+      expect(String.fromCharCodes(blankBytes.take(5)), '%PDF-');
+      expect(sageBytes.length, greaterThan(blankBytes.length));
+
+      // A sageRibbon page backed by an imported PDF should still export safely.
+      final withPdfBg = sageNb.copyWith(
+        pages: [
+          sageNb.pages.first.copyWith(pdfBackgroundPath: '/tmp/nonexistent_slide.jpg'),
+        ],
+      );
+      final bgBytes = await pdfService.buildNotebookPdfBytes(withPdfBg);
+      expect(String.fromCharCodes(bgBytes.take(5)), '%PDF-');
+    });
+
+    test('PageImageExportService renders PNG bytes for sageRibbon page with content', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final tempDir = Directory.systemTemp.createTempSync('chemnote_img_test_');
+      addTearDown(() {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final now = DateTime.utc(2026, 11, 26);
+      final page = NotePage(
+        id: 'img-page-1',
+        index: 0,
+        templateType: PaperTemplateType.sageRibbon,
+        paperColor: PaperColorType.white,
+        strokes: const [
+          Stroke(
+            id: 'st-1',
+            toolType: ToolType.fountainPen,
+            colorValue: 0xFF1E3A8A,
+            width: 3.0,
+            points: [
+              StrokePoint(x: 120, y: 180, pressure: 0.6),
+              StrokePoint(x: 340, y: 260, pressure: 0.7),
+            ],
+          ),
+        ],
+        textElements: const [
+          TextElement(
+            id: 'txt-1',
+            x: 100,
+            y: 300,
+            width: 240,
+            text: 'H2SO4 + BaCl2 -> BaSO4 + 2HCl',
+            fontSize: 16,
+            colorValue: 0xFF141815,
+          ),
+        ],
+        updatedAt: now,
+      );
+
+      final imageService = PageImageExportService(overrideExportDir: tempDir);
+      final pngBytes = await imageService.renderPageToPngBytes(page, scale: 1.0);
+      expect(pngBytes.length, greaterThan(1000));
+      // PNG signature: 0x89 P N G
+      expect(pngBytes.take(4).toList(), [0x89, 0x50, 0x4E, 0x47]);
+    });
+
+    test('AppState.replaceNotebookPages restores deleted and reordered pages cleanly', () async {
+      final tempDir = Directory.systemTemp.createTempSync('chemnote_page_undo_');
+      addTearDown(() {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final storage = LocalStorageService(baseDirectory: tempDir);
+      final appState = AppState(storage: storage);
+      addTearDown(appState.dispose);
+
+      final nb = await appState.createNotebook(title: 'Undo MultiPage');
+      await appState.addPage(nb.id);
+      await appState.addPage(nb.id);
+
+      final nbWithThree = appState.getNotebookById(nb.id)!;
+      expect(nbWithThree.pages.length, 3);
+      final snapshotBeforeDelete = List<NotePage>.of(nbWithThree.pages);
+      final deletedPageId = nbWithThree.pages[1].id;
+
+      await appState.deletePage(nb.id, deletedPageId);
+      final nbAfterDelete = appState.getNotebookById(nb.id)!;
+      expect(nbAfterDelete.pages.length, 2);
+      expect(nbAfterDelete.pages.any((p) => p.id == deletedPageId), isFalse);
+
+      // Simulate Undo restoring exact 3 pages with 0..2 indices
+      await appState.replaceNotebookPages(nb.id, snapshotBeforeDelete);
+      final nbRestored = appState.getNotebookById(nb.id)!;
+      expect(nbRestored.pages.length, 3);
+      expect(
+        nbRestored.pages.map((p) => p.id).toList(),
+        snapshotBeforeDelete.map((p) => p.id).toList(),
+      );
+      expect(nbRestored.pages.map((p) => p.index).toList(), [0, 1, 2]);
+
+      await appState.flushPendingSaves();
+      final reloaded = AppState(storage: storage);
+      addTearDown(reloaded.dispose);
+      await reloaded.loadAll();
+      final persisted = reloaded.getNotebookById(nb.id)!;
+      expect(persisted.pages.length, 3);
+      expect(persisted.pages[1].id, deletedPageId);
     });
   });
 }

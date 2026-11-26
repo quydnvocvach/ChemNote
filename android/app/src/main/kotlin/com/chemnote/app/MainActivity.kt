@@ -12,6 +12,7 @@ import android.graphics.Color
 import android.graphics.pdf.PdfRenderer
 import android.media.MediaPlayer
 import android.media.MediaRecorder
+import android.media.MediaScannerConnection
 import android.media.PlaybackParams
 import android.net.Uri
 import android.os.Build
@@ -24,6 +25,9 @@ import android.provider.OpenableColumns
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -78,12 +82,15 @@ class MainActivity : FlutterActivity() {
         super.onCreate(savedInstanceState)
         enableHighestRefreshRate()
         enableUnbufferedStylusInput()
+        hideSystemStatusBar()
+        window.decorView.post { hideSystemStatusBar() }
     }
 
     override fun onResume() {
         super.onResume()
         enableHighestRefreshRate()
         enableUnbufferedStylusInput()
+        hideSystemStatusBar()
     }
 
     override fun onPause() {
@@ -94,8 +101,33 @@ class MainActivity : FlutterActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         if (!hasFocus) {
             resetNativePalmShieldTransientState()
+        } else {
+            hideSystemStatusBar()
         }
         super.onWindowFocusChanged(hasFocus)
+    }
+
+    private fun hideSystemStatusBar() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.let { controller ->
+                controller.hide(WindowInsets.Type.statusBars())
+                controller.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility =
+                (View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN)
+        }
     }
 
     private fun resetNativePalmShieldTransientState() {
@@ -228,6 +260,21 @@ class MainActivity : FlutterActivity() {
                             isNativeStylusDown = false
                             isNativeStylusHovering = false
                             lastNativeStylusHoverMs = 0L
+                        }
+                        result.success(null)
+                    }
+                    "scanMediaFile" -> {
+                        val path = call.argument<String>("path")
+                        val mimeType = call.argument<String>("mimeType") ?: "image/png"
+                        if (!path.isNullOrBlank()) {
+                            runCatching {
+                                MediaScannerConnection.scanFile(
+                                    applicationContext,
+                                    arrayOf(path),
+                                    arrayOf(mimeType),
+                                    null
+                                )
+                            }
                         }
                         result.success(null)
                     }
@@ -920,7 +967,7 @@ class MainActivity : FlutterActivity() {
             ?: resources.displayMetrics.widthPixels.toFloat()
         val heightPx = window?.decorView?.height?.takeIf { it > 0 }?.toFloat()
             ?: resources.displayMetrics.heightPixels.toFloat()
-        val topMargin = 124f * density
+        val topMargin = 100f * density
         val leftMargin = 54f * density
         val rightMargin = 82f * density
         return x >= leftMargin &&

@@ -1456,6 +1456,25 @@ class AppState extends ChangeNotifier {
     await updateNotebook(notebook.copyWith(pages: reindexed));
   }
 
+  /// Khôi phục nguyên vẹn danh sách trang của sổ tay (dùng cho Hoàn tác / Làm lại cấp trang).
+  Future<void> replaceNotebookPages(
+    String notebookId,
+    List<NotePage> pages,
+  ) async {
+    if (pages.isEmpty) return;
+    final notebook = getNotebookById(notebookId);
+    if (notebook == null) return;
+    final reindexed = [
+      for (int i = 0; i < pages.length; i++) pages[i].copyWith(index: i),
+    ];
+    await updateNotebook(
+      notebook.copyWith(
+        pages: reindexed,
+        updatedAt: DateTime.now(),
+      ),
+    );
+  }
+
   List<BookmarkedPageRef> get bookmarkedPages {
     final refs = <BookmarkedPageRef>[];
     for (final notebook in _notebooks) {

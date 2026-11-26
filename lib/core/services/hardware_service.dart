@@ -393,6 +393,24 @@ class HardwareService {
     } catch (_) {}
   }
 
+  /// Yêu cầu MediaScanner của Android / HarmonyOS quét tệp ảnh/PDF vừa xuất để hiển thị ngay trong Thư viện.
+  Future<void> scanMediaFile(
+    String path, {
+    String mimeType = 'image/png',
+  }) async {
+    if (kIsWeb || path.trim().isEmpty) return;
+    try {
+      await _channel.invokeMethod<void>('scanMediaFile', {
+        'path': path,
+        'mimeType': mimeType,
+      });
+    } on MissingPluginException {
+      // Bỏ qua trên Web / Desktop / Unit Tests.
+    } on PlatformException {
+      // Bỏ qua lỗi nền tảng không ảnh hưởng kết quả xuất tệp.
+    }
+  }
+
   /// Kích hoạt sự kiện gõ đúp bút giả lập phục vụ kiểm thử đơn vị.
   @visibleForTesting
   void emitStylusDoubleTapForTesting() {
