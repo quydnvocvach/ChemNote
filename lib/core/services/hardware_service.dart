@@ -285,16 +285,21 @@ class HardwareService {
     }
   }
 
-  /// Mở trình quản lý tệp mặc định (ưu tiên Tệp tin Huawei ở thư mục Download).
+  /// Mở trình chọn tệp hệ thống (DocumentsUI mở sẵn vào `Download` hoặc [initialDirectory]).
   /// Trả về `handled: true` trên Android để nếu người dùng hủy thì không mở đè picker khác.
   Future<({bool handled, PickedDeviceFile? file})> pickDocumentFile({
     List<String> allowedExtensions = const [],
+    String? initialDirectory,
   }) async {
     if (kIsWeb) return (handled: false, file: null);
     try {
       final raw = await _channel.invokeMethod<dynamic>(
         'pickDocumentFile',
-        {'allowedExtensions': allowedExtensions},
+        {
+          'allowedExtensions': allowedExtensions,
+          if (initialDirectory != null && initialDirectory.trim().isNotEmpty)
+            'initialDirectory': initialDirectory.trim(),
+        },
       );
       if (raw == null) {
         return (handled: true, file: null);

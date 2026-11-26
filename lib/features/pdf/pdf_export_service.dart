@@ -552,64 +552,79 @@ class PdfExportService {
         break;
 
       case PaperTemplateType.sageRibbon:
-        const headerH = 38.0;
-        const footerH = 24.0;
-        final sageBand = isDark
-            ? PdfColor.fromInt(0xFF3E4B3B)
-            : PdfColor.fromInt(0xFFAEBDA7);
-        final sageBorder = isDark
-            ? PdfColor.fromInt(0xFF6E7F68)
-            : PdfColor.fromInt(0xFF6E7F68);
-        final peachRibbon = isDark
-            ? PdfColor.fromInt(0xFFD49A7A)
-            : PdfColor.fromInt(0xFFFBD7C1);
-        final ruledColor = isDark
-            ? PdfColor.fromInt(0xFF343B34)
-            : PdfColor.fromInt(0xFFDFE4DF);
+        final bool isLandscapePage = size.x > size.y;
+        final double headerH = size.y * (163.0 / 2263.0);
+        final double topDividerH = size.y * (6.2 / 2263.0);
+        final double footerH = size.y * (100.0 / 2263.0);
+        final double bottomDividerH = size.y * (4.7 / 2263.0);
 
-        // Dải tiêu đề xanh xô thơm phía trên
+        final sageBand = isDark
+            ? PdfColor.fromInt(0xFF334034)
+            : PdfColor.fromInt(0xFFB4C3AC);
+        final sageDivider = isDark
+            ? PdfColor.fromInt(0xFF566B58)
+            : PdfColor.fromInt(0xFF798D6E);
+        final peachRibbon = isDark
+            ? PdfColor.fromInt(0xFFC89B82)
+            : PdfColor.fromInt(0xFFFFD8BE);
+        final ruledColor = isDark
+            ? PdfColor.fromInt(0xFF303532)
+            : PdfColor.fromInt(0xFFD2D9CF);
+
+        // Dải tiêu đề & chân trang xanh xô thơm theo đúng tỉ lệ mẫu chuẩn
         canvas.setFillColor(sageBand);
         canvas.drawRect(0, size.y - headerH, size.x, headerH);
-        canvas.fillPath();
-        // Dải chân trang xanh xô thơm phía dưới
         canvas.drawRect(0, 0, size.x, footerH);
         canvas.fillPath();
 
-        // Đường kẻ mảnh phân cách header & footer
-        canvas.setStrokeColor(sageBorder);
-        canvas.setLineWidth(0.9);
-        canvas.moveTo(0, size.y - headerH);
-        canvas.lineTo(size.x, size.y - headerH);
-        canvas.moveTo(0, footerH);
-        canvas.lineTo(size.x, footerH);
+        // Hai đường phân cách ngang đậm ở header & footer
+        canvas.setFillColor(sageDivider);
+        canvas.drawRect(0, size.y - headerH - topDividerH, size.x, topDividerH);
+        canvas.drawRect(0, footerH, size.x, bottomDividerH);
+        canvas.fillPath();
+
+        // Các dòng kẻ ngang tràn lề 2 bên (26 dòng cho khổ dọc)
+        canvas.setStrokeColor(ruledColor);
+        canvas.setLineWidth(size.y * (2.4 / 2263.0));
+        if (!isLandscapePage) {
+          for (int i = 0; i < 26; i++) {
+            final double yFromTop = size.y * ((242.5 + i * 75.04) / 2263.0);
+            final double pdfY = size.y - yFromTop;
+            canvas.moveTo(0, pdfY);
+            canvas.lineTo(size.x, pdfY);
+          }
+        } else {
+          final double spacing = size.x * (75.04 / 2263.0);
+          final double startY = size.y - (headerH + topDividerH + spacing);
+          final double minY = footerH + bottomDividerH + spacing * 0.45;
+          for (double y = startY; y >= minY; y -= spacing) {
+            canvas.moveTo(0, y);
+            canvas.lineTo(size.x, y);
+          }
+        }
         canvas.strokePath();
 
-        // Dải ruy-băng đào có đuôi én (V-notch) ở góc trên bên trái
-        const ribLeft = 24.0;
-        const ribW = 20.0;
-        const ribH = 34.0;
-        final ribTop = size.y;
-        final ribBottom = size.y - ribH;
+        // Dải ruy-băng đào đuôi én ở góc trên bên trái (tô đặc, không viền)
+        final double ribLeft = size.x * (99.4 / 1600.0);
+        final double ribRight = size.x * (204.3 / 1600.0);
+        final double ribMidX = (ribLeft + ribRight) * 0.5;
+        final double ribBottomFromTop = isLandscapePage
+            ? (headerH + topDividerH + size.y * 0.045)
+            : (size.y * (236.0 / 2263.0));
+        final double ribNotchFromTop = isLandscapePage
+            ? (headerH + topDividerH + size.y * 0.010)
+            : (size.y * (181.0 / 2263.0));
+        final double ribTop = size.y;
+        final double ribBottom = size.y - ribBottomFromTop;
+        final double ribNotch = size.y - ribNotchFromTop;
         canvas.setFillColor(peachRibbon);
         canvas.moveTo(ribLeft, ribTop);
-        canvas.lineTo(ribLeft + ribW, ribTop);
-        canvas.lineTo(ribLeft + ribW, ribBottom);
-        canvas.lineTo(ribLeft + ribW / 2, ribBottom + 7.5);
+        canvas.lineTo(ribRight, ribTop);
+        canvas.lineTo(ribRight, ribBottom);
+        canvas.lineTo(ribMidX, ribNotch);
         canvas.lineTo(ribLeft, ribBottom);
         canvas.closePath();
         canvas.fillPath();
-
-        // Các dòng kẻ ngang tinh tế
-        canvas.setStrokeColor(ruledColor);
-        canvas.setLineWidth(0.6);
-        const spacing = 22.0;
-        for (double y = size.y - headerH - spacing;
-            y >= footerH + 10;
-            y -= spacing) {
-          canvas.moveTo(22, y);
-          canvas.lineTo(size.x - 22, y);
-        }
-        canvas.strokePath();
         break;
 
       case PaperTemplateType.pastelGrid:

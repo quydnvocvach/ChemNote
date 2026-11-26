@@ -101,6 +101,8 @@ class SyncManager extends ChangeNotifier {
 
   bool _autoSyncEnabled = true;
   bool _isSyncing = false;
+  bool _pendingPostSyncCleanup = false;
+  int _followupDeleteDepth = 0;
   bool _isOnline = true;
   bool _isOnWifi = true;
   DateTime? _lastSyncedAt;
@@ -491,6 +493,9 @@ class SyncManager extends ChangeNotifier {
     _pendingUploadIds.remove(notebookId);
     final removed = _pendingSnapshots.remove(notebookId);
     _pendingDeleteNotebookIds.add(notebookId);
+    if (_isSyncing) {
+      _pendingPostSyncCleanup = true;
+    }
     unawaited(_persistPendingDeleteNotebookIds());
 
     final targetJsonId =
@@ -733,6 +738,7 @@ class SyncManager extends ChangeNotifier {
       var conflictCopies = 0;
 
       for (final local in localNotebooks) {
+        if (_pendingDeleteNotebookIds.contains(local.id)) continue;
         final remoteMeta = remoteByNotebookId.remove(local.id);
         final needsPdfBackfill = autoExportPdfOnSync &&
             local.drivePdfFileId == null &&
@@ -827,8 +833,15 @@ class SyncManager extends ChangeNotifier {
 
       // 4. Tải về các sổ tay mới chỉ tồn tại trên Google Drive (kèm tài nguyên ảnh/PDF nền)
       for (final meta in remoteByNotebookId.values) {
+        if (meta.notebookId != null &&
+            _pendingDeleteNotebookIds.contains(meta.notebookId)) {
+          continue;
+        }
         final remoteNotebook =
             await _driveService.downloadNotebook(meta.driveFileId);
+        if (_pendingDeleteNotebookIds.contains(remoteNotebook.id)) {
+          continue;
+        }
         final hydrated = await _hydrateMissingAssets(
           remoteNotebook,
           remoteAssets,
@@ -848,6 +861,20 @@ class SyncManager extends ChangeNotifier {
     } finally {
       _isSyncing = false;
       notifyListeners();
+      final bool hasPendingCleanup = _pendingPostSyncCleanup &&
+          (_pendingDeleteNotebookIds.isNotEmpty ||
+              _pendingDeleteDriveIds.isNotEmpty);
+      if (hasPendingCleanup &&
+          isSignedIn &&
+          (_isOnline || isDemoMode) &&
+          _followupDeleteDepth < 2) {
+        _pendingPostSyncCleanup = false;
+        _followupDeleteDepth++;
+        unawaited(syncNow(isManualSync: true));
+      } else {
+        _pendingPostSyncCleanup = false;
+        _followupDeleteDepth = 0;
+      }
     }
   }
 
@@ -856,10 +883,18 @@ class SyncManager extends ChangeNotifier {
     required bool isManualSync,
     required Set<String> remoteAssetNames,
   }) async {
+    if (_pendingDeleteNotebookIds.contains(notebook.id)) {
+      _addLog('Đã hủy tải lên "${notebook.title}" vì ghi chú đã bị xóa.');
+      return;
+    }
     await _appState?.updateNotebookSyncStatus(notebook.id, SyncStatus.syncing);
     try {
       // 1. Đồng bộ tăng dần các ảnh & trang PDF nền còn thiếu vào ChemNote_Backups/Assets/
       await _uploadNotebookAssetsIfMissing(notebook, remoteAssetNames);
+      if (_pendingDeleteNotebookIds.contains(notebook.id)) {
+        _addLog('Đã dừng tải lên tài nguyên "${notebook.title}" do ghi chú đã bị xóa.');
+        return;
+      }
 
       // 2. Tạo & tải lên PDF vector vào ChemNote_Backups/PDF/ (có chốt bảo vệ nhiệt cho đồng bộ nền)
       String? drivePdfFileId = notebook.drivePdfFileId;
@@ -869,6 +904,10 @@ class SyncManager extends ChangeNotifier {
         try {
           final pdfBytes =
               await _pdfExportService.buildNotebookPdfBytes(notebook);
+          if (_pendingDeleteNotebookIds.contains(notebook.id)) {
+            _addLog('Đã hủy tải lên PDF "${notebook.title}" vì ghi chú đã bị xóa.');
+            return;
+          }
           drivePdfFileId =
               await _driveService.uploadNotebookPdf(notebook, pdfBytes);
         } catch (pdfErr) {
@@ -883,6 +922,11 @@ class SyncManager extends ChangeNotifier {
         _addLog(
           'Bỏ qua xuất PDF nền cho "${notebook.title}" (${notebook.pages.length} trang > $maxBackgroundPdfPages) để tránh nóng máy.',
         );
+      }
+
+      if (_pendingDeleteNotebookIds.contains(notebook.id)) {
+        _addLog('Đã hủy tải lên JSON "${notebook.title}" vì ghi chú đã bị xóa.');
+        return;
       }
 
       // 3. Tải lên tệp JSON đầy đủ (kèm drivePdfFileId mới nhất) vào ChemNote_Backups/JSON/
@@ -901,7 +945,9 @@ class SyncManager extends ChangeNotifier {
       _pendingSnapshots.remove(notebook.id);
       await _setLastSyncedAt(DateTime.now());
     } catch (e) {
-      await _appState?.updateNotebookSyncStatus(notebook.id, SyncStatus.error);
+      if (!_pendingDeleteNotebookIds.contains(notebook.id)) {
+        await _appState?.updateNotebookSyncStatus(notebook.id, SyncStatus.error);
+      }
       rethrow;
     }
   }
@@ -910,10 +956,12 @@ class SyncManager extends ChangeNotifier {
     Notebook notebook,
     Set<String> remoteAssetNames,
   ) async {
+    if (_pendingDeleteNotebookIds.contains(notebook.id)) return;
     String? nbFolderId;
     Set<String> folderAssetNames = remoteAssetNames;
     try {
       nbFolderId = await _driveService.ensureNotebookAssetsFolder(notebook);
+      if (_pendingDeleteNotebookIds.contains(notebook.id)) return;
       final nbAssets = await _driveService.listRemoteAssetFiles(
         parentFolderId: nbFolderId,
       );
@@ -921,6 +969,7 @@ class SyncManager extends ChangeNotifier {
     } catch (_) {}
 
     for (final page in notebook.pages) {
+      if (_pendingDeleteNotebookIds.contains(notebook.id)) return;
       final pdfBg = page.pdfBackgroundPath;
       if (pdfBg != null && pdfBg.isNotEmpty) {
         final remoteName = remoteAssetKeyForPath(pdfBg, notebookId: notebook.id);
@@ -934,6 +983,7 @@ class SyncManager extends ChangeNotifier {
         } catch (_) {}
       }
       for (final img in page.imageElements) {
+        if (_pendingDeleteNotebookIds.contains(notebook.id)) return;
         if (img.filePath.isEmpty) continue;
         final name = remoteAssetKeyForPath(img.filePath, notebookId: notebook.id);
         try {
@@ -1151,6 +1201,45 @@ class SyncManager extends ChangeNotifier {
     }
 
     return restoredCount;
+  }
+
+  static String buildDriveFileViewUrl(String fileId) =>
+      'https://drive.google.com/file/d/$fileId/view';
+
+  /// Trả về link Google Drive của bản PDF sổ tay (tự tạo và tải lên PDF nếu chưa có).
+  Future<String> getOrUploadNotebookPdfDriveLink(Notebook notebook) async {
+    final latest = _appState?.getNotebookById(notebook.id) ?? notebook;
+    final existingPdfId = latest.drivePdfFileId?.trim();
+    if (existingPdfId != null && existingPdfId.isNotEmpty) {
+      return buildDriveFileViewUrl(existingPdfId);
+    }
+
+    if (!isSignedIn) {
+      throw StateError(
+        'Vui lòng đăng nhập Google Drive trong mục Đồng bộ trước khi lấy link PDF.',
+      );
+    }
+    if (!_isOnline && !isDemoMode) {
+      throw StateError(
+        'Không có kết nối mạng để tạo và tải PDF lên Google Drive.',
+      );
+    }
+
+    await _driveService.ensureAppFolder();
+    await _driveService.ensurePdfFolder();
+    final pdfBytes = await _pdfExportService.buildNotebookPdfBytes(latest);
+    final uploadedPdfId =
+        await _driveService.uploadNotebookPdf(latest, pdfBytes);
+
+    await _appState?.updateNotebookSyncStatus(
+      latest.id,
+      latest.syncStatus,
+      driveFileId: latest.driveFileId,
+      drivePdfFileId: uploadedPdfId,
+    );
+    _addLog('Đã tạo và tải PDF lên Google Drive cho "${latest.title}".');
+    notifyListeners();
+    return buildDriveFileViewUrl(uploadedPdfId);
   }
 
   Future<void> _setLastSyncedAt(DateTime time) async {

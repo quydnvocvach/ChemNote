@@ -6,6 +6,8 @@ import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
@@ -22,6 +24,7 @@ import '../library/search_screen.dart';
 import '../pdf/pdf_export_service.dart';
 import '../pdf/pdf_import_progress_overlay.dart';
 import '../pdf/pdf_import_service.dart';
+import '../sync/sync_manager.dart';
 import 'canvas_painter.dart';
 import 'editor_toolbar.dart';
 import 'image_crop_dialog.dart';
@@ -46,7 +49,10 @@ class NoteEditorScreen extends StatefulWidget {
   State<NoteEditorScreen> createState() => _NoteEditorScreenState();
 }
 
-class _NoteEditorScreenState extends State<NoteEditorScreen> {
+enum _ScrollAxisLock { none, vertical, free }
+
+class _NoteEditorScreenState extends State<NoteEditorScreen>
+    with SingleTickerProviderStateMixin {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final Uuid _uuid = const Uuid();
   final TransformationController _transformController = TransformationController();
@@ -101,6 +107,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   late final AppState _appStateRef;
   late String _activeNotebookId;
   int _currentPageIndex = 0;
+  final ValueNotifier<int> _currentPageIndexNotifier = ValueNotifier<int>(0);
+  final ValueNotifier<double?> _favoritesDockTopNotifier =
+      ValueNotifier<double?>(null);
   int _renderedWindowCenter = 0;
   bool _isScrubbingPages = false;
   Timer? _scrubPrefetchTimer;
@@ -114,7 +123,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   double _cachedMaxPageWidth = 0.0;
   int _repaintVersion = 0;
   double _refreshRateHz = 60.0;
-  StreamSubscription<void>? _stylusDoubleTapSub;
+
+  // Huawei Notes smart vertical axis-lock + ballistic fling state
+  _ScrollAxisLock _panAxisLock = _ScrollAxisLock.none;
+  Offset _panAccumDelta = Offset.zero;
+  double _panVelocityX = 0.0;
+  double _panVelocityY = 0.0;
+  int _lastPanEventUs = 0;
+  Ticker? _scrollFlingTicker;
+  Duration _lastFlingElapsed = Duration.zero;
+  double _flingVx = 0.0;
+  double _flingVy = 0.0;
 
   // Pull-to-add-page state
   double _pullOverscroll = 0.0;
@@ -123,7 +142,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   // Tool & ink configuration
   EditorTool _activeTool = EditorTool.fountainPen;
   EditorTool _lastPenTool = EditorTool.fountainPen;
-  EditorTool _toolBeforeEraserToggle = EditorTool.fountainPen;
   EraserMode _eraserMode = EraserMode.stroke;
   double _eraserRadius = 18.0;
   Color _penColor = EditorColors.penSwatches[2];
@@ -260,7 +278,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   void initState() {
     super.initState();
     _activeNotebookId = widget.notebookId;
-    _currentPageIndex = widget.initialPageIndex;
+    _syncCurrentPageIndex(widget.initialPageIndex);
     _renderedWindowCenter = _currentPageIndex;
     _horizontalPageController = PageController(initialPage: _currentPageIndex);
     _lassoController.addListener(_onLassoChanged);
@@ -294,33 +312,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     if (mounted) {
       setState(() => _refreshRateHz = hz);
     }
-    _stylusDoubleTapSub =
-        HardwareService.instance.onStylusDoubleTap.listen((_) {
-      if (!mounted) return;
-      final appState = context.read<AppState>();
-      if (!appState.mPencilDoubleTapEraser) return;
-      setState(() {
-        if (_activeTool == EditorTool.eraser) {
-          _activeTool = _toolBeforeEraserToggle;
-        } else {
-          _toolBeforeEraserToggle = _activeTool;
-          _activeTool = EditorTool.eraser;
-        }
-      });
-    });
   }
 
   @override
   void dispose() {
     _appStateRef.setStylusDrawingActive(false);
     _appStateRef.flushPendingSaves();
+    _stopScrollFling();
+    _scrollFlingTicker?.dispose();
     _stylusHoverTimer?.cancel();
     _shapeHoldTimer?.cancel();
     _scrubPrefetchTimer?.cancel();
     _recordingElapsedTimer?.cancel();
     _audioPollTimer?.cancel();
     HardwareService.instance.stopAudio();
-    _stylusDoubleTapSub?.cancel();
     _lassoController.removeListener(_onLassoChanged);
     _lassoController.dispose();
     _laserController.dispose();
@@ -331,6 +336,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
     _verticalScrollController.dispose();
     _horizontalPageController.dispose();
+    _currentPageIndexNotifier.dispose();
+    _favoritesDockTopNotifier.dispose();
     _activeStrokeNotifier.dispose();
     _eraserCursorNotifier.dispose();
     _lassoPathNotifier.dispose();
@@ -420,8 +427,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     if (mounted) setState(() => _repaintVersion++);
   }
 
+  void _syncCurrentPageIndex(int idx) {
+    _currentPageIndex = idx;
+    if (_currentPageIndexNotifier.value != idx) {
+      _currentPageIndexNotifier.value = idx;
+    }
+  }
+
   Future<void> _switchNotebookTab(String notebookId) async {
     if (notebookId == _activeNotebookId) return;
+    _stopScrollFling();
     _commitActiveTextEdit();
     // Auto-stop and save active audio recording on current page before switching tabs
     if (_isRecordingAudio) {
@@ -434,7 +449,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     if (!mounted) return;
     setState(() {
       _activeNotebookId = notebookId;
-      _currentPageIndex = 0;
+      _syncCurrentPageIndex(0);
       _renderedWindowCenter = 0;
       _isScrubbingPages = false;
       _scrubPrefetchTimer?.cancel();
@@ -516,13 +531,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   }
 
   void _jumpToPage(int index) {
+    _stopScrollFling();
     final appState = context.read<AppState>();
     final notebook = _getNotebook(context, listen: false);
     if (notebook == null || notebook.pages.isEmpty) return;
     final prevIdx = _currentPageIndex;
     final clampedIdx = index.clamp(0, notebook.pages.length - 1);
     setState(() {
-      _currentPageIndex = clampedIdx;
+      _syncCurrentPageIndex(clampedIdx);
       _renderedWindowCenter = clampedIdx;
     });
     if (!appState.verticalContinuousScroll &&
@@ -751,7 +767,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     NotePage page,
     int pageIndex,
   ) {
-    _currentPageIndex = pageIndex;
+    _syncCurrentPageIndex(pageIndex);
     _activeDrawingPageId = page.id;
 
     final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
@@ -865,7 +881,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     // Laser Pointer: lock viewport pan while laser pointer is held down
     if (_activeTool == EditorTool.laserPointer) {
       if (!allowThisPointer) return;
-      _currentPageIndex = pageIndex;
+      _syncCurrentPageIndex(pageIndex);
       if (!_isDrawingPointerDown) {
         setState(() => _isDrawingPointerDown = true);
         _syncStylusDrawingState();
@@ -1922,8 +1938,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       String savedPath = '';
       int pickedSize = 0;
 
+      final initialDir = context.read<AppState>().defaultImportDirectory;
       final nativePick = await HardwareService.instance.pickDocumentFile(
         allowedExtensions: allowedExtensions ?? const <String>[],
+        initialDirectory: initialDir,
       );
       if (nativePick.handled) {
         final f = nativePick.file;
@@ -1935,6 +1953,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         final res = await FilePicker.platform.pickFiles(
           type: allowedExtensions != null ? FileType.custom : FileType.any,
           allowedExtensions: allowedExtensions,
+          initialDirectory: initialDir,
         );
         if (res == null || res.files.isEmpty || !mounted) return;
         final picked = res.files.first;
@@ -2096,8 +2115,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       String savedPath = '';
       int pickedSize = 0;
 
+      final initialDir = context.read<AppState>().defaultImportDirectory;
       final nativePick = await HardwareService.instance.pickDocumentFile(
         allowedExtensions: const ['doc', 'docx', 'ppt', 'pptx'],
+        initialDirectory: initialDir,
       );
       if (nativePick.handled) {
         final f = nativePick.file;
@@ -2109,6 +2130,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         final res = await FilePicker.platform.pickFiles(
           type: FileType.custom,
           allowedExtensions: const ['doc', 'docx', 'ppt', 'pptx'],
+          initialDirectory: initialDir,
         );
         if (res == null || res.files.isEmpty || !mounted) return;
         final picked = res.files.first;
@@ -2218,14 +2240,52 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   }
 
   Future<void> _handleImportPdf(Notebook notebook) async {
+    final initialDir = context.read<AppState>().defaultImportDirectory;
     await _runImportWithProgress(
       title: 'Đang nhập tệp PDF',
       notebook: notebook,
       task: (onProgress) => _pdfImportService.pickAndImportPdf(
         startIndex: notebook.pages.length,
+        initialDirectory: initialDir,
         onProgress: onProgress,
       ),
     );
+  }
+
+  Future<void> _handleCopyDrivePdfLink(Notebook notebook) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final syncManager = context.read<SyncManager>();
+    final hasCachedPdf = notebook.drivePdfFileId != null &&
+        notebook.drivePdfFileId!.trim().isNotEmpty;
+
+    if (!hasCachedPdf) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Đang tạo & tải PDF lên Google Drive để lấy link...'),
+          duration: Duration(seconds: 3),
+        ),
+      );
+    }
+
+    try {
+      final url = await syncManager.getOrUploadNotebookPdfDriveLink(notebook);
+      await Clipboard.setData(ClipboardData(text: url));
+      if (!mounted) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text('Đã sao chép link PDF Google Drive: $url'),
+          ),
+        );
+    } catch (e) {
+      if (!mounted) return;
+      final message =
+          e is StateError ? e.message : 'Không lấy được link PDF: $e';
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text(message)));
+    }
   }
 
   Future<void> _handleExportPdf(Notebook notebook) async {
@@ -2429,7 +2489,136 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
   }
 
-  void _updatePullToAddProgress(Notebook notebook, Size viewportSize) {
+  void _stopScrollFling() {
+    _scrollFlingTicker?.stop();
+    _flingVx = 0.0;
+    _flingVy = 0.0;
+    _lastFlingElapsed = Duration.zero;
+  }
+
+  void _resetPanTracking() {
+    _panAxisLock = _ScrollAxisLock.none;
+    _panAccumDelta = Offset.zero;
+    _panVelocityX = 0.0;
+    _panVelocityY = 0.0;
+    _lastPanEventUs = 0;
+  }
+
+  ({bool hitX, bool hitY}) _applySmartScrollDelta(
+    Notebook notebook,
+    AppState appState,
+    Size vpSize,
+    double dx,
+    double dy, {
+    required bool isFling,
+  }) {
+    final m = _transformController.value;
+    final double scale = m.getMaxScaleOnAxis().clamp(0.35, 4.0);
+    final double curTx = m.getTranslation().x;
+    final double curTy = m.getTranslation().y;
+    final double contentH = _totalVerticalContentHeight(notebook);
+    final double scaledH = contentH * scale;
+    final double maxPageW = _maxVerticalPageWidth(notebook);
+    final double scaledW = (maxPageW + 48.0) * scale;
+
+    final double minTx = appState.freePaperMovement
+        ? math.min(0.0, vpSize.width - scaledW) - 800.0
+        : (scaledW <= vpSize.width
+            ? (vpSize.width - scaledW) * 0.5
+            : vpSize.width - scaledW);
+    final double maxTx = appState.freePaperMovement
+        ? 800.0
+        : (scaledW <= vpSize.width ? (vpSize.width - scaledW) * 0.5 : 0.0);
+
+    final double rawNextTx = (dx == 0.0 && appState.freePaperMovement)
+        ? curTx
+        : (curTx + dx);
+    final double nextTx = rawNextTx.clamp(minTx, maxTx).toDouble();
+    final bool hitX = (nextTx - rawNextTx).abs() > 0.01;
+
+    final double minBaseTy = math.min(0.0, vpSize.height - scaledH);
+    final double minTy = isFling
+        ? (appState.freePaperMovement
+            ? math.min(minBaseTy, curTy)
+            : minBaseTy)
+        : (appState.freePaperMovement ? minBaseTy - 800.0 : minBaseTy - 120.0);
+    final double maxTy = isFling
+        ? (appState.freePaperMovement ? math.max(0.0, curTy) : 0.0)
+        : (appState.freePaperMovement ? 800.0 : 120.0);
+
+    final double rawNextTy = curTy + dy;
+    final double nextTy = rawNextTy.clamp(minTy, maxTy).toDouble();
+    final bool hitY = (nextTy - rawNextTy).abs() > 0.01;
+
+    _transformController.value = m.clone()
+      ..setTranslationRaw(nextTx, nextTy, 0.0);
+    _updatePullToAddProgress(
+      notebook,
+      vpSize,
+      updatePullOverscroll: !isFling,
+    );
+    return (hitX: hitX, hitY: hitY);
+  }
+
+  void _startScrollFling(double vx, double vy) {
+    _stopScrollFling();
+    _flingVx = vx;
+    _flingVy = vy;
+    _lastFlingElapsed = Duration.zero;
+    _scrollFlingTicker ??= createTicker(_onScrollFlingTick);
+    _scrollFlingTicker!.start();
+  }
+
+  void _onScrollFlingTick(Duration elapsed) {
+    final double dt = ((elapsed - _lastFlingElapsed).inMicroseconds / 1e6)
+        .clamp(0.0, 0.05);
+    _lastFlingElapsed = elapsed;
+    if (dt <= 0.0) return;
+
+    if (!mounted ||
+        _isStylusDown ||
+        _isOverlayDragging ||
+        _isDrawingPointerDown ||
+        _activeTouchPointers.isNotEmpty) {
+      _stopScrollFling();
+      return;
+    }
+
+    final nb = _getNotebook(context, listen: false);
+    if (nb == null || nb.isWhiteboard || _editorViewportSize.isEmpty) {
+      _stopScrollFling();
+      return;
+    }
+
+    final appState = context.read<AppState>();
+    if (!appState.verticalContinuousScroll) {
+      _stopScrollFling();
+      return;
+    }
+
+    final hit = _applySmartScrollDelta(
+      nb,
+      appState,
+      _editorViewportSize,
+      _flingVx * dt,
+      _flingVy * dt,
+      isFling: true,
+    );
+
+    final double decay = math.exp(-3.2 * dt);
+    _flingVx = hit.hitX ? 0.0 : _flingVx * decay;
+    _flingVy = hit.hitY ? 0.0 : _flingVy * decay;
+
+    if (_flingVx.abs() < 28.0 && _flingVy.abs() < 28.0) {
+      _stopScrollFling();
+    }
+  }
+
+  void _updatePullToAddProgress(
+    Notebook notebook,
+    Size viewportSize, {
+    bool updatePullOverscroll = true,
+  }) {
     if (notebook.pages.isEmpty || _isAddingPullPage) return;
     _ensureVerticalLayoutCache(notebook);
     final double totalContentHeight = _cachedTotalHeight;
@@ -2437,7 +2626,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     final scale = m.getMaxScaleOnAxis().clamp(0.35, 4.0);
     final ty = m.getTranslation().y;
 
-    // Keep current page index in sync using O(log N) binary search
+    // Keep current page index in sync immediately using O(log N) binary search
     final double centerContentY = (-ty + viewportSize.height * 0.45) / scale;
     int visibleIdx = 0;
     if (_cachedPageTops.length > 1) {
@@ -2454,13 +2643,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       visibleIdx = lo;
     }
     if (visibleIdx != _currentPageIndex) {
-      _currentPageIndex = visibleIdx;
+      _syncCurrentPageIndex(visibleIdx);
       if ((visibleIdx - _renderedWindowCenter).abs() >= 3) {
         setState(() => _renderedWindowCenter = visibleIdx);
       }
       _prefetchNearbyPdfPages(notebook);
     }
 
+    if (!updatePullOverscroll) return;
     final contentBottom = ty + totalContentHeight * scale;
     final thresholdY = viewportSize.height - 50.0;
     if (contentBottom < thresholdY) {
@@ -2492,7 +2682,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       if (mounted) {
         setState(() {
           _pullOverscroll = 0.0;
-          _currentPageIndex = notebook.pages.length;
+          _syncCurrentPageIndex(notebook.pages.length);
         });
       }
     } finally {
@@ -3348,9 +3538,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                   _currentPageIndex >=
                                       liveNotebook.pages.length - 1) {
                                 setState(() {
-                                  _currentPageIndex = math.max(
-                                    0,
-                                    liveNotebook.pages.length - 2,
+                                  _syncCurrentPageIndex(
+                                    math.max(0, liveNotebook.pages.length - 2),
                                   );
                                   _renderedWindowCenter = _currentPageIndex;
                                 });
@@ -3484,7 +3673,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                   );
                                   if (mounted) {
                                     setState(() {
-                                      _currentPageIndex = insertPos;
+                                      _syncCurrentPageIndex(insertPos);
                                       _renderedWindowCenter = insertPos;
                                     });
                                     ScaffoldMessenger.of(context).showSnackBar(
@@ -3659,9 +3848,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                     nextCur++;
                                   }
                                   setState(() {
-                                    _currentPageIndex = nextCur.clamp(
-                                      0,
-                                      liveNotebook.pages.length - 1,
+                                    _syncCurrentPageIndex(
+                                      nextCur.clamp(
+                                        0,
+                                        liveNotebook.pages.length - 1,
+                                      ),
                                     );
                                     _renderedWindowCenter = _currentPageIndex;
                                   });
@@ -3817,14 +4008,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                     });
                                     if (mounted) {
                                       setState(() {
-                                        _currentPageIndex =
-                                            _currentPageIndex.clamp(
-                                          0,
-                                          math.max(
+                                        _syncCurrentPageIndex(
+                                          _currentPageIndex.clamp(
                                             0,
-                                            liveNotebook.pages.length -
-                                                countToDelete -
-                                                1,
+                                            math.max(
+                                              0,
+                                              liveNotebook.pages.length -
+                                                  countToDelete -
+                                                  1,
+                                            ),
                                           ),
                                         );
                                         _renderedWindowCenter =
@@ -3945,11 +4137,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         onDeletePage: () async {
           await appState.deletePage(notebook.id, currentPage.id);
           if (mounted) {
-            setState(() => _currentPageIndex = math.max(0, currentIdx - 1));
+            setState(
+              () => _syncCurrentPageIndex(math.max(0, currentIdx - 1)),
+            );
           }
         },
         onImportPdf: () => _handleImportPdf(notebook),
         onExportPdf: () => _handleExportPdf(notebook),
+        onCopyDrivePdfLink: () => _handleCopyDrivePdfLink(notebook),
         onPickPdfExportDir: _handlePickPdfExportDir,
         onToggleLockNotebook: () async {
           await appState.setNotebookLock(
@@ -4298,10 +4493,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
                 final double scrollMult =
                     appState.scrollSpeedMultiplier.clamp(1.0, 25.0);
-                final bool useFastVerticalPan = scrollMult > 1.01 &&
+                final bool useSmartVerticalPan =
                     !currentPage.isInfiniteWhiteboard &&
-                    !notebook.isWhiteboard &&
-                    appState.verticalContinuousScroll;
+                        !notebook.isWhiteboard &&
+                        appState.verticalContinuousScroll;
 
                 return Listener(
                   behavior: HitTestBehavior.translucent,
@@ -4324,10 +4519,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     }
                   },
                   onPointerDown: (e) {
+                    _stopScrollFling();
                     final bool isStylus = e.kind == PointerDeviceKind.stylus ||
                         e.kind == PointerDeviceKind.invertedStylus;
                     if (isStylus) {
-                      if (!_stylusPanMode) {
+                      if (_stylusPanMode) {
+                        _resetPanTracking();
+                      } else {
                         _lockedMatrixDuringStylus =
                             _transformController.value.clone();
                         _lockedWhiteboardMatrixDuringStylus =
@@ -4342,7 +4540,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     if (e.kind == PointerDeviceKind.touch) {
                       final int prevLen = _activeTouchPointers.length;
                       _activeTouchPointers.add(e.pointer);
+                      if (_activeTouchPointers.length == 1) {
+                        _resetPanTracking();
+                      }
                       if (_activeTouchPointers.length >= 2 && !_isStylusDown) {
+                        _resetPanTracking();
                         _stylusHoverTimer?.cancel();
                         _isStylusHovering = false;
                         _cancelActiveGesture();
@@ -4377,7 +4579,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         e.down &&
                         (e.kind == PointerDeviceKind.stylus ||
                             e.kind == PointerDeviceKind.invertedStylus);
-                    if (useFastVerticalPan &&
+                    if (useSmartVerticalPan &&
                         allowZoomPan &&
                         !_isOverlayDragging &&
                         _overlayTouchPointers.isEmpty &&
@@ -4385,47 +4587,59 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         !_isDrawingPointerDown &&
                         _croppingImageId == null &&
                         (isTouchPan || isStylusPan)) {
+                      _panAccumDelta += e.delta;
+                      if (_panAxisLock == _ScrollAxisLock.none &&
+                          _panAccumDelta.distance >= 8.0) {
+                        _panAxisLock =
+                            _panAccumDelta.dy.abs() >= _panAccumDelta.dx.abs() * 1.35
+                                ? _ScrollAxisLock.vertical
+                                : _ScrollAxisLock.free;
+                      }
+
                       final m = _transformController.value;
                       final double scale =
                           m.getMaxScaleOnAxis().clamp(0.35, 4.0);
-                      final double curTx = m.getTranslation().x;
-                      final double curTy = m.getTranslation().y;
-                      final double contentH =
-                          _totalVerticalContentHeight(notebook);
-                      final double scaledH = contentH * scale;
                       final double maxPageW = _maxVerticalPageWidth(notebook);
                       final double scaledW = (maxPageW + 48.0) * scale;
 
-                      final double dx = (appState.freePaperMovement ||
-                              scaledW > vpSize.width)
-                          ? e.delta.dx
-                          : 0.0;
-                      final double dy = e.delta.dy * scrollMult;
+                      final bool lockHorizontal =
+                          _panAxisLock == _ScrollAxisLock.vertical ||
+                              (_panAxisLock == _ScrollAxisLock.none &&
+                                  e.delta.dy.abs() >= e.delta.dx.abs() * 1.35);
+                      final double rawDx = lockHorizontal
+                          ? 0.0
+                          : ((appState.freePaperMovement ||
+                                  scaledW > vpSize.width)
+                              ? e.delta.dx
+                              : 0.0);
 
-                      final double nextTx = appState.freePaperMovement
-                          ? (curTx + dx)
-                              .clamp(
-                                math.min(0.0, vpSize.width - scaledW) - 800.0,
-                                800.0,
-                              )
-                              .toDouble()
-                          : (scaledW <= vpSize.width
-                              ? (vpSize.width - scaledW) * 0.5
-                              : (curTx + dx)
-                                  .clamp(vpSize.width - scaledW, 0.0)
-                                  .toDouble());
+                      final int nowUs = e.timeStamp.inMicroseconds;
+                      if (_lastPanEventUs > 0 && nowUs > _lastPanEventUs) {
+                        final double dt =
+                            ((nowUs - _lastPanEventUs) / 1e6).clamp(0.002, 0.08);
+                        _panVelocityY =
+                            _panVelocityY * 0.62 + (e.delta.dy / dt) * 0.38;
+                        _panVelocityX =
+                            _panVelocityX * 0.62 + (rawDx / dt) * 0.38;
+                      }
+                      if (nowUs > 0) {
+                        _lastPanEventUs = nowUs;
+                      }
 
-                      final double minTy = appState.freePaperMovement
-                          ? math.min(0.0, vpSize.height - scaledH) - 800.0
-                          : math.min(0.0, vpSize.height - scaledH) - 120.0;
-                      final double maxTy =
-                          appState.freePaperMovement ? 800.0 : 120.0;
-                      final double nextTy =
-                          (curTy + dy).clamp(minTy, maxTy).toDouble();
+                      final double speedY = _panVelocityY.abs();
+                      final double t =
+                          ((speedY - 450.0) / 2750.0).clamp(0.0, 1.0);
+                      final double accelBoost = 1.0 + (t * t) * 2.4;
+                      final double dy = e.delta.dy * scrollMult * accelBoost;
 
-                      _transformController.value = m.clone()
-                        ..setTranslationRaw(nextTx, nextTy, 0.0);
-                      _updatePullToAddProgress(notebook, vpSize);
+                      _applySmartScrollDelta(
+                        notebook,
+                        appState,
+                        vpSize,
+                        rawDx,
+                        dy,
+                        isFling: false,
+                      );
                     }
                   },
                   onPointerUp: (e) {
@@ -4434,8 +4648,36 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       _overlayTouchPointers.remove(e.pointer);
                       _lockedMatrixDuringStylus = null;
                       _lockedWhiteboardMatrixDuringStylus = null;
-                      if (_stylusPanMode && useFastVerticalPan) {
+                      if (_stylusPanMode && useSmartVerticalPan) {
+                        if (!_isOverlayDragging &&
+                            _overlayTouchPointers.isEmpty &&
+                            _pullAddProgressNotifier.value < 0.1 &&
+                            _panAccumDelta.distance >= 10.0) {
+                          final int nowUs = e.timeStamp.inMicroseconds;
+                          final bool stale = _lastPanEventUs == 0 ||
+                              (nowUs > 0 && (nowUs - _lastPanEventUs) > 90000);
+                          if (!stale) {
+                            final double speedY = _panVelocityY.abs();
+                            final double t =
+                                ((speedY - 450.0) / 2750.0).clamp(0.0, 1.0);
+                            final double accelBoost = 1.0 + (t * t) * 2.4;
+                            final double launchVy = (_panVelocityY *
+                                    scrollMult *
+                                    (0.95 + accelBoost * 0.55))
+                                .clamp(-28000.0, 28000.0);
+                            final double launchVx =
+                                _panAxisLock == _ScrollAxisLock.vertical
+                                    ? 0.0
+                                    : (_panVelocityX * 0.85)
+                                        .clamp(-6000.0, 6000.0);
+                            if (launchVy.abs() > 140.0 ||
+                                launchVx.abs() > 140.0) {
+                              _startScrollFling(launchVx, launchVy);
+                            }
+                          }
+                        }
                         _finishPullToAddIfReady(notebook);
+                        _resetPanTracking();
                       }
                       if (_isStylusDown || _isDrawingPointerDown) {
                         setState(() {
@@ -4447,11 +4689,45 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       return;
                     }
                     if (e.kind != PointerDeviceKind.touch) return;
+                    final bool wasSingleTouchPan =
+                        _activeTouchPointers.length == 1 &&
+                            _activeTouchPointers.contains(e.pointer);
                     _activeTouchPointers.remove(e.pointer);
                     _overlayTouchPointers.remove(e.pointer);
                     _pointerDownPositions.remove(e.pointer);
-                    if (useFastVerticalPan && _activeTouchPointers.isEmpty) {
+                    if (useSmartVerticalPan && _activeTouchPointers.isEmpty) {
+                      if (wasSingleTouchPan &&
+                          allowZoomPan &&
+                          !_isOverlayDragging &&
+                          !stylusBlocksViewport &&
+                          !_isDrawingPointerDown &&
+                          _croppingImageId == null &&
+                          _pullAddProgressNotifier.value < 0.1 &&
+                          _panAccumDelta.distance >= 10.0) {
+                        final int nowUs = e.timeStamp.inMicroseconds;
+                        final bool stale = _lastPanEventUs == 0 ||
+                            (nowUs > 0 && (nowUs - _lastPanEventUs) > 90000);
+                        if (!stale) {
+                          final double speedY = _panVelocityY.abs();
+                          final double t =
+                              ((speedY - 450.0) / 2750.0).clamp(0.0, 1.0);
+                          final double accelBoost = 1.0 + (t * t) * 2.4;
+                          final double launchVy = (_panVelocityY *
+                                  scrollMult *
+                                  (0.95 + accelBoost * 0.55))
+                              .clamp(-28000.0, 28000.0);
+                          final double launchVx =
+                              _panAxisLock == _ScrollAxisLock.vertical
+                                  ? 0.0
+                                  : (_panVelocityX * 0.85)
+                                      .clamp(-6000.0, 6000.0);
+                          if (launchVy.abs() > 140.0 || launchVx.abs() > 140.0) {
+                            _startScrollFling(launchVx, launchVy);
+                          }
+                        }
+                      }
                       _finishPullToAddIfReady(notebook);
+                      _resetPanTracking();
                     }
                     if (_activeTouchPointers.isEmpty &&
                         !_isStylusDown &&
@@ -4482,6 +4758,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     }
                   },
                   onPointerCancel: (e) {
+                    _stopScrollFling();
+                    _resetPanTracking();
                     if (e.kind == PointerDeviceKind.stylus ||
                         e.kind == PointerDeviceKind.invertedStylus) {
                       _overlayTouchPointers.remove(e.pointer);
@@ -4500,7 +4778,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     _activeTouchPointers.remove(e.pointer);
                     _overlayTouchPointers.remove(e.pointer);
                     _pointerDownPositions.remove(e.pointer);
-                    if (useFastVerticalPan && _activeTouchPointers.isEmpty) {
+                    if (useSmartVerticalPan && _activeTouchPointers.isEmpty) {
                       _pullAddProgressNotifier.value = 0.0;
                     }
                     if (_activeTouchPointers.isEmpty &&
@@ -4543,7 +4821,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                                 vertical: 120,
                               ),
                         panEnabled: allowZoomPan &&
-                            (!useFastVerticalPan ||
+                            (!useSmartVerticalPan ||
                                 _activeTouchPointers.length >= 2),
                         scaleEnabled:
                             !_isOverlayDragging && !stylusBlocksViewport,
@@ -4880,59 +5158,87 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                         ),
                       ),
 
-                    // Item 7: Star-Only Floating Left Quick-Pen Favorites Dock flush to far left edge (left: 4)
+                    // Item 7: Vertically Draggable Left Quick-Pen Favorites Dock flush to left edge (left: 4)
                     if (appState.showFavoritesBar &&
                         appState.favoritePens.isNotEmpty)
-                      Positioned(
-                        left: 4,
-                        top: 0,
-                        bottom: 0,
-                        child: Center(
-                          child: QuickPenFavoritesDock(
-                            favoritePens: appState.favoritePens,
-                            activeTool: _activeTool,
-                            activeColor: _effectiveColor,
-                            activeWidth: _effectiveWidth,
-                            onSelectPreset: (preset) {
-                              setState(() {
-                                final tool = EditorToolX.fromStrokeToolType(
-                                  preset.toolType,
-                                );
-                                _activeTool = tool;
-                                if (tool.isPenFamily) _lastPenTool = tool;
-                                if (tool == EditorTool.highlighter) {
-                                  _highlighterColor = Color(preset.colorValue);
-                                  _highlighterWidth = preset.width;
-                                  _highlighterOpacity = preset.opacity;
-                                } else {
-                                  _penColor = Color(preset.colorValue);
-                                  _penWidth = preset.width;
-                                  _penOpacity = preset.opacity;
-                                  _pressureSensitivity =
-                                      preset.pressureSensitivity;
+                      ValueListenableBuilder<double?>(
+                        valueListenable: _favoritesDockTopNotifier,
+                        builder: (_, customTop, __) {
+                          final double estHeight =
+                              92.0 + appState.favoritePens.length * 40.0;
+                          final double maxTop = math.max(
+                            12.0,
+                            vpSize.height - estHeight - 12.0,
+                          );
+                          final double defaultTop =
+                              ((vpSize.height - estHeight) * 0.5)
+                                  .clamp(12.0, maxTop)
+                                  .toDouble();
+                          final double effectiveTop = (customTop ?? defaultTop)
+                              .clamp(12.0, maxTop)
+                              .toDouble();
+
+                          return Positioned(
+                            left: 4,
+                            top: effectiveTop,
+                            child: QuickPenFavoritesDock(
+                              favoritePens: appState.favoritePens,
+                              activeTool: _activeTool,
+                              activeColor: _effectiveColor,
+                              activeWidth: _effectiveWidth,
+                              onVerticalDragStart: () {
+                                _stopScrollFling();
+                                setState(() => _isOverlayDragging = true);
+                              },
+                              onVerticalDragDelta: (dy) {
+                                final double cur =
+                                    _favoritesDockTopNotifier.value ??
+                                        defaultTop;
+                                _favoritesDockTopNotifier.value =
+                                    (cur + dy).clamp(12.0, maxTop).toDouble();
+                              },
+                              onVerticalDragEnd: () {
+                                if (mounted) {
+                                  setState(() => _isOverlayDragging = false);
                                 }
-                                _selectedImageId = null;
-                              });
-                              _persistPenPrefs();
-                            },
-                            onRemovePreset: (preset) {
-                              appState.toggleStarPen(preset);
-                            },
-                          ),
-                        ),
+                              },
+                              onSelectPreset: (preset) {
+                                setState(() {
+                                  final tool = EditorToolX.fromStrokeToolType(
+                                    preset.toolType,
+                                  );
+                                  _activeTool = tool;
+                                  if (tool.isPenFamily) _lastPenTool = tool;
+                                  if (tool == EditorTool.highlighter) {
+                                    _highlighterColor = Color(preset.colorValue);
+                                    _highlighterWidth = preset.width;
+                                    _highlighterOpacity = preset.opacity;
+                                  } else {
+                                    _penColor = Color(preset.colorValue);
+                                    _penWidth = preset.width;
+                                    _penOpacity = preset.opacity;
+                                    _pressureSensitivity =
+                                        preset.pressureSensitivity;
+                                  }
+                                  _selectedImageId = null;
+                                });
+                                _persistPenPrefs();
+                              },
+                              onRemovePreset: (preset) {
+                                appState.toggleStarPen(preset);
+                              },
+                            ),
+                          );
+                        },
                       ),
 
-                // Draggable Right-Side Page Number Pill Fast-Scrollbar (tap = Page Grid, drag = scrub pages!)
+                // Draggable Right-Side Page Number Pill Fast-Scrollbar (zero-delay ValueNotifier updates!)
                 if (!currentPage.isInfiniteWhiteboard && !notebook.isWhiteboard)
                   () {
                     final int pageCount = math.max(1, notebook.pages.length);
                     final double trackTop = 14.0;
                     final double trackHeight =
                         math.max(80.0, vpSize.height - 64.0);
-                    final double frac = pageCount <= 1
-                        ? 0.0
-                        : (currentIdx / (pageCount - 1)).clamp(0.0, 1.0);
-                    final double thumbTop = trackTop + frac * trackHeight;
 
                     void scrubToDy(double localDy) {
                       if (pageCount <= 1) return;
@@ -4954,10 +5260,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                           ..translate(tx, targetTy)
                           ..scale(scale, scale);
                         if (_currentPageIndex != targetPage) {
-                          setState(() {
-                            _currentPageIndex = targetPage;
-                            _renderedWindowCenter = targetPage;
-                          });
+                          _syncCurrentPageIndex(targetPage);
+                          if ((targetPage - _renderedWindowCenter).abs() >= 2) {
+                            setState(() => _renderedWindowCenter = targetPage);
+                          }
                         }
                         _scrubPrefetchTimer?.cancel();
                         _scrubPrefetchTimer =
@@ -4973,91 +5279,107 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                       }
                     }
 
-                    return Positioned(
-                      top: thumbTop,
-                      right: 10,
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () => _openPageGridModal(notebook),
-                        onVerticalDragStart: (_) {
-                          _scrubPrefetchTimer?.cancel();
-                          setState(() {
-                            _isOverlayDragging = true;
-                            _isScrubbingPages = true;
-                          });
-                        },
-                        onVerticalDragUpdate: (d) {
-                          final box = _viewportStackKey.currentContext
-                              ?.findRenderObject() as RenderBox?;
-                          if (box != null) {
-                            final local = box.globalToLocal(d.globalPosition);
-                            scrubToDy(local.dy);
-                          }
-                        },
-                        onVerticalDragEnd: (_) {
-                          _scrubPrefetchTimer?.cancel();
-                          setState(() {
-                            _isOverlayDragging = false;
-                            _isScrubbingPages = false;
-                            _renderedWindowCenter = _currentPageIndex;
-                          });
-                          final curNb = _getNotebook(context, listen: false);
-                          if (curNb != null) {
-                            _prefetchNearbyPdfPages(curNb);
-                          }
-                        },
-                        onVerticalDragCancel: () {
-                          _scrubPrefetchTimer?.cancel();
-                          setState(() {
-                            _isOverlayDragging = false;
-                            _isScrubbingPages = false;
-                            _renderedWindowCenter = _currentPageIndex;
-                          });
-                          final curNb = _getNotebook(context, listen: false);
-                          if (curNb != null) {
-                            _prefetchNearbyPdfPages(curNb);
-                          }
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 6,
-                          ),
-                          decoration: BoxDecoration(
-                            color: EditorColors.obsidianSurface.withAlpha(225),
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(
-                              color: EditorColors.activeBlue.withAlpha(110),
-                            ),
-                            boxShadow: const [
-                              BoxShadow(
-                                color: Colors.black38,
-                                blurRadius: 6,
-                                offset: Offset(0, 2),
+                    return ValueListenableBuilder<int>(
+                      valueListenable: _currentPageIndexNotifier,
+                      builder: (_, liveIdx, __) {
+                        final int pillIdx = liveIdx.clamp(0, pageCount - 1);
+                        final double frac = pageCount <= 1
+                            ? 0.0
+                            : (pillIdx / (pageCount - 1)).clamp(0.0, 1.0);
+                        final double thumbTop = trackTop + frac * trackHeight;
+
+                        return Positioned(
+                          top: thumbTop,
+                          right: 10,
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => _openPageGridModal(notebook),
+                            onVerticalDragStart: (_) {
+                              _stopScrollFling();
+                              _scrubPrefetchTimer?.cancel();
+                              setState(() {
+                                _isOverlayDragging = true;
+                                _isScrubbingPages = true;
+                              });
+                            },
+                            onVerticalDragUpdate: (d) {
+                              final box = _viewportStackKey.currentContext
+                                  ?.findRenderObject() as RenderBox?;
+                              if (box != null) {
+                                final local =
+                                    box.globalToLocal(d.globalPosition);
+                                scrubToDy(local.dy);
+                              }
+                            },
+                            onVerticalDragEnd: (_) {
+                              _scrubPrefetchTimer?.cancel();
+                              setState(() {
+                                _isOverlayDragging = false;
+                                _isScrubbingPages = false;
+                                _renderedWindowCenter = _currentPageIndex;
+                              });
+                              final curNb =
+                                  _getNotebook(context, listen: false);
+                              if (curNb != null) {
+                                _prefetchNearbyPdfPages(curNb);
+                              }
+                            },
+                            onVerticalDragCancel: () {
+                              _scrubPrefetchTimer?.cancel();
+                              setState(() {
+                                _isOverlayDragging = false;
+                                _isScrubbingPages = false;
+                                _renderedWindowCenter = _currentPageIndex;
+                              });
+                              final curNb =
+                                  _getNotebook(context, listen: false);
+                              if (curNb != null) {
+                                _prefetchNearbyPdfPages(curNb);
+                              }
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
                               ),
-                            ],
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(
-                                Icons.unfold_more_rounded,
-                                size: 13,
-                                color: EditorColors.activeBlue,
-                              ),
-                              const SizedBox(width: 4),
-                              Text(
-                                'Trang ${currentIdx + 1} / $pageCount',
-                                style: const TextStyle(
-                                  fontSize: 11.5,
-                                  fontWeight: FontWeight.w700,
-                                  color: Colors.white,
+                              decoration: BoxDecoration(
+                                color:
+                                    EditorColors.obsidianSurface.withAlpha(225),
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(
+                                  color: EditorColors.activeBlue.withAlpha(110),
                                 ),
+                                boxShadow: const [
+                                  BoxShadow(
+                                    color: Colors.black38,
+                                    blurRadius: 6,
+                                    offset: Offset(0, 2),
+                                  ),
+                                ],
                               ),
-                            ],
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.unfold_more_rounded,
+                                    size: 13,
+                                    color: EditorColors.activeBlue,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    'Trang ${pillIdx + 1} / $pageCount',
+                                    style: const TextStyle(
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
                           ),
-                        ),
-                      ),
+                        );
+                      },
                     );
                   }(),
 
@@ -5422,7 +5744,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       itemCount: notebook.pages.length,
       onPageChanged: (i) {
         setState(() {
-          _currentPageIndex = i;
+          _syncCurrentPageIndex(i);
           _renderedWindowCenter = i;
         });
         _prefetchNearbyPdfPages(notebook);

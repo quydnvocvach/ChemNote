@@ -888,6 +888,9 @@ class QuickPenFavoritesDock extends StatefulWidget {
   final double activeWidth;
   final ValueChanged<PenPreset> onSelectPreset;
   final ValueChanged<PenPreset> onRemovePreset;
+  final VoidCallback? onVerticalDragStart;
+  final ValueChanged<double>? onVerticalDragDelta;
+  final VoidCallback? onVerticalDragEnd;
 
   const QuickPenFavoritesDock({
     super.key,
@@ -897,6 +900,9 @@ class QuickPenFavoritesDock extends StatefulWidget {
     required this.activeWidth,
     required this.onSelectPreset,
     required this.onRemovePreset,
+    this.onVerticalDragStart,
+    this.onVerticalDragDelta,
+    this.onVerticalDragEnd,
   });
 
   @override
@@ -935,6 +941,27 @@ class _QuickPenFavoritesDockState extends State<QuickPenFavoritesDock> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          Tooltip(
+            message: 'Kéo lên / xuống để di chuyển thanh bút yêu thích',
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onVerticalDragStart: (_) => widget.onVerticalDragStart?.call(),
+              onVerticalDragUpdate: (d) =>
+                  widget.onVerticalDragDelta?.call(d.delta.dy),
+              onVerticalDragEnd: (_) => widget.onVerticalDragEnd?.call(),
+              onVerticalDragCancel: () => widget.onVerticalDragEnd?.call(),
+              child: Container(
+                width: 34,
+                height: 22,
+                alignment: Alignment.center,
+                child: Icon(
+                  Icons.drag_handle_rounded,
+                  size: 16,
+                  color: isDark ? Colors.white54 : Colors.black45,
+                ),
+              ),
+            ),
+          ),
           if (!_collapsed)
             for (final pen in widget.favoritePens) _buildPenItem(pen, isDark),
           InkWell(
@@ -2046,121 +2073,206 @@ Future<void> showPageTemplateSheet({
     context: context,
     showDragHandle: true,
     isScrollControlled: true,
+    constraints: const BoxConstraints(maxWidth: 700),
     builder: (ctx) {
       return StatefulBuilder(
         builder: (ctx, setModalState) {
-          return Padding(
-            padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Mẫu giấy & Màu nền trang (10 mẫu tuyển chọn)',
-                  style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    for (final c in PaperColorType.values)
-                      Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 4),
-                          child: ChoiceChip(
-                            label: Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Container(
-                                  width: 14,
-                                  height: 14,
-                                  decoration: BoxDecoration(
-                                    color: PaperTemplateInfo.previewColor(c),
-                                    shape: BoxShape.circle,
-                                    border: Border.all(color: Colors.black26),
-                                  ),
-                                ),
-                                const SizedBox(width: 6),
-                                Flexible(
-                                  child: Text(
-                                    PaperTemplateInfo.colorLabel(c),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            selected: selectedColor == c,
-                            onSelected: (_) {
-                              setModalState(() => selectedColor = c);
-                              onApply(selectedTemplate, selectedColor);
-                            },
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                SizedBox(
-                  height: 310,
-                  child: GridView.count(
-                    crossAxisCount: 4,
-                    mainAxisSpacing: 8,
-                    crossAxisSpacing: 8,
-                    childAspectRatio: 0.78,
+          final size = MediaQuery.sizeOf(ctx);
+          final isDark = Theme.of(ctx).brightness == Brightness.dark;
+          final int crossAxisCount = size.width >= 540 ? 5 : 3;
+          final double sheetGridHeight =
+              math.min(430.0, math.max(260.0, size.height * 0.58));
+
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 2, 20, 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Mẫu giấy & Màu nền trang (10 mẫu tuyển chọn)',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
                     children: [
-                      for (final tpl in PaperTemplateInfo.orderedTemplates)
-                        InkWell(
-                          onTap: () {
-                            setModalState(() => selectedTemplate = tpl);
-                            onApply(selectedTemplate, selectedColor);
-                          },
-                          borderRadius: BorderRadius.circular(10),
-                          child: Container(
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(
-                                color: selectedTemplate == tpl
+                      for (final c in PaperColorType.values)
+                        Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            child: ChoiceChip(
+                              showCheckmark: false,
+                              label: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Container(
+                                    width: 14,
+                                    height: 14,
+                                    decoration: BoxDecoration(
+                                      color: PaperTemplateInfo.previewColor(c),
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color: isDark
+                                            ? Colors.white38
+                                            : Colors.black26,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Flexible(
+                                    child: Text(
+                                      PaperTemplateInfo.colorLabel(c),
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontWeight: selectedColor == c
+                                            ? FontWeight.w700
+                                            : FontWeight.w500,
+                                        color: selectedColor == c
+                                            ? (isDark
+                                                ? Colors.white
+                                                : EditorColors.activeBlue)
+                                            : (isDark
+                                                ? const Color(0xFFE2E8F0)
+                                                : const Color(0xFF1E293B)),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              selected: selectedColor == c,
+                              selectedColor: isDark
+                                  ? EditorColors.activeBlue.withAlpha(72)
+                                  : EditorColors.activeBlue.withAlpha(32),
+                              side: BorderSide(
+                                color: selectedColor == c
                                     ? EditorColors.activeBlue
                                     : Theme.of(ctx).colorScheme.outlineVariant,
-                                width: selectedTemplate == tpl ? 2.2 : 1.0,
                               ),
-                            ),
-                            child: Column(
-                              children: [
-                                Expanded(
-                                  child: ClipRRect(
-                                    borderRadius: const BorderRadius.vertical(
-                                      top: Radius.circular(8),
-                                    ),
-                                    child: CustomPaint(
-                                      painter: PaperTemplatePainter(
-                                        templateType: tpl,
-                                        paperColor: selectedColor,
-                                      ),
-                                      size: Size.infinite,
-                                    ),
-                                  ),
-                                ),
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 4,
-                                    vertical: 4,
-                                  ),
-                                  child: Text(
-                                    PaperTemplateInfo.templateLabel(tpl),
-                                    maxLines: 2,
-                                    textAlign: TextAlign.center,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(fontSize: 10),
-                                  ),
-                                ),
-                              ],
+                              onSelected: (_) {
+                                setModalState(() => selectedColor = c);
+                                onApply(selectedTemplate, selectedColor);
+                              },
                             ),
                           ),
                         ),
                     ],
                   ),
-                ),
-              ],
+                  const SizedBox(height: 14),
+                  SizedBox(
+                    height: sheetGridHeight,
+                    child: GridView.count(
+                      crossAxisCount: crossAxisCount,
+                      mainAxisSpacing: 12,
+                      crossAxisSpacing: 12,
+                      childAspectRatio: 0.62,
+                      children: [
+                        for (final tpl in PaperTemplateInfo.orderedTemplates)
+                          () {
+                            final bool isSelected = selectedTemplate == tpl;
+                            return InkWell(
+                              onTap: () {
+                                setModalState(() => selectedTemplate = tpl);
+                                onApply(selectedTemplate, selectedColor);
+                              },
+                              borderRadius: BorderRadius.circular(10),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  Expanded(
+                                    child: Center(
+                                      child: AspectRatio(
+                                        aspectRatio: PaperMetrics.portraitWidth /
+                                            PaperMetrics.portraitHeight,
+                                        child: AnimatedContainer(
+                                          duration:
+                                              const Duration(milliseconds: 140),
+                                          decoration: BoxDecoration(
+                                            borderRadius:
+                                                BorderRadius.circular(9),
+                                            border: Border.all(
+                                              color: isSelected
+                                                  ? EditorColors.activeBlue
+                                                  : (isDark
+                                                      ? Colors.white24
+                                                      : Colors.black12),
+                                              width: isSelected ? 2.4 : 1.0,
+                                            ),
+                                            boxShadow: [
+                                              BoxShadow(
+                                                color: Colors.black.withAlpha(
+                                                    isDark ? 90 : 28),
+                                                blurRadius: 8,
+                                                offset: const Offset(0, 3),
+                                              ),
+                                            ],
+                                          ),
+                                          child: ClipRRect(
+                                            borderRadius:
+                                                BorderRadius.circular(7),
+                                            child: Stack(
+                                              fit: StackFit.expand,
+                                              children: [
+                                                CustomPaint(
+                                                  painter: PaperTemplatePainter(
+                                                    templateType: tpl,
+                                                    paperColor: selectedColor,
+                                                  ),
+                                                  size: Size.infinite,
+                                                ),
+                                                if (isSelected)
+                                                  Positioned(
+                                                    right: 5,
+                                                    bottom: 5,
+                                                    child: Container(
+                                                      width: 18,
+                                                      height: 18,
+                                                      decoration:
+                                                          const BoxDecoration(
+                                                        color: EditorColors
+                                                            .activeBlue,
+                                                        shape: BoxShape.circle,
+                                                      ),
+                                                      child: const Icon(
+                                                        Icons.check_rounded,
+                                                        size: 12,
+                                                        color: Colors.white,
+                                                      ),
+                                                    ),
+                                                  ),
+                                              ],
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    PaperTemplateInfo.templateLabel(tpl),
+                                    maxLines: 2,
+                                    textAlign: TextAlign.center,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 10.5,
+                                      height: 1.18,
+                                      fontWeight: isSelected
+                                          ? FontWeight.w700
+                                          : FontWeight.w500,
+                                      color: isSelected
+                                          ? EditorColors.activeBlue
+                                          : null,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          }(),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           );
         },
@@ -2186,6 +2298,7 @@ class EditorSettingsDrawer extends StatelessWidget {
   final VoidCallback onDeletePage;
   final VoidCallback onImportPdf;
   final VoidCallback onExportPdf;
+  final VoidCallback? onCopyDrivePdfLink;
   final VoidCallback onPickPdfExportDir;
   final VoidCallback onToggleLockNotebook;
   final VoidCallback onCheckForUpdate;
@@ -2206,6 +2319,7 @@ class EditorSettingsDrawer extends StatelessWidget {
     required this.onDeletePage,
     required this.onImportPdf,
     required this.onExportPdf,
+    this.onCopyDrivePdfLink,
     required this.onPickPdfExportDir,
     required this.onToggleLockNotebook,
     required this.onCheckForUpdate,
@@ -2326,6 +2440,15 @@ class EditorSettingsDrawer extends StatelessWidget {
                 onExportPdf();
               },
             ),
+            if (onCopyDrivePdfLink != null)
+              _drawerTile(
+                icon: Icons.link_rounded,
+                title: 'Sao chép link PDF Google Drive',
+                onTap: () {
+                  Navigator.pop(context);
+                  onCopyDrivePdfLink!();
+                },
+              ),
             ListTile(
               dense: true,
               contentPadding: const EdgeInsets.symmetric(horizontal: 4),
@@ -2389,23 +2512,9 @@ class EditorSettingsDrawer extends StatelessWidget {
             SwitchListTile(
               dense: true,
               contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-              title: const Text('Chạm đúp để thu phóng'),
-              value: appState.doubleTapToZoom,
-              onChanged: appState.setDoubleTapToZoom,
-            ),
-            SwitchListTile(
-              dense: true,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
               title: const Text('Cử chỉ 2/3 ngón (Undo/Redo)'),
               value: appState.quickGesturesEnabled,
               onChanged: appState.setQuickGesturesEnabled,
-            ),
-            SwitchListTile(
-              dense: true,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-              title: const Text('Gõ đúp M-Pencil 3 đổi Tẩy'),
-              value: appState.mPencilDoubleTapEraser,
-              onChanged: appState.setMPencilDoubleTapEraser,
             ),
             SwitchListTile(
               dense: true,

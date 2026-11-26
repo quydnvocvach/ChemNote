@@ -160,22 +160,17 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.7.6 with APK
+      - name: Publish Release v3.7.7 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.7.6
-          name: ChemNote Pro v3.7.6 (Quản lý Danh sách trang đa năng, Giao diện Nền sáng dịu mắt & Gạch xóa 4 nét)
+          tag_name: v3.7.7
+          name: ChemNote Pro v3.7.7 (Cuộn dọc thông minh chuẩn Huawei Notes, Phân cấp thư mục & Chọn nhiều sổ tay)
           body: |
-            ### ChemNote Pro v3.7.6 — Quản lý trang chuyên nghiệp, Nền sáng Warm Paper-Stone dịu mắt & Gạch xóa nhanh nhạy hơn!
-            - **Nâng cấp toàn diện Danh sách trang (`_openPageGridModal`):**
-              - **Đổi thứ tự trang trực tiếp:** Kéo biểu tượng góc trái trên từng thẻ trang để kéo-thả sang vị trí mới trong sổ tay.
-              - **Đánh dấu & lọc trang đánh dấu:** Chạm biểu tượng dấu trang ngay ở góc phải từng thẻ để bật/tắt đánh dấu và dùng nút lọc trên tiêu đề để xem riêng các trang đã đánh dấu.
-              - **Chọn nhiều trang (Nhấn giữ bất kỳ trang nào hoặc bấm "Chọn"):** Hiện ô chọn tròn ở góc trên bên trái mọi trang để chọn 1 hoặc nhiều trang, hỗ trợ **Sao chép → Dán**, **Nhân bản**, **Xuất PDF riêng các trang đã chọn**, hoặc **Xóa hàng loạt** (luôn giữ tối thiểu 1 trang).
-            - **Tinh chỉnh Giao diện Nền Sáng dịu mắt (`Warm Paper-Stone`):**
-              - Thay thế nền trắng chói `#FFFFFF` bằng bảng màu **giấy ấm / đá nhạt chống lóa (`#EEECE6`, `#F6F4EE`, `#E7E3DA`, `#D6D0C4`)** hài hòa trên màn hình PaperMatte cả ở Thư viện, Thanh tab, Thanh công cụ, Ngăn cài đặt, Thanh Audio và Nền vùng viết (`#E3DFD6`).
-            - **Gạch xóa nhanh (Scribble-to-Erase) nhạy còn 4 nét:**
-              - Giảm ngưỡng từ 5 lượt qua lại (`>= 4` lần đảo chiều) xuống **4 lượt qua lại (`>= 3` lần đảo chiều, `1.85×` đường chéo)** trong `StrokeEngine.isScribbleGesture` để gạch xóa tự nhiên mà không xóa nhầm chữ viết thường.
-            - **Kèm trọn vẹn toàn bộ tối ưu độ mượt từ v3.7.5.**
+            ### ChemNote Pro v3.7.7
+            - **Khắc phục triệt để lỗi đồng bộ Drive tiếp tục upload `Assets/` sau khi xóa ghi chú & dọn thùng rác:** Dừng ngay luồng upload khi ghi chú bị xóa vĩnh viễn và tự chạy lượt dọn sạch trên Drive ngay sau khi đồng bộ kết thúc.
+            - **Cuộn dọc thông minh chuẩn Huawei Notes:** Khóa trục ngang thông minh khi vuốt dọc ngay cả khi bật *Chuyển động giấy tự do*, tăng tốc theo vận tốc vuốt tay và hỗ trợ quán tính lướt 144Hz siêu mượt; cập nhật số trang tức thì ở thanh cuộn bên phải và cho phép kéo lên xuống thanh bút yêu thích bên trái.
+            - **Nâng cấp Thư mục & Thư viện:** Phân cấp thư mục đa tầng với breadcrumb điều hướng, thẻ thư mục con trực quan, di chuyển/đổi màu/đổi tên; nhấn giữ sổ tay để **chọn hàng loạt** (**Xóa, Nhân bản, Di chuyển thư mục, Đổi bìa đồng loạt, Xuất PDF đồng loạt**); bỏ phần chữ & icon rườm rà ngoài màn hình chính.
+            - **Mẫu giấy & Cài đặt:** Đồng bộ mẫu giấy **Kẻ ngang ruy-băng xanh** chuẩn 1:1 kèm nền trắng làm mặc định, sửa lỗi xem trước mẫu giấy bị phóng lệch; chỉnh **Insert PDF/DOC** mở thẳng vào thư mục `Download` (tùy chỉnh được trong Cài đặt ngoài); thêm nút **Sao chép link PDF Google Drive**; bỏ *Gõ đúp đổi Tẩy* & *Chạm đúp thu phóng* trong Cài đặt sổ.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

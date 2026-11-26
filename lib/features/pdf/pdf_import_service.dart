@@ -109,11 +109,13 @@ class PdfImportService {
   Future<PdfImportResult?> pickAndImportPdf({
     int startIndex = 0,
     double dpi = defaultPdfDpi,
+    String? initialDirectory,
     void Function(int currentPage)? onPageRendered,
     PdfImportProgressCallback? onProgress,
   }) async {
     final nativePick = await HardwareService.instance.pickDocumentFile(
       allowedExtensions: const <String>['pdf'],
+      initialDirectory: initialDirectory,
     );
     Uint8List? bytes;
     String? pickedPath;
@@ -128,6 +130,7 @@ class PdfImportService {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: const <String>['pdf'],
+        initialDirectory: initialDirectory,
         withData: kIsWeb,
       );
 
@@ -384,10 +387,12 @@ class PdfImportService {
   /// - Với `.doc`/`.ppt`/`.pptx`: tự động chuyển sang thẻ đính kèm an toàn kèm hướng dẫn.
   Future<PdfImportResult?> pickAndImportDocx({
     int startIndex = 0,
+    String? initialDirectory,
     PdfImportProgressCallback? onProgress,
   }) async {
     final nativePick = await HardwareService.instance.pickDocumentFile(
       allowedExtensions: const <String>['docx', 'doc', 'ppt', 'pptx'],
+      initialDirectory: initialDirectory,
     );
     Uint8List? bytes;
     String? pickedPath;
@@ -404,6 +409,7 @@ class PdfImportService {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: const <String>['docx', 'doc', 'ppt', 'pptx'],
+        initialDirectory: initialDirectory,
         withData: kIsWeb,
       );
 

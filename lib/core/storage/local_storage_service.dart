@@ -78,6 +78,11 @@ class LocalStorageService {
     return File('${root.path}${Platform.pathSeparator}pdf_export_dir.txt');
   }
 
+  Future<File> _getImportDirFile() async {
+    final root = await getRootDirectory();
+    return File('${root.path}${Platform.pathSeparator}import_dir.txt');
+  }
+
   Future<File> _getPenPrefsFile() async {
     final root = await getRootDirectory();
     return File('${root.path}${Platform.pathSeparator}pen_prefs.json');
@@ -192,6 +197,30 @@ class LocalStorageService {
   Future<void> savePdfExportDirectory(String? directory) async {
     try {
       final file = await _getPdfExportDirFile();
+      if (directory == null || directory.trim().isEmpty) {
+        if (await file.exists()) await file.delete();
+      } else {
+        await file.writeAsString(directory.trim(), flush: true);
+      }
+    } catch (_) {
+      // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
+    }
+  }
+
+  Future<String?> loadImportDirectory() async {
+    try {
+      final file = await _getImportDirFile();
+      if (!await file.exists()) return null;
+      final raw = (await file.readAsString()).trim();
+      return raw.isEmpty ? null : raw;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> saveImportDirectory(String? directory) async {
+    try {
+      final file = await _getImportDirFile();
       if (directory == null || directory.trim().isEmpty) {
         if (await file.exists()) await file.delete();
       } else {
@@ -357,7 +386,14 @@ class LocalStorageService {
       }
 
       final root = await getRootDirectory();
-      const subfolders = ['images', 'pdfs', 'audio', 'attachments'];
+      const subfolders = [
+        'images',
+        'pdfs',
+        'pdf_pages',
+        'docx_media',
+        'audio',
+        'attachments',
+      ];
       int deletedCount = 0;
       for (final sub in subfolders) {
         final dir = Directory('${root.path}${Platform.pathSeparator}$sub');

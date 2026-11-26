@@ -145,46 +145,92 @@ class PaperTemplatePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    if (size.width <= 0 || size.height <= 0) return;
     final palette = PaperPalette.of(paperColor);
 
-    // Fill paper background
-    canvas.drawRect(Offset.zero & size, Paint()..color = palette.background);
-
     if (isInfiniteWhiteboard) {
+      if (size.width < 1200.0) {
+        const Size thumbCanonical = Size(794.0, 1123.0);
+        final double sx = size.width / thumbCanonical.width;
+        final double sy = size.height / thumbCanonical.height;
+        final double lineBoost =
+            sx < 0.45 ? (0.45 / sx).clamp(1.0, 1.9) : 1.0;
+        canvas.save();
+        canvas.clipRect(Offset.zero & size);
+        canvas.scale(sx, sy);
+        canvas.drawRect(
+          Offset.zero & thumbCanonical,
+          Paint()..color = palette.background,
+        );
+        _paintInfiniteWhiteboard(
+          canvas,
+          thumbCanonical,
+          palette,
+          lineBoost: lineBoost,
+        );
+        canvas.restore();
+        return;
+      }
+      canvas.drawRect(Offset.zero & size, Paint()..color = palette.background);
       _paintInfiniteWhiteboard(canvas, size, palette);
       return;
     }
+
+    final Size canonical = PaperMetrics.pageSize(isLandscape: isLandscape);
+    final bool needsScale = (size.width - canonical.width).abs() > 1.0 ||
+        (size.height - canonical.height).abs() > 1.0;
+    final double sx = size.width / canonical.width;
+    final double sy = size.height / canonical.height;
+    final double lineBoost =
+        (needsScale && sx < 0.45) ? (0.45 / sx).clamp(1.0, 1.9) : 1.0;
+    final Size paintSize = needsScale ? canonical : size;
+
+    if (needsScale) {
+      canvas.save();
+      canvas.clipRect(Offset.zero & size);
+      canvas.scale(sx, sy);
+    }
+
+    // Fill paper background
+    canvas.drawRect(
+      Offset.zero & paintSize,
+      Paint()..color = palette.background,
+    );
 
     switch (templateType) {
       case PaperTemplateType.blank:
         break;
       case PaperTemplateType.ruled:
-        _paintRuled(canvas, size, palette);
+        _paintRuled(canvas, paintSize, palette, lineBoost: lineBoost);
         break;
       case PaperTemplateType.grid:
-        _paintGrid(canvas, size, palette);
+        _paintGrid(canvas, paintSize, palette, lineBoost: lineBoost);
         break;
       case PaperTemplateType.dotted:
-        _paintDotted(canvas, size, palette);
+        _paintDotted(canvas, paintSize, palette, lineBoost: lineBoost);
         break;
       case PaperTemplateType.cornell:
-        _paintCornell(canvas, size, palette);
+        _paintCornell(canvas, paintSize, palette, lineBoost: lineBoost);
         break;
       case PaperTemplateType.hexagonal:
-        _paintHexagonal(canvas, size, palette);
+        _paintHexagonal(canvas, paintSize, palette, lineBoost: lineBoost);
         break;
       case PaperTemplateType.sageRibbon:
-        _paintSageRibbon(canvas, size, palette);
+        _paintSageRibbon(canvas, paintSize, palette, lineBoost: lineBoost);
         break;
       case PaperTemplateType.pastelGrid:
-        _paintPastelGrid(canvas, size, palette);
+        _paintPastelGrid(canvas, paintSize, palette, lineBoost: lineBoost);
         break;
       case PaperTemplateType.vintageCream:
-        _paintVintageCream(canvas, size, palette);
+        _paintVintageCream(canvas, paintSize, palette, lineBoost: lineBoost);
         break;
       case PaperTemplateType.twoColumnStudy:
-        _paintTwoColumnStudy(canvas, size, palette);
+        _paintTwoColumnStudy(canvas, paintSize, palette, lineBoost: lineBoost);
         break;
+    }
+
+    if (needsScale) {
+      canvas.restore();
     }
   }
 
@@ -192,8 +238,9 @@ class PaperTemplatePainter extends CustomPainter {
   void _paintInfiniteWhiteboard(
     Canvas canvas,
     Size size,
-    PaperPalette palette,
-  ) {
+    PaperPalette palette, {
+    double lineBoost = 1.0,
+  }) {
     switch (templateType) {
       case PaperTemplateType.blank:
         break;
@@ -202,10 +249,10 @@ class PaperTemplatePainter extends CustomPainter {
         const double step = 32.0;
         final minorPaint = Paint()
           ..color = palette.line
-          ..strokeWidth = 0.85;
+          ..strokeWidth = 0.85 * lineBoost;
         final majorPaint = Paint()
           ..color = palette.majorLine
-          ..strokeWidth = 1.2;
+          ..strokeWidth = 1.2 * lineBoost;
         int col = 0;
         for (double x = 0; x <= size.width; x += step) {
           canvas.drawLine(
@@ -229,7 +276,7 @@ class PaperTemplatePainter extends CustomPainter {
         final hexPaint = Paint()
           ..color = palette.line
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.0;
+          ..strokeWidth = 1.0 * lineBoost;
         const double radius = 26.0;
         final double hexWidth = math.sqrt(3) * radius;
         const double verticalStep = radius * 1.5;
@@ -261,7 +308,7 @@ class PaperTemplatePainter extends CustomPainter {
       case PaperTemplateType.twoColumnStudy:
         final linePaint = Paint()
           ..color = palette.line
-          ..strokeWidth = 1.0;
+          ..strokeWidth = 1.0 * lineBoost;
         for (double y = 36.0; y < size.height; y += 36.0) {
           canvas.drawLine(Offset(0, y), Offset(size.width, y), linePaint);
         }
@@ -273,7 +320,7 @@ class PaperTemplatePainter extends CustomPainter {
         const double step = 32.0;
         for (double y = step; y < size.height; y += step) {
           for (double x = step; x < size.width; x += step) {
-            canvas.drawCircle(Offset(x, y), 1.45, dotPaint);
+            canvas.drawCircle(Offset(x, y), 1.45 * lineBoost, dotPaint);
           }
         }
         break;
@@ -284,93 +331,105 @@ class PaperTemplatePainter extends CustomPainter {
     final cy = size.height * 0.5;
     final originPaint = Paint()
       ..color = palette.majorLine.withAlpha(180)
-      ..strokeWidth = 1.4;
+      ..strokeWidth = 1.4 * lineBoost;
     canvas.drawLine(Offset(cx - 14, cy), Offset(cx + 14, cy), originPaint);
     canvas.drawLine(Offset(cx, cy - 14), Offset(cx, cy + 14), originPaint);
   }
 
-  /// Huawei Notes signature sage-green header/footer paper with pastel peach
-  /// swallowtail bookmark ribbon at top-left and crisp ruled lines.
-  void _paintSageRibbon(Canvas canvas, Size size, PaperPalette palette) {
+  /// Exact 1:1 sage-green header/footer paper with pastel peach swallowtail
+  /// bookmark ribbon (solid fill, no stroke) and 26 full-width ruled lines.
+  void _paintSageRibbon(
+    Canvas canvas,
+    Size size,
+    PaperPalette palette, {
+    double lineBoost = 1.0,
+  }) {
     final bool isDark = paperColor == PaperColorType.dark;
     final Color sageFill =
-        isDark ? const Color(0xFF334034) : const Color(0xFFAEBDA7);
-    final Color sageBorder =
-        isDark ? const Color(0xFF566B58) : const Color(0xFF6E7F68);
+        isDark ? const Color(0xFF334034) : const Color(0xFFB4C3AC);
+    final Color sageDivider =
+        isDark ? const Color(0xFF566B58) : const Color(0xFF798D6E);
     final Color ribbonFill =
-        isDark ? const Color(0xFFC89B82) : const Color(0xFFFBD7C1);
-    final Color ribbonStroke =
-        isDark ? const Color(0xFF9C725B) : const Color(0xFFE3B79E);
+        isDark ? const Color(0xFFC89B82) : const Color(0xFFFFD8BE);
     final Color ruledColor =
-        isDark ? const Color(0xFF303532) : const Color(0xFFDFE4DF);
+        isDark ? const Color(0xFF303532) : const Color(0xFFD2D9CF);
 
-    final double headerH = isLandscape ? 62.0 : 72.0;
-    final double footerH = isLandscape ? 44.0 : 52.0;
-
-    // Top sage header band
-    canvas.drawRect(
-      Rect.fromLTWH(0, 0, size.width, headerH),
-      Paint()..color = sageFill,
-    );
-    canvas.drawLine(
-      Offset(0, headerH),
-      Offset(size.width, headerH),
-      Paint()
-        ..color = sageBorder
-        ..strokeWidth = 1.4,
-    );
-
-    // Bottom sage footer band
+    final double headerH = size.height * (163.0 / 2263.0);
+    final double topDividerH = size.height * (6.2 / 2263.0);
+    final double footerH = size.height * (100.0 / 2263.0);
+    final double bottomDividerH = size.height * (4.7 / 2263.0);
     final double footerTop = size.height - footerH;
+    final double bottomDividerTop = footerTop - bottomDividerH;
+
+    // 1. Top sage header band & bottom sage footer band
+    final bandPaint = Paint()..color = sageFill;
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, headerH), bandPaint);
     canvas.drawRect(
       Rect.fromLTWH(0, footerTop, size.width, footerH),
-      Paint()..color = sageFill,
-    );
-    canvas.drawLine(
-      Offset(0, footerTop),
-      Offset(size.width, footerTop),
-      Paint()
-        ..color = sageBorder
-        ..strokeWidth = 1.4,
+      bandPaint,
     );
 
-    // Pastel peach bookmark ribbon with swallowtail V-notch at top-left
-    const double ribX = 44.0;
-    const double ribW = 30.0;
-    final double ribH = headerH + 22.0;
+    // 2. Top & bottom divider bars
+    final dividerPaint = Paint()..color = sageDivider;
+    canvas.drawRect(
+      Rect.fromLTWH(0, headerH, size.width, topDividerH),
+      dividerPaint,
+    );
+    canvas.drawRect(
+      Rect.fromLTWH(0, bottomDividerTop, size.width, bottomDividerH),
+      dividerPaint,
+    );
+
+    // 3. Full-width edge-to-edge ruled horizontal lines
+    final linePaint = Paint()
+      ..color = ruledColor
+      ..strokeWidth = size.height * (2.4 / 2263.0) * lineBoost;
+    if (!isLandscape) {
+      for (int i = 0; i < 26; i++) {
+        final double y = size.height * ((242.5 + i * 75.04) / 2263.0);
+        canvas.drawLine(Offset(0, y), Offset(size.width, y), linePaint);
+      }
+    } else {
+      final double lineSpacing = size.width * (75.04 / 2263.0);
+      for (double y = headerH + topDividerH + lineSpacing;
+          y < bottomDividerTop - lineSpacing * 0.45;
+          y += lineSpacing) {
+        canvas.drawLine(Offset(0, y), Offset(size.width, y), linePaint);
+      }
+    }
+
+    // 4. Pastel peach swallowtail bookmark ribbon at top-left (solid fill, no stroke)
+    final double ribLeft = size.width * (99.4 / 1600.0);
+    final double ribRight = size.width * (204.3 / 1600.0);
+    final double ribMidX = (ribLeft + ribRight) * 0.5;
+    final double ribBottomY = isLandscape
+        ? (headerH + topDividerH + size.height * 0.045)
+        : (size.height * (236.0 / 2263.0));
+    final double ribNotchY = isLandscape
+        ? (headerH + topDividerH + size.height * 0.010)
+        : (size.height * (181.0 / 2263.0));
     final ribbonPath = Path()
-      ..moveTo(ribX, 0)
-      ..lineTo(ribX + ribW, 0)
-      ..lineTo(ribX + ribW, ribH)
-      ..lineTo(ribX + ribW * 0.5, ribH - 12.0)
-      ..lineTo(ribX, ribH)
+      ..moveTo(ribLeft, 0)
+      ..lineTo(ribRight, 0)
+      ..lineTo(ribRight, ribBottomY)
+      ..lineTo(ribMidX, ribNotchY)
+      ..lineTo(ribLeft, ribBottomY)
       ..close();
-    canvas.drawPath(ribbonPath, Paint()..color = ribbonFill);
     canvas.drawPath(
       ribbonPath,
       Paint()
-        ..color = ribbonStroke
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.0,
+        ..color = ribbonFill
+        ..isAntiAlias = true,
     );
-
-    // Crisp horizontal ruled lines between header and footer
-    final linePaint = Paint()
-      ..color = ruledColor
-      ..strokeWidth = 1.05;
-    const double spacing = 32.0;
-    const double sidePad = 36.0;
-    for (double y = headerH + 40.0; y < footerTop - 16.0; y += spacing) {
-      canvas.drawLine(
-        Offset(sidePad, y),
-        Offset(size.width - sidePad, y),
-        linePaint,
-      );
-    }
   }
 
   /// Soft sky-lavender header banner with Ngày / Chủ đề fields + delicate 5mm grid.
-  void _paintPastelGrid(Canvas canvas, Size size, PaperPalette palette) {
+  void _paintPastelGrid(
+    Canvas canvas,
+    Size size,
+    PaperPalette palette, {
+    double lineBoost = 1.0,
+  }) {
     final bool isDark = paperColor == PaperColorType.dark;
     final Color bannerFill =
         isDark ? const Color(0xFF282D3E) : const Color(0xFFE3ECFA);
@@ -394,7 +453,7 @@ class PaperTemplatePainter extends CustomPainter {
       Paint()
         ..color = bannerLine
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.2,
+        ..strokeWidth = 1.2 * lineBoost,
     );
 
     _drawLabel(
@@ -424,7 +483,7 @@ class PaperTemplatePainter extends CustomPainter {
         Offset(x, gridBottom),
         Paint()
           ..color = col % 5 == 0 ? gridMajor : gridMinor
-          ..strokeWidth = col % 5 == 0 ? 1.05 : 0.7,
+          ..strokeWidth = (col % 5 == 0 ? 1.05 : 0.7) * lineBoost,
       );
       col++;
     }
@@ -435,7 +494,7 @@ class PaperTemplatePainter extends CustomPainter {
         Offset(size.width - pad, y),
         Paint()
           ..color = row % 5 == 0 ? gridMajor : gridMinor
-          ..strokeWidth = row % 5 == 0 ? 1.05 : 0.7,
+          ..strokeWidth = (row % 5 == 0 ? 1.05 : 0.7) * lineBoost,
       );
       row++;
     }
@@ -443,7 +502,12 @@ class PaperTemplatePainter extends CustomPainter {
 
   /// Warm vintage parchment with refined double-line border frame, Date/No.
   /// header, and sepia ruled lines.
-  void _paintVintageCream(Canvas canvas, Size size, PaperPalette palette) {
+  void _paintVintageCream(
+    Canvas canvas,
+    Size size,
+    PaperPalette palette, {
+    double lineBoost = 1.0,
+  }) {
     final bool isDark = paperColor == PaperColorType.dark;
     if (!isDark) {
       canvas.drawRect(
@@ -461,11 +525,11 @@ class PaperTemplatePainter extends CustomPainter {
     final framePaint = Paint()
       ..color = frameColor
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.4;
+      ..strokeWidth = 1.4 * lineBoost;
     final innerPaint = Paint()
       ..color = frameColor.withAlpha(165)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 0.8;
+      ..strokeWidth = 0.8 * lineBoost;
 
     canvas.drawRect(
       Rect.fromLTRB(
@@ -510,7 +574,7 @@ class PaperTemplatePainter extends CustomPainter {
 
     final linePaint = Paint()
       ..color = ruledColor
-      ..strokeWidth = 1.0;
+      ..strokeWidth = 1.0 * lineBoost;
     for (double y = headerBottom + 32.0; y < size.height - innerPad - 16; y += 32.0) {
       canvas.drawLine(
         Offset(innerPad + 14, y),
@@ -522,17 +586,22 @@ class PaperTemplatePainter extends CustomPainter {
 
   /// Side-by-side 2-column study sheet (Tóm tắt / Lời giải) with dashed
   /// vertical center divider and clean ruled lines.
-  void _paintTwoColumnStudy(Canvas canvas, Size size, PaperPalette palette) {
+  void _paintTwoColumnStudy(
+    Canvas canvas,
+    Size size,
+    PaperPalette palette, {
+    double lineBoost = 1.0,
+  }) {
     const double pad = 32.0;
     const double headerBottom = 92.0;
     final double midX = size.width * 0.5;
 
     final majorPaint = Paint()
       ..color = palette.majorLine
-      ..strokeWidth = 1.3;
+      ..strokeWidth = 1.3 * lineBoost;
     final linePaint = Paint()
       ..color = palette.line
-      ..strokeWidth = 0.95;
+      ..strokeWidth = 0.95 * lineBoost;
 
     // Header band
     canvas.drawRect(
@@ -586,13 +655,18 @@ class PaperTemplatePainter extends CustomPainter {
     }
   }
 
-  void _paintRuled(Canvas canvas, Size size, PaperPalette palette) {
+  void _paintRuled(
+    Canvas canvas,
+    Size size,
+    PaperPalette palette, {
+    double lineBoost = 1.0,
+  }) {
     final linePaint = Paint()
       ..color = palette.line
-      ..strokeWidth = 1.0;
+      ..strokeWidth = 1.0 * lineBoost;
     final marginPaint = Paint()
       ..color = palette.marginLine
-      ..strokeWidth = 1.4;
+      ..strokeWidth = 1.4 * lineBoost;
 
     const double topHeader = 88.0;
     const double lineSpacing = 32.0;
@@ -603,14 +677,14 @@ class PaperTemplatePainter extends CustomPainter {
       Offset(size.width, topHeader - 4),
       Paint()
         ..color = palette.majorLine
-        ..strokeWidth = 1.2,
+        ..strokeWidth = 1.2 * lineBoost,
     );
     canvas.drawLine(
       Offset(0, topHeader),
       Offset(size.width, topHeader),
       Paint()
         ..color = palette.majorLine
-        ..strokeWidth = 1.2,
+        ..strokeWidth = 1.2 * lineBoost,
     );
 
     for (double y = topHeader + lineSpacing;
@@ -626,13 +700,18 @@ class PaperTemplatePainter extends CustomPainter {
     );
   }
 
-  void _paintGrid(Canvas canvas, Size size, PaperPalette palette) {
+  void _paintGrid(
+    Canvas canvas,
+    Size size,
+    PaperPalette palette, {
+    double lineBoost = 1.0,
+  }) {
     final minorPaint = Paint()
       ..color = palette.line
-      ..strokeWidth = 0.85;
+      ..strokeWidth = 0.85 * lineBoost;
     final majorPaint = Paint()
       ..color = palette.majorLine
-      ..strokeWidth = 1.25;
+      ..strokeWidth = 1.25 * lineBoost;
 
     const double step = 24.0;
     const double margin = 24.0;
@@ -658,14 +737,19 @@ class PaperTemplatePainter extends CustomPainter {
     }
   }
 
-  void _paintDotted(Canvas canvas, Size size, PaperPalette palette) {
+  void _paintDotted(
+    Canvas canvas,
+    Size size,
+    PaperPalette palette, {
+    double lineBoost = 1.0,
+  }) {
     final dotPaint = Paint()
       ..color = palette.majorLine
       ..style = PaintingStyle.fill;
 
     const double step = 24.0;
     const double margin = 28.0;
-    const double radius = 1.35;
+    final double radius = 1.35 * lineBoost;
 
     for (double y = margin; y <= size.height - margin; y += step) {
       for (double x = margin; x <= size.width - margin; x += step) {
@@ -674,16 +758,21 @@ class PaperTemplatePainter extends CustomPainter {
     }
   }
 
-  void _paintCornell(Canvas canvas, Size size, PaperPalette palette) {
+  void _paintCornell(
+    Canvas canvas,
+    Size size,
+    PaperPalette palette, {
+    double lineBoost = 1.0,
+  }) {
     final majorPaint = Paint()
       ..color = palette.majorLine
-      ..strokeWidth = 1.5;
+      ..strokeWidth = 1.5 * lineBoost;
     final linePaint = Paint()
       ..color = palette.line
-      ..strokeWidth = 0.9;
+      ..strokeWidth = 0.9 * lineBoost;
     final marginPaint = Paint()
       ..color = palette.marginLine
-      ..strokeWidth = 1.5;
+      ..strokeWidth = 1.5 * lineBoost;
 
     const double pad = 32.0;
     final double headerBottom = isLandscape ? 92.0 : 108.0;
@@ -755,11 +844,16 @@ class PaperTemplatePainter extends CustomPainter {
     );
   }
 
-  void _paintHexagonal(Canvas canvas, Size size, PaperPalette palette) {
+  void _paintHexagonal(
+    Canvas canvas,
+    Size size,
+    PaperPalette palette, {
+    double lineBoost = 1.0,
+  }) {
     final hexPaint = Paint()
       ..color = palette.line
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.05;
+      ..strokeWidth = 1.05 * lineBoost;
 
     const double radius = 22.0;
     final double hexWidth = math.sqrt(3) * radius;
@@ -802,7 +896,7 @@ class PaperTemplatePainter extends CustomPainter {
       Paint()
         ..color = palette.majorLine
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.0,
+        ..strokeWidth = 1.0 * lineBoost,
     );
   }
 

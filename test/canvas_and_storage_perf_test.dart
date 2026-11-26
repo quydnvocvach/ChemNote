@@ -7,6 +7,7 @@ import 'package:chemnote/core/models/notebook.dart';
 import 'package:chemnote/core/providers/app_state.dart';
 import 'package:chemnote/core/storage/local_storage_service.dart';
 import 'package:chemnote/features/canvas/canvas_painter.dart';
+import 'package:chemnote/features/canvas/paper_templates.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -218,6 +219,162 @@ void main() {
       await appState.deletePages(nb.id, {'p3', 'p1'});
       updated = appState.getNotebookById(nb.id)!;
       expect(updated.pages.length, 1);
+    });
+
+    test('default notebook/page uses sageRibbon white, persists import dir, and cleans pdf_pages/docx_media orphans', () async {
+      final storage = LocalStorageService(baseDirectory: tempDir);
+      final appState = AppState(storage: storage);
+      addTearDown(appState.dispose);
+      final defaultNb = await appState.createNotebook(title: 'Default Sage');
+      expect(defaultNb.defaultTemplate, PaperTemplateType.sageRibbon);
+      expect(defaultNb.defaultPaperColor, PaperColorType.white);
+      expect(defaultNb.pages.first.templateType, PaperTemplateType.sageRibbon);
+      expect(defaultNb.pages.first.paperColor, PaperColorType.white);
+
+      appState.setDefaultImportDirectory('/storage/emulated/0/Download/ChemPDF');
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+
+      final reloaded = AppState(storage: storage);
+      addTearDown(reloaded.dispose);
+      await reloaded.loadAll();
+      expect(reloaded.defaultImportDirectory, '/storage/emulated/0/Download/ChemPDF');
+
+      // Prepare referenced & orphan files under pdf_pages and docx_media
+      final pdfDir = Directory('${tempDir.path}/pdf_pages/b1')..createSync(recursive: true);
+      final docxDir = Directory('${tempDir.path}/docx_media/d1')..createSync(recursive: true);
+      final keptPdf = File('${pdfDir.path}/p1.png')..writeAsBytesSync([1, 2, 3]);
+      final orphanPdf = File('${pdfDir.path}/orphan.png')..writeAsBytesSync([4, 5, 6]);
+      final keptDocx = File('${docxDir.path}/img1.png')..writeAsBytesSync([7, 8, 9]);
+      final orphanDocx = File('${docxDir.path}/orphan.png')..writeAsBytesSync([10, 11]);
+
+      final withAssets = defaultNb.copyWith(
+        pages: [
+          defaultNb.pages.first.copyWith(
+            pdfBackgroundPath: keptPdf.path,
+            imageElements: [
+              ImageElement(
+                id: 'img-keep',
+                x: 10,
+                y: 10,
+                width: 100,
+                height: 80,
+                filePath: keptDocx.path,
+              ),
+            ],
+          ),
+        ],
+      );
+      await appState.updateNotebook(withAssets);
+      await storage.cleanupOrphanAssets(appState.notebooks);
+
+      expect(await keptPdf.exists(), isTrue);
+      expect(await keptDocx.exists(), isTrue);
+      expect(await orphanPdf.exists(), isFalse);
+      expect(await orphanDocx.exists(), isFalse);
+    });
+
+    test('hierarchical folders support nesting, cycle guard, total counts, and parent promotion', () async {
+      final storage = LocalStorageService(baseDirectory: tempDir);
+      final appState = AppState(storage: storage);
+      addTearDown(appState.dispose);
+      final root = await appState.createFolder(name: 'Học kỳ 1', colorValue: 0xFF3B82F6);
+      final child = await appState.createFolder(
+        name: 'Hóa Vô Cơ',
+        parentId: root.id,
+        colorValue: 0xFF14B8A6,
+      );
+      final grandChild = await appState.createFolder(
+        name: 'Phức chất',
+        parentId: child.id,
+        colorValue: 0xFFF59E0B,
+      );
+
+      await appState.createNotebook(title: 'Bài 1', folderId: child.id);
+      await appState.createNotebook(title: 'Bài 2', folderId: grandChild.id);
+
+      expect(
+        appState.getFolderPath(grandChild.id).map((f) => f.id).toList(),
+        [root.id, child.id, grandChild.id],
+      );
+      expect(
+        appState.getDescendantFolderIds(root.id),
+        containsAll(<String>[child.id, grandChild.id]),
+      );
+      expect(appState.getTotalNotebookCountInFolder(root.id), 2);
+      expect(appState.getTotalNotebookCountInFolder(child.id), 2);
+
+      // Cycle guard prevents moving root inside its own descendant
+      await appState.moveFolder(root.id, grandChild.id);
+      expect(appState.getFolderById(root.id)!.parentId, isNull);
+
+      // Valid move of grandChild directly under root
+      await appState.moveFolder(grandChild.id, root.id);
+      expect(appState.getFolderById(grandChild.id)!.parentId, root.id);
+
+      // Deleting child promotes Bài 1 up to root instead of dropping hierarchy
+      await appState.deleteFolder(child.id);
+      expect(appState.getFolderById(child.id), isNull);
+      expect(appState.getNotebooksInFolder(root.id).length, 1);
+      expect(appState.getTotalNotebookCountInFolder(root.id), 2);
+    });
+
+    test('batch notebook actions support duplicate, move, cover update, trash/restore, and permanent delete', () async {
+      final storage = LocalStorageService(baseDirectory: tempDir);
+      final appState = AppState(storage: storage);
+      addTearDown(appState.dispose);
+      final folder = await appState.createFolder(name: 'Ôn thi');
+      final n1 = await appState.createNotebook(title: 'Sổ A');
+      final n2 = await appState.createNotebook(title: 'Sổ B');
+
+      final dupes = await appState.duplicateNotebooks([n1.id, n2.id]);
+      expect(dupes.length, 2);
+      expect(dupes.first.title, endsWith('(Bản sao)'));
+      expect(dupes.first.id, isNot(equals(n1.id)));
+      expect(dupes.first.pages.first.id, isNot(equals(n1.pages.first.id)));
+
+      await appState.moveNotebooks([n1.id, n2.id], folder.id);
+      expect(appState.getNotebooksInFolder(folder.id).length, 2);
+
+      await appState.updateNotebooksCover(
+        [n1.id, n2.id],
+        coverStyle: 'lab',
+        coverColorValue: 0xFF0F766E,
+      );
+      expect(appState.getNotebookById(n1.id)!.coverStyle, 'lab');
+      expect(appState.getNotebookById(n2.id)!.coverColorValue, 0xFF0F766E);
+
+      await appState.moveNotebooksToTrash([n1.id, n2.id]);
+      expect(appState.trashedNotebooks.map((n) => n.id), containsAll([n1.id, n2.id]));
+
+      await appState.restoreNotebooksFromTrash([n1.id]);
+      expect(appState.getNotebookById(n1.id)!.isTrashed, isFalse);
+
+      await appState.deleteNotebooks([n1.id, n2.id]);
+      expect(appState.getNotebookById(n1.id), isNull);
+      expect(appState.getNotebookById(n2.id), isNull);
+    });
+
+    test('PaperTemplatePainter renders full A4 and thumbnail sizes cleanly for sageRibbon & label templates', () async {
+      for (final tpl in [
+        PaperTemplateType.sageRibbon,
+        PaperTemplateType.pastelGrid,
+        PaperTemplateType.cornell,
+        PaperTemplateType.twoColumnStudy,
+      ]) {
+        for (final size in [const Size(794, 1123), const Size(88, 124)]) {
+          final recorder = ui.PictureRecorder();
+          final canvas = Canvas(recorder);
+          PaperTemplatePainter(
+            templateType: tpl,
+            paperColor: PaperColorType.white,
+          ).paint(canvas, size);
+          final picture = recorder.endRecording();
+          final img = await picture.toImage(size.width.toInt(), size.height.toInt());
+          expect(img.width, size.width.toInt());
+          img.dispose();
+          picture.dispose();
+        }
+      }
     });
   });
 }

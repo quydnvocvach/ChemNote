@@ -1,4 +1,8 @@
+import 'dart:io';
+
 import 'package:chemnote/core/models/notebook.dart';
+import 'package:chemnote/core/providers/app_state.dart';
+import 'package:chemnote/core/storage/local_storage_service.dart';
 import 'package:chemnote/features/sync/google_auth_service.dart';
 import 'package:chemnote/features/sync/google_drive_service.dart';
 import 'package:chemnote/features/sync/sync_manager.dart';
@@ -294,6 +298,73 @@ void main() {
       expect(manager.pendingDeleteNotebookIds, contains('nb-trash-1'));
       expect(manager.pendingDeleteDriveIds, contains('drive-json-1'));
       expect(manager.pendingDeleteDriveIds, contains('drive-pdf-1'));
+    });
+
+    test('buildDriveFileViewUrl formats canonical Google Drive viewer URL', () {
+      expect(
+        SyncManager.buildDriveFileViewUrl('file_xyz_123'),
+        'https://drive.google.com/file/d/file_xyz_123/view',
+      );
+    });
+
+    test('getOrUploadNotebookPdfDriveLink returns cached URL and uploads on demand in Demo mode', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final tempDir = Directory.systemTemp.createTempSync('chemnote_sync_pdf_link_');
+      final appState = AppState(
+        storage: LocalStorageService(baseDirectory: tempDir),
+      );
+      final demoManager = SyncManager(
+        appState: appState,
+        attachConnectivityListener: false,
+        debounceDuration: const Duration(milliseconds: 20),
+      );
+
+      try {
+        // 1. Cached drivePdfFileId returns immediately even before signing in
+        final cachedNb = _makeNotebook(
+          id: 'nb-cached-pdf',
+          title: 'Cached PDF',
+          updatedAt: DateTime.utc(2026, 6, 1),
+        ).copyWith(drivePdfFileId: 'drive_pdf_999');
+
+        final cachedUrl =
+            await demoManager.getOrUploadNotebookPdfDriveLink(cachedNb);
+        expect(
+          cachedUrl,
+          'https://drive.google.com/file/d/drive_pdf_999/view',
+        );
+
+        // 2. Without drivePdfFileId and signed out -> throws friendly StateError
+        final uncachedNb = await appState.createNotebook(title: 'Need PDF Link');
+        await expectLater(
+          demoManager.getOrUploadNotebookPdfDriveLink(uncachedNb),
+          throwsStateError,
+        );
+
+        // 3. In Demo mode -> builds & uploads PDF and persists drivePdfFileId
+        await demoManager.authService.signInDemo();
+        final uploadedUrl =
+            await demoManager.getOrUploadNotebookPdfDriveLink(uncachedNb);
+        expect(uploadedUrl, startsWith('https://drive.google.com/file/d/'));
+        expect(uploadedUrl, endsWith('/view'));
+
+        final updatedNb = appState.getNotebookById(uncachedNb.id)!;
+        expect(updatedNb.drivePdfFileId, isNotNull);
+        expect(updatedNb.drivePdfFileId, isNotEmpty);
+
+        // 4. Sync then delete clears remote notebook & assets cleanly
+        await demoManager.syncNow(isManualSync: true);
+        await appState.deleteNotebook(uncachedNb.id);
+        expect(demoManager.pendingDeleteNotebookIds, contains(uncachedNb.id));
+        await demoManager.syncNow(isManualSync: true);
+        expect(demoManager.pendingDeleteNotebookIds, isNot(contains(uncachedNb.id)));
+      } finally {
+        demoManager.dispose();
+        appState.dispose();
+        if (await tempDir.exists()) {
+          await tempDir.delete(recursive: true);
+        }
+      }
     });
   });
 }

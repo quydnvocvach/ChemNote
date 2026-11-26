@@ -55,7 +55,7 @@ class _CreateNotebookDialogState extends State<CreateNotebookDialog> {
   bool _useFirstPageAsCover = false;
 
   PaperTemplateType _template = PaperTemplateType.sageRibbon;
-  PaperColorType _paperColor = PaperColorType.cream;
+  PaperColorType _paperColor = PaperColorType.white;
   bool _isLandscape = false;
   bool _isWhiteboard = false;
 

@@ -64,6 +64,9 @@ class AppState extends ChangeNotifier {
   // Thư mục xuất PDF mặc định (null => /storage/emulated/0/Documents/ChemNote)
   String? _pdfExportDirectory;
 
+  // Thư mục mở mặc định khi nhập PDF / Word / PPT (null => Download)
+  String? _defaultImportDirectory;
+
   // Cấu hình bút gần nhất (tự động khôi phục khi mở lại sổ hoặc khởi động lại app)
   ToolType _lastPenTool = ToolType.fountainPen;
   int _lastPenColorValue = 0xFF1D4ED8;
@@ -154,6 +157,7 @@ class AppState extends ChangeNotifier {
   List<String> get customCoverPaths => List.unmodifiable(_customCoverPaths);
   List<String> get recentImagePaths => List.unmodifiable(_recentImagePaths);
   String? get pdfExportDirectory => _pdfExportDirectory;
+  String? get defaultImportDirectory => _defaultImportDirectory;
   ToolType get lastPenTool => _lastPenTool;
   int get lastPenColorValue => _lastPenColorValue;
   double get lastPenWidth => _lastPenWidth;
@@ -215,6 +219,14 @@ class AppState extends ChangeNotifier {
     _pdfExportDirectory = normalized;
     notifyListeners();
     unawaited(_storage.savePdfExportDirectory(normalized));
+  }
+
+  void setDefaultImportDirectory(String? dir) {
+    final normalized = (dir == null || dir.trim().isEmpty) ? null : dir.trim();
+    if (_defaultImportDirectory == normalized) return;
+    _defaultImportDirectory = normalized;
+    notifyListeners();
+    unawaited(_storage.saveImportDirectory(normalized));
   }
 
   /// Cập nhật và lưu cấu hình bút gần nhất để không bao giờ bị reset về mặc định khi mở lại sổ.
@@ -606,6 +618,7 @@ class AppState extends ChangeNotifier {
         _storage.loadCustomCovers(),
         _storage.loadPdfExportDirectory(),
         _storage.loadPenPrefs(),
+        _storage.loadImportDirectory(),
       ]);
       _folders = results[0] as List<Folder>;
       _notebooks = results[1] as List<Notebook>;
@@ -613,6 +626,7 @@ class AppState extends ChangeNotifier {
       _customStickers = results[3] as List<String>;
       _customCoverPaths = results[4] as List<String>;
       _pdfExportDirectory = results[5] as String?;
+      _defaultImportDirectory = results[7] as String?;
       final penPrefs = results[6] as Map<String, dynamic>;
       if (penPrefs.isNotEmpty) {
         _lastPenTool = toolTypeFromJson(penPrefs['lastPenTool']);
@@ -675,6 +689,47 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
+  /// Trả về đường dẫn phân cấp từ thư mục gốc tới [folderId] (kèm chống vòng lặp).
+  List<Folder> getFolderPath(String folderId) {
+    final path = <Folder>[];
+    final visited = <String>{};
+    String? curId = folderId;
+    while (curId != null && curId.isNotEmpty && visited.add(curId)) {
+      final folder = getFolderById(curId);
+      if (folder == null) break;
+      path.add(folder);
+      curId = folder.parentId;
+    }
+    return path.reversed.toList();
+  }
+
+  /// Thu thập toàn bộ ID thư mục con cháu bên trong [folderId].
+  Set<String> getDescendantFolderIds(String folderId) {
+    final result = <String>{};
+    final queue = <String>[folderId];
+    while (queue.isNotEmpty) {
+      final current = queue.removeAt(0);
+      for (final f in _folders) {
+        if (f.parentId == current && result.add(f.id)) {
+          queue.add(f.id);
+        }
+      }
+    }
+    return result;
+  }
+
+  /// Tổng số sổ tay không nằm trong thùng rác thuộc [folderId] và các thư mục con.
+  int getTotalNotebookCountInFolder(String folderId) {
+    final targetIds = <String>{folderId, ...getDescendantFolderIds(folderId)};
+    int count = 0;
+    for (final nb in _notebooks) {
+      if (!nb.isTrashed && nb.folderId != null && targetIds.contains(nb.folderId)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
   List<Notebook> getNotebooksInFolder(String? folderId) {
     final result = _notebooks
         .where((n) => !n.isTrashed && n.folderId == folderId)
@@ -719,10 +774,34 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> moveFolder(String folderId, String? targetParentId) async {
+    final folder = getFolderById(folderId);
+    if (folder == null) return;
+    if (targetParentId == folderId) return;
+    if (targetParentId != null &&
+        getDescendantFolderIds(folderId).contains(targetParentId)) {
+      return;
+    }
+    final now = DateTime.now();
+    final updated = targetParentId == null
+        ? folder.copyWith(clearParentId: true, updatedAt: now)
+        : folder.copyWith(parentId: targetParentId, updatedAt: now);
+    _folders = _folders.map((f) => f.id == folderId ? updated : f).toList();
+    await _storage.saveFolders(_folders);
+    notifyListeners();
+  }
+
   Future<void> deleteFolder(String folderId) async {
+    final deleted = getFolderById(folderId);
+    final String? promotedParentId =
+        (deleted?.parentId == folderId) ? null : deleted?.parentId;
+    final now = DateTime.now();
+
     _folders = _folders.where((f) => f.id != folderId).map((f) {
       if (f.parentId == folderId) {
-        return f.copyWith(clearParentId: true, updatedAt: DateTime.now());
+        return promotedParentId == null
+            ? f.copyWith(clearParentId: true, updatedAt: now)
+            : f.copyWith(parentId: promotedParentId, updatedAt: now);
       }
       return f;
     }).toList();
@@ -730,10 +809,9 @@ class AppState extends ChangeNotifier {
     final affectedNotebooks = <Notebook>[];
     _notebooks = _notebooks.map((n) {
       if (n.folderId == folderId) {
-        final moved = n.copyWith(
-          clearFolderId: true,
-          updatedAt: DateTime.now(),
-        );
+        final moved = promotedParentId == null
+            ? n.copyWith(clearFolderId: true, updatedAt: now)
+            : n.copyWith(folderId: promotedParentId, updatedAt: now);
         affectedNotebooks.add(moved);
         return moved;
       }
@@ -753,7 +831,7 @@ class AppState extends ChangeNotifier {
     String coverStyle = 'molecular',
     int coverColorValue = 0xFF1E3A5F,
     PaperTemplateType defaultTemplate = PaperTemplateType.sageRibbon,
-    PaperColorType defaultPaperColor = PaperColorType.cream,
+    PaperColorType defaultPaperColor = PaperColorType.white,
     bool defaultOrientationLandscape = false,
     bool isWhiteboard = false,
     String? customCoverImagePath,
@@ -912,6 +990,202 @@ class AppState extends ChangeNotifier {
         ? notebook.copyWith(clearFolderId: true)
         : notebook.copyWith(folderId: targetFolderId);
     await updateNotebook(updated);
+  }
+
+  Future<List<Notebook>> duplicateNotebooks(Iterable<String> notebookIds) async {
+    final idSet = notebookIds.toSet();
+    if (idSet.isEmpty) return const [];
+    final now = DateTime.now();
+    final created = <Notebook>[];
+
+    for (final id in notebookIds) {
+      final src = getNotebookById(id);
+      if (src == null) continue;
+      final clonedPages = <NotePage>[
+        for (int i = 0; i < src.pages.length; i++)
+          src.pages[i].copyWith(
+            id: _uuid.v4(),
+            index: i,
+            updatedAt: now,
+          ),
+      ];
+      final copy = Notebook(
+        id: _uuid.v4(),
+        title: '${src.title} (Bản sao)',
+        folderId: src.folderId,
+        coverStyle: src.coverStyle,
+        coverColorValue: src.coverColorValue,
+        defaultTemplate: src.defaultTemplate,
+        defaultPaperColor: src.defaultPaperColor,
+        defaultOrientationLandscape: src.defaultOrientationLandscape,
+        pages: clonedPages,
+        createdAt: now,
+        updatedAt: now,
+        syncStatus: SyncStatus.pendingUpload,
+        isFavorite: false,
+        isLocked: false,
+        isTrashed: false,
+        isWhiteboard: src.isWhiteboard,
+        customCoverImagePath: src.customCoverImagePath,
+        useFirstPageAsCover: src.useFirstPageAsCover,
+      );
+      created.add(copy);
+    }
+
+    if (created.isEmpty) return const [];
+    _notebooks = [...created, ..._notebooks];
+    _notebooks.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    for (final copy in created) {
+      await _storage.saveNotebook(copy);
+    }
+    notifyListeners();
+    for (final copy in created) {
+      onNotebookChangedForSync?.call(copy);
+    }
+    return created;
+  }
+
+  Future<void> moveNotebooks(
+    Iterable<String> notebookIds,
+    String? targetFolderId,
+  ) async {
+    final idSet = notebookIds.toSet();
+    if (idSet.isEmpty) return;
+    final now = DateTime.now();
+    final updatedList = <Notebook>[];
+    _notebooks = _notebooks.map((nb) {
+      if (!idSet.contains(nb.id)) return nb;
+      final nextSync = nb.syncStatus != SyncStatus.localOnly
+          ? SyncStatus.pendingUpload
+          : nb.syncStatus;
+      final updated = targetFolderId == null
+          ? nb.copyWith(clearFolderId: true, updatedAt: now, syncStatus: nextSync)
+          : nb.copyWith(folderId: targetFolderId, updatedAt: now, syncStatus: nextSync);
+      updatedList.add(updated);
+      return updated;
+    }).toList();
+    if (updatedList.isEmpty) return;
+    _notebooks.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    for (final nb in updatedList) {
+      await _storage.saveNotebook(nb);
+    }
+    notifyListeners();
+    for (final nb in updatedList) {
+      onNotebookChangedForSync?.call(nb);
+    }
+  }
+
+  Future<void> updateNotebooksCover(
+    Iterable<String> notebookIds, {
+    String? coverStyle,
+    int? coverColorValue,
+    String? customCoverImagePath,
+    bool clearCustomCoverImagePath = false,
+    bool? useFirstPageAsCover,
+  }) async {
+    final idSet = notebookIds.toSet();
+    if (idSet.isEmpty) return;
+    final now = DateTime.now();
+    final updatedList = <Notebook>[];
+    _notebooks = _notebooks.map((nb) {
+      if (!idSet.contains(nb.id)) return nb;
+      final updated = nb.copyWith(
+        coverStyle: coverStyle,
+        coverColorValue: coverColorValue,
+        customCoverImagePath: customCoverImagePath,
+        clearCustomCoverImagePath: clearCustomCoverImagePath,
+        useFirstPageAsCover: useFirstPageAsCover,
+        updatedAt: now,
+        syncStatus: nb.syncStatus != SyncStatus.localOnly
+            ? SyncStatus.pendingUpload
+            : nb.syncStatus,
+      );
+      updatedList.add(updated);
+      return updated;
+    }).toList();
+    if (updatedList.isEmpty) return;
+    _notebooks.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    for (final nb in updatedList) {
+      await _storage.saveNotebook(nb);
+    }
+    notifyListeners();
+    for (final nb in updatedList) {
+      onNotebookChangedForSync?.call(nb);
+    }
+  }
+
+  Future<void> moveNotebooksToTrash(Iterable<String> notebookIds) async {
+    final idSet = notebookIds.toSet();
+    if (idSet.isEmpty) return;
+    for (final id in idSet) {
+      _openNotebookIds.remove(id);
+    }
+    final now = DateTime.now();
+    final updatedList = <Notebook>[];
+    _notebooks = _notebooks.map((nb) {
+      if (!idSet.contains(nb.id)) return nb;
+      final updated = nb.copyWith(
+        isTrashed: true,
+        trashedAt: now,
+        updatedAt: now,
+        syncStatus: nb.syncStatus != SyncStatus.localOnly
+            ? SyncStatus.pendingUpload
+            : nb.syncStatus,
+      );
+      updatedList.add(updated);
+      return updated;
+    }).toList();
+    if (updatedList.isEmpty) return;
+    _notebooks.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    for (final nb in updatedList) {
+      await _storage.saveNotebook(nb);
+    }
+    notifyListeners();
+    for (final nb in updatedList) {
+      onNotebookChangedForSync?.call(nb);
+    }
+  }
+
+  Future<void> restoreNotebooksFromTrash(Iterable<String> notebookIds) async {
+    final idSet = notebookIds.toSet();
+    if (idSet.isEmpty) return;
+    final now = DateTime.now();
+    final updatedList = <Notebook>[];
+    _notebooks = _notebooks.map((nb) {
+      if (!idSet.contains(nb.id)) return nb;
+      final updated = nb.copyWith(
+        isTrashed: false,
+        clearTrashedAt: true,
+        updatedAt: now,
+        syncStatus: nb.syncStatus != SyncStatus.localOnly
+            ? SyncStatus.pendingUpload
+            : nb.syncStatus,
+      );
+      updatedList.add(updated);
+      return updated;
+    }).toList();
+    if (updatedList.isEmpty) return;
+    _notebooks.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    for (final nb in updatedList) {
+      await _storage.saveNotebook(nb);
+    }
+    notifyListeners();
+    for (final nb in updatedList) {
+      onNotebookChangedForSync?.call(nb);
+    }
+  }
+
+  Future<void> deleteNotebooks(Iterable<String> notebookIds) async {
+    final ids = notebookIds.toSet().toList();
+    if (ids.isEmpty) return;
+    for (final id in ids) {
+      await deleteNotebook(id, cleanupOrphans: false);
+    }
+    await _storage.cleanupOrphanAssets(
+      _notebooks,
+      customStickers: _customStickers,
+      customCovers: _customCoverPaths,
+    );
   }
 
   Future<void> upsertNotebookFromSync(Notebook remoteNotebook) async {

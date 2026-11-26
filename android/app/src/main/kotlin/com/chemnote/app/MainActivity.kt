@@ -172,7 +172,8 @@ class MainActivity : FlutterActivity() {
                         val extensions = (call.argument<List<*>>("allowedExtensions"))
                             ?.mapNotNull { it?.toString()?.lowercase() }
                             ?: emptyList()
-                        handlePickDocumentFile(extensions, result)
+                        val initialDirectory = call.argument<String>("initialDirectory")
+                        handlePickDocumentFile(extensions, initialDirectory, result)
                     }
                     "renderPdfToPngs" -> {
                         val pdfPath = call.argument<String>("pdfPath") ?: ""
@@ -222,6 +223,35 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun buildInitialDocumentsUri(initialDirectory: String?): Uri {
+        val raw = initialDirectory?.trim() ?: ""
+        var relPath = "Download"
+        if (raw.isNotEmpty()) {
+            var normalized = raw.replace('\\', '/')
+            if (normalized.contains("%3A", ignoreCase = true)) {
+                normalized = Uri.decode(normalized)
+            }
+            val primaryIdx = normalized.lastIndexOf("primary:", ignoreCase = true)
+            if (primaryIdx >= 0) {
+                normalized = normalized.substring(primaryIdx + "primary:".length)
+            } else {
+                normalized = normalized
+                    .removePrefix("/storage/emulated/0/")
+                    .removePrefix("/storage/emulated/0")
+                    .removePrefix("/sdcard/")
+                    .removePrefix("/sdcard")
+            }
+            normalized = normalized.trim('/')
+            if (normalized.isNotEmpty()) {
+                relPath = normalized
+            }
+        }
+        val docId = "primary:$relPath"
+        return Uri.parse(
+            "content://com.android.externalstorage.documents/document/${Uri.encode(docId)}"
+        )
+    }
+
     private fun buildFilePickerIntent(
         action: String,
         packageName: String?,
@@ -244,44 +274,55 @@ class MainActivity : FlutterActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri)
             }
+            putExtra("android.content.extra.SHOW_ADVANCED", true)
         }
     }
 
-    private fun handlePickDocumentFile(extensions: List<String>, result: MethodChannel.Result) {
+    private fun handlePickDocumentFile(
+        extensions: List<String>,
+        initialDirectory: String?,
+        result: MethodChannel.Result
+    ) {
         try {
             pendingDocumentResult?.success(null)
             pendingDocumentResult = result
-            val downloadUri = Uri.parse(
-                "content://com.android.externalstorage.documents/document/primary%3ADownload"
-            )
+            val initialUri = buildInitialDocumentsUri(initialDirectory)
             val mimeTypes = extensions
                 .map { mimeTypeForExtension(it) }
                 .filter { it.isNotEmpty() }
                 .distinct()
 
+            // Ưu tiên ACTION_OPEN_DOCUMENT (DocumentsUI chuẩn Android/HarmonyOS) vì hỗ trợ EXTRA_INITIAL_URI mở thẳng vào Download / thư mục chọn sẵn.
+            val openDocIntent = buildFilePickerIntent(
+                Intent.ACTION_OPEN_DOCUMENT,
+                null,
+                mimeTypes,
+                initialUri
+            )
+            val genericGetIntent = buildFilePickerIntent(
+                Intent.ACTION_GET_CONTENT,
+                null,
+                mimeTypes,
+                initialUri
+            )
             val huaweiIntent = buildFilePickerIntent(
                 Intent.ACTION_GET_CONTENT,
                 "com.huawei.filemanager",
                 mimeTypes,
-                downloadUri
+                initialUri
             )
             val honorIntent = buildFilePickerIntent(
                 Intent.ACTION_GET_CONTENT,
                 "com.hihonor.filemanager",
                 mimeTypes,
-                downloadUri
-            )
-            val fallbackIntent = buildFilePickerIntent(
-                Intent.ACTION_OPEN_DOCUMENT,
-                null,
-                mimeTypes,
-                downloadUri
+                initialUri
             )
 
             val chosenIntent = when {
+                openDocIntent.resolveActivity(packageManager) != null -> openDocIntent
                 huaweiIntent.resolveActivity(packageManager) != null -> huaweiIntent
                 honorIntent.resolveActivity(packageManager) != null -> honorIntent
-                else -> fallbackIntent
+                else -> genericGetIntent
             }
             @Suppress("DEPRECATION")
             startActivityForResult(chosenIntent, REQ_PICK_DOCUMENT)

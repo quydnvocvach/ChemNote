@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../core/models/notebook.dart';
+import '../../core/theme/app_theme.dart';
 import '../canvas/paper_templates.dart';
 
 class NotebookCoverWidget extends StatelessWidget {
@@ -11,6 +12,8 @@ class NotebookCoverWidget extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
   final VoidCallback? onMorePressed;
+  final bool selectionMode;
+  final bool isSelected;
 
   const NotebookCoverWidget({
     super.key,
@@ -18,6 +21,8 @@ class NotebookCoverWidget extends StatelessWidget {
     required this.onTap,
     this.onLongPress,
     this.onMorePressed,
+    this.selectionMode = false,
+    this.isSelected = false,
   });
 
   @override
@@ -49,6 +54,12 @@ class NotebookCoverWidget extends StatelessWidget {
                         topRight: Radius.circular(12),
                         bottomRight: Radius.circular(12),
                       ),
+                      border: selectionMode && isSelected
+                          ? Border.all(
+                              color: AppTheme.accentBlue,
+                              width: 2.6,
+                            )
+                          : null,
                       boxShadow: [
                         BoxShadow(
                           color: Colors.black.withValues(alpha: isDark ? 0.45 : 0.16),
@@ -217,6 +228,49 @@ class NotebookCoverWidget extends StatelessWidget {
                               ],
                             ),
                           ),
+                          if (selectionMode && isSelected)
+                            Positioned.fill(
+                              child: IgnorePointer(
+                                child: ColoredBox(
+                                  color: AppTheme.accentBlue.withValues(alpha: 0.16),
+                                ),
+                              ),
+                            ),
+                          if (selectionMode)
+                            Positioned(
+                              left: 16,
+                              top: 8,
+                              child: IgnorePointer(
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 140),
+                                  width: 24,
+                                  height: 24,
+                                  decoration: BoxDecoration(
+                                    color: isSelected
+                                        ? AppTheme.accentBlue
+                                        : Colors.black.withValues(alpha: 0.48),
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: Colors.white,
+                                      width: 1.8,
+                                    ),
+                                    boxShadow: const [
+                                      BoxShadow(
+                                        color: Colors.black26,
+                                        blurRadius: 4,
+                                      ),
+                                    ],
+                                  ),
+                                  child: isSelected
+                                      ? const Icon(
+                                          Icons.check_rounded,
+                                          size: 15,
+                                          color: Colors.white,
+                                        )
+                                      : null,
+                                ),
+                              ),
+                            ),
                         ],
                       ),
                     ),
@@ -264,7 +318,7 @@ class NotebookCoverWidget extends StatelessWidget {
                   ],
                 ),
               ),
-              if (onMorePressed != null)
+              if (onMorePressed != null && !selectionMode)
                 IconButton(
                   onPressed: onMorePressed,
                   icon: const Icon(Icons.more_vert_rounded, size: 18),

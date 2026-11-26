@@ -25,7 +25,7 @@ class NotePage {
     required this.id,
     required this.index,
     this.templateType = PaperTemplateType.sageRibbon,
-    this.paperColor = PaperColorType.cream,
+    this.paperColor = PaperColorType.white,
     this.isLandscape = false,
     this.strokes = const [],
     this.textElements = const [],
