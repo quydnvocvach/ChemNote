@@ -548,6 +548,7 @@ void main() {
         id: 'p-lasso',
         index: 0,
         strokes: const [sSelected, sOther],
+        updatedAt: DateTime.utc(2026, 11, 26),
       );
 
       final lasso = LassoController();
