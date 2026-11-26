@@ -1965,113 +1965,269 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   Future<void> _showImageInsertOptions(NotePage page) async {
     final appState = context.read<AppState>();
     final deviceRecents =
-        await HardwareService.instance.getDeviceRecentImages(limit: 9);
+        await HardwareService.instance.getDeviceRecentImages(limit: 24);
     if (!mounted) return;
 
-    // Build unified list of up to 9 items (device MediaStore photos first, then local recents)
-    final gridItems = <({String thumbPath, DeviceRecentImage? deviceItem, String? localPath})>[
+    // Build unified list of up to 24 items (device MediaStore photos first, then local recents)
+    final gridItems =
+        <({String thumbPath, DeviceRecentImage? deviceItem, String? localPath})>[
       for (final d in deviceRecents)
         (thumbPath: d.thumbPath, deviceItem: d, localPath: null),
     ];
     for (final p in [...appState.recentImagePaths, ...appState.customStickers]) {
-      if (gridItems.length >= 9) break;
+      if (gridItems.length >= 24) break;
       if (!gridItems.any((g) => g.localPath == p || g.thumbPath == p)) {
         gridItems.add((thumbPath: p, deviceItem: null, localPath: p));
       }
     }
 
-    final selected = await showModalBottomSheet<Object>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+    final mq = MediaQuery.of(context);
+    final double sheetMaxWidth = math.min(mq.size.width * 0.90, 920.0);
+    final double gridMaxHeight = math.min(mq.size.height * 0.66, 510.0);
+    final int crossAxisCount = sheetMaxWidth >= 600 ? 4 : 3;
+    final gridScrollController = ScrollController();
+
+    Object? selected;
+    try {
+      selected = await showModalBottomSheet<Object>(
+        context: context,
+        showDragHandle: true,
+        isScrollControlled: true,
+        constraints: BoxConstraints(maxWidth: sheetMaxWidth),
+        builder: (ctx) {
+          final theme = Theme.of(ctx);
+          final isDark = theme.brightness == Brightness.dark;
+          final Color mutedColor = theme.colorScheme.onSurfaceVariant;
+          final Color tileBg = isDark
+              ? Colors.white.withAlpha(12)
+              : Colors.black.withAlpha(10);
+          final Color tileBorder = isDark
+              ? Colors.white.withAlpha(34)
+              : Colors.black.withAlpha(24);
+          final Color badgeBg = isDark
+              ? Colors.white.withAlpha(22)
+              : theme.colorScheme.primaryContainer.withAlpha(150);
+          final Color badgeFg =
+              isDark ? Colors.white70 : theme.colorScheme.onPrimaryContainer;
+
+          Future<void> openPreview(
+            ({
+              String thumbPath,
+              DeviceRecentImage? deviceItem,
+              String? localPath,
+            }) item,
+          ) async {
+            final shouldInsert = await _showRecentImagePreviewDialog(ctx, item);
+            if (shouldInsert && ctx.mounted) {
+              Navigator.pop(ctx, item);
+            }
+          }
+
+          final Widget headerText = Column(
             crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              const Padding(
-                padding: EdgeInsets.only(bottom: 10),
-                child: Text(
-                  'Ảnh gần đây',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
-                ),
-              ),
-              if (gridItems.isNotEmpty)
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 290),
-                  child: GridView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 3,
-                      crossAxisSpacing: 8,
-                      mainAxisSpacing: 8,
-                    ),
-                    itemCount: gridItems.length,
-                    itemBuilder: (c, i) {
-                      final item = gridItems[i];
-                      final thumbFile = File(item.thumbPath);
-                      return GestureDetector(
-                        onTap: () => Navigator.pop(ctx, item),
-                        child: Container(
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: Colors.white24),
-                            color: Colors.black26,
-                          ),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(9),
-                            child: thumbFile.existsSync()
-                                ? Image.file(thumbFile, fit: BoxFit.cover)
-                                : const Icon(Icons.image_outlined),
-                          ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Ảnh gần đây',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                  ),
+                  if (gridItems.isNotEmpty) ...[
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: badgeBg,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        '${gridItems.length} ảnh',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: badgeFg,
                         ),
-                      );
-                    },
-                  ),
-                )
-              else
-                const Padding(
-                  padding: EdgeInsets.only(bottom: 10),
-                  child: Text(
-                    'Chưa có ảnh gần đây. Chọn ảnh từ thiết bị bên dưới.',
-                    style: TextStyle(fontSize: 12.5, color: Colors.grey),
-                  ),
-                ),
-              const Divider(height: 20),
-              const Padding(
-                padding: EdgeInsets.only(bottom: 4),
-                child: Text(
-                  'Tùy chọn khác',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.grey,
-                  ),
-                ),
+                      ),
+                    ),
+                  ],
+                ],
               ),
-              ListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.camera_alt_outlined),
-                title: const Text('Chụp ảnh'),
-                onTap: () => Navigator.pop(ctx, 'camera'),
-              ),
-              ListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.photo_library_outlined),
-                title: const Text('Chọn từ Bộ sưu tập'),
-                onTap: () => Navigator.pop(ctx, 'gallery'),
+              const SizedBox(height: 2),
+              Text(
+                'Chạm để chèn ngay • Nhấn kính lúp hoặc giữ để xem rõ trước',
+                style: TextStyle(fontSize: 11.5, color: mutedColor),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
             ],
-          ),
-        ),
-      ),
-    );
+          );
+
+          final Widget actionButtons = Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: [
+              OutlinedButton.icon(
+                onPressed: () => Navigator.pop(ctx, 'camera'),
+                icon: const Icon(Icons.camera_alt_outlined, size: 17),
+                label: const Text('Chụp ảnh'),
+                style: OutlinedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 11,
+                    vertical: 8,
+                  ),
+                  textStyle: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              FilledButton.tonalIcon(
+                onPressed: () => Navigator.pop(ctx, 'gallery'),
+                icon: const Icon(Icons.photo_library_outlined, size: 17),
+                label: const Text('Bộ sưu tập'),
+                style: FilledButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  textStyle: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          );
+
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 2, 16, 14),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (sheetMaxWidth >= 560)
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Expanded(child: headerText),
+                        const SizedBox(width: 12),
+                        actionButtons,
+                      ],
+                    )
+                  else
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        headerText,
+                        const SizedBox(height: 10),
+                        actionButtons,
+                      ],
+                    ),
+                  const SizedBox(height: 12),
+                  if (gridItems.isNotEmpty)
+                    ConstrainedBox(
+                      constraints: BoxConstraints(maxHeight: gridMaxHeight),
+                      child: Scrollbar(
+                        controller: gridScrollController,
+                        thumbVisibility: gridItems.length > crossAxisCount * 2,
+                        child: GridView.builder(
+                          controller: gridScrollController,
+                          shrinkWrap: true,
+                          physics: const BouncingScrollPhysics(),
+                          gridDelegate:
+                              SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: crossAxisCount,
+                            crossAxisSpacing: 10,
+                            mainAxisSpacing: 10,
+                            childAspectRatio: 1.32,
+                          ),
+                          itemCount: gridItems.length,
+                          itemBuilder: (c, i) {
+                            final item = gridItems[i];
+                            final thumbFile = File(item.thumbPath);
+                            return GestureDetector(
+                              onTap: () => Navigator.pop(ctx, item),
+                              onLongPress: () => openPreview(item),
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(11),
+                                  border: Border.all(color: tileBorder),
+                                  color: tileBg,
+                                ),
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(10),
+                                      child: thumbFile.existsSync()
+                                          ? Image.file(
+                                              thumbFile,
+                                              fit: BoxFit.cover,
+                                              cacheWidth: 480,
+                                            )
+                                          : Icon(
+                                              Icons.image_outlined,
+                                              color: mutedColor,
+                                            ),
+                                    ),
+                                    Positioned(
+                                      top: 6,
+                                      right: 6,
+                                      child: Material(
+                                        color: const Color(0xB814171F),
+                                        shape: const CircleBorder(),
+                                        child: InkWell(
+                                          customBorder: const CircleBorder(),
+                                          onTap: () => openPreview(item),
+                                          child: const SizedBox(
+                                            width: 28,
+                                            height: 28,
+                                            child: Icon(
+                                              Icons.zoom_in_rounded,
+                                              size: 16,
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    )
+                  else
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 18),
+                      child: Center(
+                        child: Text(
+                          'Chưa có ảnh gần đây. Chọn Chụp ảnh hoặc Bộ sưu tập ở góc trên.',
+                          style: TextStyle(fontSize: 13, color: mutedColor),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+    } finally {
+      gridScrollController.dispose();
+    }
     if (selected == null || !mounted) return;
 
     if (selected is ({String thumbPath, DeviceRecentImage? deviceItem, String? localPath})) {
@@ -2126,6 +2282,200 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         );
       }
     }
+  }
+
+  Future<bool> _showRecentImagePreviewDialog(
+    BuildContext sheetCtx,
+    ({
+      String thumbPath,
+      DeviceRecentImage? deviceItem,
+      String? localPath,
+    }) item,
+  ) async {
+    final mq = MediaQuery.of(sheetCtx);
+    final String initialPath =
+        (item.localPath != null && File(item.localPath!).existsSync())
+            ? item.localPath!
+            : item.thumbPath;
+    final String tempPath =
+        '${Directory.systemTemp.path}${Platform.pathSeparator}chemnote_preview_${_uuid.v4()}.jpg';
+    bool startedLoad = false;
+    bool loadingFull = item.deviceItem != null;
+    bool dialogClosed = false;
+    String? fullResPath;
+
+    bool? confirmed;
+    try {
+      confirmed = await showDialog<bool>(
+        context: sheetCtx,
+        builder: (dialogCtx) => StatefulBuilder(
+          builder: (dCtx, setDialogState) {
+            if (!startedLoad && item.deviceItem != null) {
+              startedLoad = true;
+              unawaited(
+                HardwareService.instance
+                    .copyUriToFile(item.deviceItem!.uri, tempPath)
+                    .then((copied) {
+                  if (dialogClosed) {
+                    if (copied != null) {
+                      final orphan = File(copied);
+                      if (orphan.existsSync()) {
+                        try {
+                          orphan.deleteSync();
+                        } catch (_) {}
+                      }
+                    }
+                    return;
+                  }
+                  if (!dCtx.mounted) return;
+                  setDialogState(() {
+                    loadingFull = false;
+                    if (copied != null && File(copied).existsSync()) {
+                      fullResPath = copied;
+                    }
+                  });
+                }).catchError((_) {
+                  if (!dialogClosed && dCtx.mounted) {
+                    setDialogState(() => loadingFull = false);
+                  }
+                }),
+              );
+            }
+
+            final String activePath = fullResPath ?? initialPath;
+            final activeFile = File(activePath);
+
+            return Dialog(
+              backgroundColor: const Color(0xFF151821),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(18),
+              ),
+              insetPadding: const EdgeInsets.symmetric(
+                horizontal: 20,
+                vertical: 20,
+              ),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: 860,
+                  maxHeight: mq.size.height * 0.86,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 10, 8, 8),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.photo_outlined,
+                            size: 18,
+                            color: Colors.white70,
+                          ),
+                          const SizedBox(width: 8),
+                          const Text(
+                            'Xem trước ảnh',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          if (loadingFull) ...[
+                            const SizedBox(width: 10),
+                            const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white70,
+                              ),
+                            ),
+                          ],
+                          const Spacer(),
+                          IconButton(
+                            onPressed: () => Navigator.pop(dCtx, false),
+                            icon: const Icon(
+                              Icons.close_rounded,
+                              color: Colors.white70,
+                            ),
+                            tooltip: 'Đóng',
+                          ),
+                        ],
+                      ),
+                    ),
+                    Flexible(
+                      child: Container(
+                        width: double.infinity,
+                        color: Colors.black87,
+                        child: InteractiveViewer(
+                          minScale: 1.0,
+                          maxScale: 4.0,
+                          child: Center(
+                            child: activeFile.existsSync()
+                                ? Image.file(activeFile, fit: BoxFit.contain)
+                                : const Icon(
+                                    Icons.image_outlined,
+                                    size: 52,
+                                    color: Colors.white54,
+                                  ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              'Chụm 2 ngón để phóng to kiểm tra chữ trước khi chèn',
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: Colors.white.withAlpha(165),
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          TextButton(
+                            onPressed: () => Navigator.pop(dCtx, false),
+                            style: TextButton.styleFrom(
+                              foregroundColor: Colors.white70,
+                            ),
+                            child: const Text('Quay lại'),
+                          ),
+                          const SizedBox(width: 8),
+                          FilledButton.icon(
+                            onPressed: () => Navigator.pop(dCtx, true),
+                            icon: const Icon(
+                              Icons.add_photo_alternate_outlined,
+                              size: 18,
+                            ),
+                            label: const Text('Chèn vào trang'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      );
+    } finally {
+      dialogClosed = true;
+      final String cleanupPath = fullResPath ?? tempPath;
+      final cleanupFile = File(cleanupPath);
+      if (cleanupFile.existsSync()) {
+        try {
+          cleanupFile.deleteSync();
+        } catch (_) {}
+      }
+    }
+
+    return confirmed == true;
   }
 
   Future<void> _handleInsertAction(

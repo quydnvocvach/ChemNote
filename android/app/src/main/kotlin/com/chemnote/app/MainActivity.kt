@@ -510,9 +510,9 @@ class MainActivity : FlutterActivity() {
                         MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                         id
                     )
-                    val thumbFile = File(thumbDir, "thumb_$id.jpg")
+                    val thumbFile = File(thumbDir, "thumb_v2_$id.jpg")
                     if (!thumbFile.exists() || thumbFile.length() == 0L) {
-                        generateThumbnail(contentUri, thumbFile, 240)
+                        generateThumbnail(contentUri, thumbFile, 380)
                     }
                     if (thumbFile.exists() && thumbFile.length() > 0L) {
                         output.add(
