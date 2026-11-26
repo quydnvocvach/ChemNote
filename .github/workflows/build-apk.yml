@@ -160,21 +160,18 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.8.0 with APK
+      - name: Publish Release v3.8.1 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.8.0
-          name: ChemNote Pro v3.8.0 (Lưới Ảnh gần đây 12 ảnh + Xem trước, Chống tì tay 3 tầng & Khóa zoom nổi)
+          tag_name: v3.8.1
+          name: ChemNote Pro v3.8.1 (Sửa lỗi nhận ngón tay Huawei MatePad, Chống tì tay & Lưới ảnh 12 ô)
           body: |
-            ### ChemNote Pro v3.8.0
-            - **Khung chọn *Ảnh gần đây* hoàn toàn mới (8–12 ảnh cùng lúc + Xem trước):**
-              - Mở rộng khung xem trên màn hình lớn với lưới **4 cột × 3 hàng (12 ảnh hiển thị ngay)** và cuộn xem tới **24 ảnh gần đây**; đưa 2 nút *Chụp ảnh* và *Bộ sưu tập* gọn lên thanh tiêu đề, nâng độ phân giải ảnh thu nhỏ lên 380px cho chữ và công thức sắc nét rõ ràng.
-              - Thêm nút kính lúp (`🔍` ở góc từng ảnh hoặc **nhấn giữ ảnh**) để mở toàn ảnh phóng to (`InteractiveViewer` 1×–4×) trước khi bấm **Chèn vào trang**.
-            - **Chống tì tay 3 tầng triệt để:**
-              1. *Lá chắn phần cứng Android (`MainActivity`)*: Lọc và hủy tức thì chạm lòng bàn tay (`TOOL_TYPE_PALM`, diện tích chạm lớn, `FLAG_CANCELED`) hoặc chạm phát sinh khi M-Pencil 3 đang lơ lửng/viết và trong cooldown 480ms ngay trong vùng giấy viết.
-              2. *Tầng `PalmRejectionFilter` (`StrokeEngine`)*: Mở rộng cooldown 550ms và nhận diện `isLikelyPalmTouch` theo bán kính/kích thước tiếp xúc.
-              3. *Khóa viewport & hoàn tác dịch chuyển sớm (`NoteEditorScreen`)*: Thêm ngưỡng trượt ngón đơn 12px, giữ nguyên trạng thái hover khi đặt tay và tự động hoàn tác ngay các vi dịch chuyển/zoom do lòng bàn tay chạm trước bút vài trăm ms.
-            - **Viên thuốc Khóa Zoom kèm `%` phóng đại (`Huawei Notes style`):** Khi zoom trang một chút, viên thuốc mờ nổi ở đáy màn hình hiện ra với biểu tượng khóa + `%` zoom theo thời gian thực; chạm để khóa/mở khóa tỉ lệ zoom (giữ nguyên khả năng cuộn/di chuyển trang), tự ẩn khi không thao tác và tự hiện lại khi bạn chụm/giãn ngón tay để nhắc trạng thái khóa.
+            ### ChemNote Pro v3.8.1 (Hotfix)
+            - **Khắc phục triệt để lỗi không nhận chạm/vuốt/zoom bằng ngón tay trên Huawei MatePad 11.5"S:**
+              - Gỡ bỏ ngưỡng `getSize() > 0.28` / `getTouchMajor` ở tầng native & Flutter vốn nhận nhầm đầu ngón tay trên màn hình MatePad (HarmonyOS trả về `size == 1.0`).
+              - Chỉ dùng cờ phần cứng `TOOL_TYPE_PALM` (`5`) và `FLAG_CANCELED`, kèm bộ đếm hết hạn hover `400ms` và tự reset khi mất tiêu điểm cửa sổ (`onPause` / `onWindowFocusChanged`) để ngón tay không bao giờ bị kẹt khóa sau khi nhấc M-Pencil 3.
+              - Sửa `isStylusMotionEvent` chỉ kiểm tra đúng toolType bút (`TOOL_TYPE_STYLUS` / `TOOL_TYPE_ERASER`) thay vì `SOURCE_STYLUS`, và khắc phục race-condition khi `ACTION_CANCEL` xóa snapshot hoàn tác vi dịch chuyển trước khi bút chạm.
+            - **Giữ nguyên toàn bộ tính năng v3.8.0:** Khung **Ảnh gần đây** lưới 12 ảnh sắc nét + xem trước phóng to, chống tì tay đa tầng và viên thuốc **Khóa Zoom kèm `%`**.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

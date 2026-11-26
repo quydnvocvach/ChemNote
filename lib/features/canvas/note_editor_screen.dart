@@ -170,6 +170,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   Matrix4? _matrixBeforeTouchGesture;
   Matrix4? _whiteboardMatrixBeforeTouchGesture;
   DateTime? _touchGestureStartedAt;
+  DateTime? _touchGestureEndedAt;
   bool _touchPanActivated = false;
   bool? _lastNativePalmShieldEnabled;
   bool? _lastNativePalmShieldStylusPan;
@@ -290,10 +291,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     });
   }
 
-  void _rollbackRecentPalmShiftIfNeeded() {
+  void _rollbackRecentPalmShiftIfNeeded({bool forceFromCancel = false}) {
+    final DateTime now = DateTime.now();
     final DateTime? startedAt = _touchGestureStartedAt;
-    if (startedAt != null &&
-        DateTime.now().difference(startedAt).inMilliseconds <= 450) {
+    final DateTime? endedAt = _touchGestureEndedAt;
+    final bool withinWindow = forceFromCancel ||
+        _activeTouchPointers.isNotEmpty ||
+        (startedAt != null && now.difference(startedAt).inMilliseconds <= 900) ||
+        (endedAt != null && now.difference(endedAt).inMilliseconds <= 650);
+
+    if (withinWindow) {
       final Matrix4? pre = _matrixBeforeTouchGesture;
       if (pre != null) {
         final Matrix4 cur = _transformController.value;
@@ -305,9 +312,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         final double preS = pre.getMaxScaleOnAxis();
         final double ds = (curS - preS).abs();
         if ((dx > 0.1 || dy > 0.1 || ds > 0.002) &&
-            dx < 120.0 &&
-            dy < 120.0 &&
-            ds < 0.35) {
+            dx < 180.0 &&
+            dy < 180.0 &&
+            ds < 0.45) {
           _transformController.value = pre.clone();
           final double restored = preS.clamp(0.35, 4.0);
           _lastObservedZoomScale = restored;
@@ -328,9 +335,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         final double preS = wbPre.getMaxScaleOnAxis();
         final double ds = (curS - preS).abs();
         if ((dx > 0.1 || dy > 0.1 || ds > 0.002) &&
-            dx < 120.0 &&
-            dy < 120.0 &&
-            ds < 0.35) {
+            dx < 180.0 &&
+            dy < 180.0 &&
+            ds < 0.45) {
           _whiteboardTransformController.value = wbPre.clone();
           final double restored = preS.clamp(0.25, 4.0);
           _lastObservedZoomScale = restored;
@@ -344,12 +351,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _matrixBeforeTouchGesture = null;
     _whiteboardMatrixBeforeTouchGesture = null;
     _touchGestureStartedAt = null;
+    _touchGestureEndedAt = null;
   }
 
   void _engageStylusViewportLock() {
     _stopScrollFling();
     _resetPanTracking();
-    _rollbackRecentPalmShiftIfNeeded();
+    _rollbackRecentPalmShiftIfNeeded(
+      forceFromCancel: _activeTouchPointers.isNotEmpty,
+    );
     if (_activeTouchPointers.isNotEmpty) {
       _palmRejectedPointers.addAll(_activeTouchPointers);
       _activeTouchPointers.clear();
@@ -1036,8 +1046,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       // When Stylus-Pan Mode is ON, M-Pencil 3 ONLY scrolls/pans and never draws!
       if (_stylusPanMode) return;
     } else if (event.kind == PointerDeviceKind.touch) {
-      if (_palmRejectedPointers.contains(event.pointer) ||
-          PalmRejectionFilter.isLikelyPalmTouch(event)) {
+      if (_palmRejectedPointers.contains(event.pointer)) {
         return;
       }
       // _activeTouchPointers is managed by the outer viewport Listener.
@@ -5166,8 +5175,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       return;
                     }
                     if (e.kind == PointerDeviceKind.touch) {
-                      if (stylusBlocksViewport ||
-                          PalmRejectionFilter.isLikelyPalmTouch(e)) {
+                      if (stylusBlocksViewport) {
                         _palmRejectedPointers.add(e.pointer);
                         return;
                       }
@@ -5180,6 +5188,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         _whiteboardMatrixBeforeTouchGesture =
                             _whiteboardTransformController.value.clone();
                         _touchGestureStartedAt = DateTime.now();
+                        _touchGestureEndedAt = null;
                         _twoFingerInitialSpan = null;
                         _resetPanTracking();
                       }
@@ -5213,8 +5222,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       if (_palmRejectedPointers.contains(e.pointer)) {
                         return;
                       }
-                      if (stylusBlocksViewport ||
-                          PalmRejectionFilter.isLikelyPalmTouch(e)) {
+                      if (stylusBlocksViewport) {
                         _palmRejectedPointers.add(e.pointer);
                         _activeTouchPointers.remove(e.pointer);
                         _activeTouchPositions.remove(e.pointer);
@@ -5270,7 +5278,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         (isTouchPan || isStylusPan)) {
                       _panAccumDelta += e.delta;
                       if (isTouchPan && !_stylusPanMode && !_touchPanActivated) {
-                        if (_panAccumDelta.distance < 12.0) {
+                        if (_panAccumDelta.distance < 10.0) {
                           return;
                         }
                         _touchPanActivated = true;
@@ -5393,9 +5401,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       _twoFingerInitialSpan = null;
                     }
                     if (_activeTouchPointers.isEmpty) {
-                      _matrixBeforeTouchGesture = null;
-                      _whiteboardMatrixBeforeTouchGesture = null;
-                      _touchGestureStartedAt = null;
+                      _touchGestureEndedAt = DateTime.now();
                     }
                     if (wasRejectedPalm) {
                       if (_activeTouchPointers.isEmpty &&
@@ -5498,10 +5504,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     if (_activeTouchPointers.length < 2) {
                       _twoFingerInitialSpan = null;
                     }
+                    _rollbackRecentPalmShiftIfNeeded(forceFromCancel: true);
                     if (_activeTouchPointers.isEmpty) {
-                      _matrixBeforeTouchGesture = null;
-                      _whiteboardMatrixBeforeTouchGesture = null;
-                      _touchGestureStartedAt = null;
+                      _touchGestureEndedAt = DateTime.now();
                     }
                     if (useSmartVerticalPan && _activeTouchPointers.isEmpty) {
                       _pullAddProgressNotifier.value = 0.0;

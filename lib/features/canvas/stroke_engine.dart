@@ -44,13 +44,13 @@ class PalmRejectionFilter {
         stylusCooldownMs;
   }
 
-  /// Returns true when a touch event carries palm-sized contact geometry.
+  /// Returns true when a touch event carries an extreme palm-sized contact
+  /// radius (> 45 logical px). Uncalibrated normalized `size` values are
+  /// intentionally ignored because Huawei MatePad panels report `size == 1.0`
+  /// for ordinary fingertips.
   static bool isLikelyPalmTouch(PointerEvent event) {
     if (event.kind != PointerDeviceKind.touch) return false;
-    final bool largeRadius =
-        event.radiusMajor > 20.0 && event.radiusMajor < 400.0;
-    final bool largeSize = event.size > 0.28;
-    return largeRadius || largeSize;
+    return event.radiusMajor > 45.0 && event.radiusMajor < 400.0;
   }
 
   /// Returns true if the incoming pointer event should be accepted for drawing.

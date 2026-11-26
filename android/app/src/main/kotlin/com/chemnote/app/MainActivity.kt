@@ -39,9 +39,8 @@ class MainActivity : FlutterActivity() {
         private const val HARDWARE_CHANNEL = "com.chemnote.app/hardware"
         private const val STYLUS_BUTTON_DEBOUNCE_MS = 450L
         private const val STYLUS_PALM_COOLDOWN_MS = 480L
+        private const val STYLUS_HOVER_TIMEOUT_MS = 400L
         private const val TOOL_TYPE_PALM_VALUE = 5
-        private const val PALM_TOUCH_MAJOR_MM = 18.5f
-        private const val PALM_SIZE_THRESHOLD = 0.28f
         private const val REQ_RECORD_AUDIO = 4012
         private const val REQ_READ_IMAGES = 4013
         private const val REQ_PICK_GALLERY = 4014
@@ -58,6 +57,7 @@ class MainActivity : FlutterActivity() {
     private var editorStylusPanMode: Boolean = false
     private var isNativeStylusDown: Boolean = false
     private var isNativeStylusHovering: Boolean = false
+    private var lastNativeStylusHoverMs: Long = 0L
     private var lastNativeStylusActiveMs: Long = 0L
     private var activeCanvasTouchStream: Boolean = false
     private var suppressCurrentTouchStream: Boolean = false
@@ -85,6 +85,26 @@ class MainActivity : FlutterActivity() {
         super.onResume()
         enableHighestRefreshRate()
         enableUnbufferedStylusInput()
+    }
+
+    override fun onPause() {
+        resetNativePalmShieldTransientState()
+        super.onPause()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        if (!hasFocus) {
+            resetNativePalmShieldTransientState()
+        }
+        super.onWindowFocusChanged(hasFocus)
+    }
+
+    private fun resetNativePalmShieldTransientState() {
+        isNativeStylusDown = false
+        isNativeStylusHovering = false
+        lastNativeStylusHoverMs = 0L
+        activeCanvasTouchStream = false
+        suppressCurrentTouchStream = false
     }
 
     override fun onDestroy() {
@@ -797,19 +817,22 @@ class MainActivity : FlutterActivity() {
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
         checkStylusMotionButton(ev)
         if (isStylusMotionEvent(ev)) {
+            val now = SystemClock.uptimeMillis()
             val action = ev.actionMasked
             when (action) {
                 MotionEvent.ACTION_HOVER_ENTER,
                 MotionEvent.ACTION_HOVER_MOVE -> {
                     isNativeStylusHovering = true
-                    lastNativeStylusActiveMs = SystemClock.uptimeMillis()
+                    lastNativeStylusHoverMs = now
+                    lastNativeStylusActiveMs = now
                     if (editorPalmShieldEnabled && !editorStylusPanMode && activeCanvasTouchStream) {
                         cancelActiveCanvasTouchStream(ev)
                     }
                 }
                 MotionEvent.ACTION_HOVER_EXIT -> {
                     isNativeStylusHovering = false
-                    lastNativeStylusActiveMs = SystemClock.uptimeMillis()
+                    lastNativeStylusHoverMs = 0L
+                    lastNativeStylusActiveMs = now
                 }
             }
         }
@@ -832,6 +855,7 @@ class MainActivity : FlutterActivity() {
             }
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 isNativeStylusHovering = false
+                lastNativeStylusHoverMs = 0L
             }
             lastNativeStylusActiveMs = now
             if (editorPalmShieldEnabled && !editorStylusPanMode && activeCanvasTouchStream) {
@@ -859,9 +883,15 @@ class MainActivity : FlutterActivity() {
             return true
         }
 
-        val stylusEngaged = isNativeStylusDown ||
-            isNativeStylusHovering ||
+        val hoverFresh = isNativeStylusHovering &&
+            lastNativeStylusHoverMs > 0L &&
+            (now - lastNativeStylusHoverMs) < STYLUS_HOVER_TIMEOUT_MS
+        if (isNativeStylusHovering && !hoverFresh) {
+            isNativeStylusHovering = false
+        }
+        val inCooldown = lastNativeStylusActiveMs > 0L &&
             (now - lastNativeStylusActiveMs) < STYLUS_PALM_COOLDOWN_MS
+        val stylusEngaged = isNativeStylusDown || hoverFresh || inCooldown
         val hasPalm = hasNativePalmPointer(ev)
 
         if (action == MotionEvent.ACTION_DOWN) {
@@ -886,7 +916,6 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun isStylusMotionEvent(ev: MotionEvent): Boolean {
-        if (ev.isFromSource(InputDevice.SOURCE_STYLUS)) return true
         for (i in 0 until ev.pointerCount) {
             val toolType = ev.getToolType(i)
             if (toolType == MotionEvent.TOOL_TYPE_STYLUS ||
@@ -929,22 +958,8 @@ class MainActivity : FlutterActivity() {
         ) {
             return true
         }
-        val xdpi = resources.displayMetrics.xdpi.takeIf { it >= 72f }
-            ?: (resources.displayMetrics.density * 160f)
         for (i in 0 until ev.pointerCount) {
             if (ev.getToolType(i) == TOOL_TYPE_PALM_VALUE) {
-                return true
-            }
-            val touchMajorPx = ev.getTouchMajor(i)
-            val touchMajorMm = if (touchMajorPx > 0f && touchMajorPx < 2500f) {
-                (touchMajorPx / xdpi) * 25.4f
-            } else {
-                0f
-            }
-            if (touchMajorMm > PALM_TOUCH_MAJOR_MM) {
-                return true
-            }
-            if (ev.getSize(i) > PALM_SIZE_THRESHOLD) {
                 return true
             }
         }

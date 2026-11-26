@@ -454,20 +454,20 @@ void main() {
   });
 
   group('PalmRejectionFilter triple-layer unit guards', () {
-    test('isLikelyPalmTouch rejects large palm contact but accepts fingertip and stylus', () {
-      const palmByRadius = PointerDownEvent(
+    test('isLikelyPalmTouch allows MatePad fingertip with size=1.0 and rejects massive palm only', () {
+      const matePadNormalFinger = PointerDownEvent(
         pointer: 101,
         kind: PointerDeviceKind.touch,
         position: Offset(200, 300),
         radiusMajor: 28.0,
-        size: 0.12,
+        size: 1.0,
       );
-      const palmBySize = PointerDownEvent(
+      const massivePalm = PointerDownEvent(
         pointer: 102,
         kind: PointerDeviceKind.touch,
         position: Offset(220, 320),
-        radiusMajor: 10.0,
-        size: 0.35,
+        radiusMajor: 55.0,
+        size: 1.0,
       );
       const normalFinger = PointerDownEvent(
         pointer: 103,
@@ -480,14 +480,18 @@ void main() {
         pointer: 104,
         kind: PointerDeviceKind.stylus,
         position: Offset(260, 360),
-        radiusMajor: 35.0,
-        size: 0.5,
+        radiusMajor: 60.0,
+        size: 1.0,
       );
 
-      expect(PalmRejectionFilter.isLikelyPalmTouch(palmByRadius), isTrue);
-      expect(PalmRejectionFilter.isLikelyPalmTouch(palmBySize), isTrue);
+      expect(PalmRejectionFilter.isLikelyPalmTouch(matePadNormalFinger), isFalse);
+      expect(PalmRejectionFilter.isLikelyPalmTouch(massivePalm), isTrue);
       expect(PalmRejectionFilter.isLikelyPalmTouch(normalFinger), isFalse);
       expect(PalmRejectionFilter.isLikelyPalmTouch(largeStylus), isFalse);
+
+      final filter = PalmRejectionFilter(stylusOnlyMode: false);
+      expect(filter.shouldAccept(matePadNormalFinger), isTrue);
+      expect(filter.shouldAccept(massivePalm), isFalse);
     });
 
     test('notifyStylusActivity enables 550ms cooldown blocking touch while accepting stylus', () {
@@ -498,8 +502,8 @@ void main() {
         pointer: 201,
         kind: PointerDeviceKind.touch,
         position: Offset(180, 220),
-        radiusMajor: 8.0,
-        size: 0.08,
+        radiusMajor: 28.0,
+        size: 1.0,
       );
       const stylus = PointerDownEvent(
         pointer: 202,
