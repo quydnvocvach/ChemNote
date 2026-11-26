@@ -240,8 +240,9 @@ void main() {
       expect(reloaded.defaultImportDirectory, '/storage/emulated/0/Download/ChemPDF');
 
       // Prepare referenced & orphan files under pdf_pages and docx_media
-      final pdfDir = Directory('${tempDir.path}/pdf_pages/b1')..createSync(recursive: true);
-      final docxDir = Directory('${tempDir.path}/docx_media/d1')..createSync(recursive: true);
+      final rootDir = await storage.getRootDirectory();
+      final pdfDir = Directory('${rootDir.path}/pdf_pages/b1')..createSync(recursive: true);
+      final docxDir = Directory('${rootDir.path}/docx_media/d1')..createSync(recursive: true);
       final keptPdf = File('${pdfDir.path}/p1.png')..writeAsBytesSync([1, 2, 3]);
       final orphanPdf = File('${pdfDir.path}/orphan.png')..writeAsBytesSync([4, 5, 6]);
       final keptDocx = File('${docxDir.path}/img1.png')..writeAsBytesSync([7, 8, 9]);
