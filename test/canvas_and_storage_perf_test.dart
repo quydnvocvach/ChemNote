@@ -8,6 +8,7 @@ import 'package:chemnote/core/models/notebook.dart';
 import 'package:chemnote/core/providers/app_state.dart';
 import 'package:chemnote/core/storage/local_storage_service.dart';
 import 'package:chemnote/features/canvas/canvas_painter.dart';
+import 'package:chemnote/features/canvas/lasso_controller.dart';
 import 'package:chemnote/features/canvas/paper_templates.dart';
 import 'package:chemnote/features/canvas/stroke_engine.dart';
 import 'package:flutter/gestures.dart';
@@ -494,8 +495,8 @@ void main() {
       expect(filter.shouldAccept(massivePalm), isFalse);
     });
 
-    test('notifyStylusActivity enables 550ms cooldown blocking touch while accepting stylus', () {
-      expect(PalmRejectionFilter.stylusCooldownMs, 550);
+    test('notifyStylusActivity enables 300ms cooldown blocking touch while accepting stylus', () {
+      expect(PalmRejectionFilter.stylusCooldownMs, 300);
       final filter = PalmRejectionFilter(stylusOnlyMode: false);
 
       const touch = PointerDownEvent(
@@ -518,6 +519,81 @@ void main() {
       expect(filter.isStylusRecentlyActive, isTrue);
       expect(filter.shouldAccept(touch), isFalse);
       expect(filter.shouldAccept(stylus), isTrue);
+    });
+  });
+
+  group('LassoController long-press helpers (paste center, selectAll, cancelDrawing, stroke width)', () {
+    test('selectAll, cancelDrawing, pasteClipboard(targetCenter), and setSelectionStrokeWidth work accurately', () {
+      const sSelected = Stroke(
+        id: 's1',
+        toolType: ToolType.fountainPen,
+        colorValue: 0xFF111827,
+        width: 2.5,
+        points: [
+          StrokePoint(x: 20.0, y: 20.0, pressure: 0.5, timestamp: 1),
+          StrokePoint(x: 60.0, y: 60.0, pressure: 0.6, timestamp: 2),
+        ],
+      );
+      const sOther = Stroke(
+        id: 's2',
+        toolType: ToolType.ballpointPen,
+        colorValue: 0xFFDC2626,
+        width: 3.0,
+        points: [
+          StrokePoint(x: 400.0, y: 400.0, pressure: 0.5, timestamp: 3),
+          StrokePoint(x: 430.0, y: 420.0, pressure: 0.5, timestamp: 4),
+        ],
+      );
+      final page = NotePage(
+        id: 'p-lasso',
+        index: 0,
+        strokes: const [sSelected, sOther],
+      );
+
+      final lasso = LassoController();
+      addTearDown(lasso.dispose);
+
+      // Select only s1 by circling around (0..100, 0..100)
+      lasso.startLasso(const Offset(0, 0), pageId: page.id);
+      lasso.updateLasso(const Offset(100, 0));
+      lasso.updateLasso(const Offset(100, 100));
+      lasso.updateLasso(const Offset(0, 100));
+      final sel = lasso.finishLasso(page);
+      expect(sel.strokeIds, {'s1'});
+
+      // Copy s1 to clipboard and adjust selected stroke width
+      lasso.copySelection(page);
+      expect(lasso.hasClipboard, isTrue);
+
+      final resizedPage = lasso.setSelectionStrokeWidth(page, 5.0);
+      expect(resizedPage.strokes.firstWhere((s) => s.id == 's1').width, 5.0);
+      expect(resizedPage.strokes.firstWhere((s) => s.id == 's2').width, 3.0);
+
+      // cancelDrawing clears active freehand path without wiping clipboard
+      lasso.startLasso(const Offset(290, 390), pageId: page.id);
+      expect(lasso.isDrawingLasso, isTrue);
+      lasso.cancelDrawing();
+      expect(lasso.isDrawingLasso, isFalse);
+      expect(lasso.lassoPath, isEmpty);
+      expect(lasso.hasClipboard, isTrue);
+
+      // pasteClipboard with targetCenter centers the pasted stroke near (300, 400)
+      int nextId = 10;
+      final pastedPage = lasso.pasteClipboard(
+        resizedPage,
+        idGenerator: () => 'pasted-${nextId++}',
+        targetCenter: const Offset(300, 400),
+      );
+      expect(pastedPage.strokes.length, 3);
+      final pasted = pastedPage.strokes.last;
+      final bounds = CanvasPainter.strokeBounds(pasted);
+      expect(bounds.center.dx, closeTo(300.0, 2.0));
+      expect(bounds.center.dy, closeTo(400.0, 2.0));
+
+      // selectAll selects all strokes on the updated page
+      final allSel = lasso.selectAll(pastedPage);
+      expect(allSel.strokeIds.length, 3);
+      expect(lasso.selectionBounds, isNotNull);
     });
   });
 }

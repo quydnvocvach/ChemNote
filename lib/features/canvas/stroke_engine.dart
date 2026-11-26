@@ -21,7 +21,7 @@ class ShapeRecognitionResult {
 /// (NearLink) and Samsung S-Pen, supporting stylus hover preemption and strict
 /// palm rejection while still allowing multi-finger navigation gestures.
 class PalmRejectionFilter {
-  static const int stylusCooldownMs = 550;
+  static const int stylusCooldownMs = 300;
 
   bool stylusOnlyMode;
   DateTime? _lastStylusEventTime;

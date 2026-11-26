@@ -160,18 +160,21 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.8.1 with APK
+      - name: Publish Release v3.8.2 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.8.1
-          name: ChemNote Pro v3.8.1 (Sửa lỗi nhận ngón tay Huawei MatePad, Chống tì tay & Lưới ảnh 12 ô)
+          tag_name: v3.8.2
+          name: ChemNote Pro v3.8.2 (Tối ưu 144Hz siêu mượt, Sửa miss chạm đầu tiên & Menu giữ lâu Lasso)
           body: |
-            ### ChemNote Pro v3.8.1 (Hotfix)
-            - **Khắc phục triệt để lỗi không nhận chạm/vuốt/zoom bằng ngón tay trên Huawei MatePad 11.5"S:**
-              - Gỡ bỏ ngưỡng `getSize() > 0.28` / `getTouchMajor` ở tầng native & Flutter vốn nhận nhầm đầu ngón tay trên màn hình MatePad (HarmonyOS trả về `size == 1.0`).
-              - Chỉ dùng cờ phần cứng `TOOL_TYPE_PALM` (`5`) và `FLAG_CANCELED`, kèm bộ đếm hết hạn hover `400ms` và tự reset khi mất tiêu điểm cửa sổ (`onPause` / `onWindowFocusChanged`) để ngón tay không bao giờ bị kẹt khóa sau khi nhấc M-Pencil 3.
-              - Sửa `isStylusMotionEvent` chỉ kiểm tra đúng toolType bút (`TOOL_TYPE_STYLUS` / `TOOL_TYPE_ERASER`) thay vì `SOURCE_STYLUS`, và khắc phục race-condition khi `ACTION_CANCEL` xóa snapshot hoàn tác vi dịch chuyển trước khi bút chạm.
-            - **Giữ nguyên toàn bộ tính năng v3.8.0:** Khung **Ảnh gần đây** lưới 12 ảnh sắc nét + xem trước phóng to, chống tì tay đa tầng và viên thuốc **Khóa Zoom kèm `%`**.
+            ### ChemNote Pro v3.8.2
+            - **Tối ưu 144Hz không khựng khi viết/lướt/chạm/zoom:**
+              - Loại bỏ toàn bộ các lần `setState` rebuild cây giao diện lớn khi bút hover, chạm, nhấc hoặc hết cooldown bằng `ValueListenableBuilder` bọc riêng `InteractiveViewer` (`_viewportGateNotifier`) kèm gom Timer hover/cooldown (không cấp phát Timer thừa ở 240Hz).
+              - Bỏ double-rebuild khi lưu nét (`_commitPage`, `_undo`, `_redo`) và giảm ngưỡng kích hoạt vuốt 1 ngón xuống `2.5px` (cộng bù quãng đầu ngay khi kích hoạt) cho cảm giác lướt trang tức thì, mượt như trước.
+            - **Sửa triệt để lỗi miss thao tác ngón tay đầu tiên sau khi nghỉ hoặc sau khi viết:**
+              - Áp dụng nguyên tắc toàn vẹn luồng chạm ở `MainActivity.kt` (chỉ chặn trọn vẹn từ `ACTION_DOWN` đến `ACTION_UP`, không phát `ACTION_CANCEL` giả làm lệch bộ đếm pointer của Flutter).
+              - Hạ cooldown sau bút xuống `250ms`/`300ms`, tự dọn trạng thái chạm cũ sau `700ms` cho **Hoàn tác 2 ngón** ăn ngay từ lần đầu, và phân biệt vi dịch chuyển còn giữ tay với thao tác lướt có chủ đích.
+            - **Nhấn giữ lâu trong công cụ Lasso (`420ms` bằng bút hoặc ngón tay):**
+              - Bật ngay thanh tính năng Lasso để **Dán** trực tiếp tại vị trí nhấn giữ (ngay cả khi chưa khoanh chọn gì), **Chọn tất cả**, **Đổi màu**, **Đổi cỡ nét / Kích thước (50%–150%, 1.5–7.0 px)**, **Cắt / Sao chép / Nhân bản / Xoay / Xóa**.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

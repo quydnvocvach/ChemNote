@@ -1253,6 +1253,9 @@ class LassoFloatingMenu extends StatelessWidget {
   final ValueChanged<Color> onRecolor;
   final VoidCallback onDelete;
   final VoidCallback onClear;
+  final VoidCallback? onSelectAll;
+  final ValueChanged<double>? onSetStrokeWidth;
+  final ValueChanged<double>? onScaleBy;
 
   const LassoFloatingMenu({
     super.key,
@@ -1268,10 +1271,95 @@ class LassoFloatingMenu extends StatelessWidget {
     required this.onRecolor,
     required this.onDelete,
     required this.onClear,
+    this.onSelectAll,
+    this.onSetStrokeWidth,
+    this.onScaleBy,
   });
 
   @override
   Widget build(BuildContext context) {
+    if (selectedCount <= 0) {
+      return Material(
+        elevation: 10,
+        borderRadius: BorderRadius.circular(24),
+        color: EditorColors.obsidianSurface,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: Colors.white12),
+          ),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  Icons.gesture_rounded,
+                  size: 17,
+                  color: EditorColors.activeBlue,
+                ),
+                const SizedBox(width: 6),
+                const Text(
+                  'Lasso',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                TextButton.icon(
+                  onPressed: hasClipboard ? onPaste : null,
+                  style: TextButton.styleFrom(
+                    foregroundColor:
+                        hasClipboard ? const Color(0xFF7DD3FC) : Colors.white38,
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                  ),
+                  icon: const Icon(Icons.content_paste_rounded, size: 17),
+                  label: Text(
+                    hasClipboard ? 'Dán' : 'Chưa có mục sao chép',
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                if (onSelectAll != null) ...[
+                  const SizedBox(width: 4),
+                  TextButton.icon(
+                    onPressed: onSelectAll,
+                    style: TextButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                    ),
+                    icon: const Icon(Icons.select_all_rounded, size: 17),
+                    label: const Text(
+                      'Chọn tất cả',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+                const SizedBox(width: 2),
+                _menuBtn(Icons.close_rounded, 'Đóng', onClear),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return Material(
       elevation: 10,
       borderRadius: BorderRadius.circular(24),
@@ -1308,6 +1396,70 @@ class LassoFloatingMenu extends StatelessWidget {
               _menuBtn(Icons.rotate_right_rounded, 'Xoay +15°', onRotate),
               _menuBtn(Icons.zoom_in_rounded, 'Phóng to', onScaleUp),
               _menuBtn(Icons.zoom_out_rounded, 'Thu nhỏ', onScaleDown),
+              PopupMenuButton<String>(
+                tooltip: 'Đổi cỡ / Kích thước',
+                icon: const Icon(
+                  Icons.line_weight_rounded,
+                  size: 18,
+                  color: Colors.white,
+                ),
+                onSelected: (val) {
+                  if (val.startsWith('scale:')) {
+                    final factor = double.tryParse(val.substring(6));
+                    if (factor != null) {
+                      if (onScaleBy != null) {
+                        onScaleBy!(factor);
+                      } else if (factor > 1.0) {
+                        onScaleUp();
+                      } else {
+                        onScaleDown();
+                      }
+                    }
+                  } else if (val.startsWith('width:')) {
+                    final w = double.tryParse(val.substring(6));
+                    if (w != null) {
+                      onSetStrokeWidth?.call(w);
+                    }
+                  }
+                },
+                itemBuilder: (_) => [
+                  const PopupMenuItem(
+                    value: 'scale:0.5',
+                    child: Text('Kích thước 50%'),
+                  ),
+                  const PopupMenuItem(
+                    value: 'scale:0.85',
+                    child: Text('Thu nhỏ 85%'),
+                  ),
+                  const PopupMenuItem(
+                    value: 'scale:1.15',
+                    child: Text('Phóng to 115%'),
+                  ),
+                  const PopupMenuItem(
+                    value: 'scale:1.5',
+                    child: Text('Kích thước 150%'),
+                  ),
+                  if (onSetStrokeWidth != null) ...[
+                    const PopupMenuDivider(),
+                    const PopupMenuItem(
+                      value: 'width:1.5',
+                      child: Text('Cỡ nét mảnh (1.5 px)'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'width:2.8',
+                      child: Text('Cỡ nét vừa (2.8 px)'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'width:4.5',
+                      child: Text('Cỡ nét đậm (4.5 px)'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'width:7.0',
+                      child: Text('Cỡ nét rất đậm (7.0 px)'),
+                    ),
+                  ],
+                ],
+              ),
               PopupMenuButton<Color>(
                 tooltip: 'Đổi màu',
                 icon: const Icon(

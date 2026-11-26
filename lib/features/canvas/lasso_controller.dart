@@ -249,6 +249,33 @@ class LassoController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Cancels an in-progress lasso freehand path without clearing existing
+  /// selection bounds or the clipboard (used when long-press menu opens).
+  void cancelDrawing() {
+    _lassoPath.clear();
+    _isDrawingLasso = false;
+    notifyListeners();
+  }
+
+  /// Selects all elements on [page].
+  LassoSelection selectAll(NotePage page) {
+    _lassoPath.clear();
+    _isDrawingLasso = false;
+    _activePageId = page.id;
+    _selection = LassoSelection(
+      strokeIds: page.strokes.map((s) => s.id).toSet(),
+      stencilIds: page.stencilElements.map((st) => st.id).toSet(),
+      textIds: page.textElements.map((t) => t.id).toSet(),
+      imageIds: page.imageElements.map((img) => img.id).toSet(),
+      tapeIds: page.tapeElements.map((tp) => tp.id).toSet(),
+      stickyNoteIds: page.stickyNotes.map((sn) => sn.id).toSet(),
+      attachmentIds: page.attachmentElements.map((att) => att.id).toSet(),
+    );
+    _selectionBounds = computeBounds(page, _selection);
+    notifyListeners();
+    return _selection;
+  }
+
   bool hitTestSelectionBounds(Offset point, {double padding = 10.0}) {
     final bounds = _selectionBounds;
     if (bounds == null || _selection.isEmpty) return false;
@@ -377,13 +404,71 @@ class LassoController extends ChangeNotifier {
     return deleteSelection(page);
   }
 
-  /// Pastes clipboard contents onto [page] with a slight offset and selects them.
+  Rect? _computeClipboardBounds() {
+    if (_clipboard.isEmpty) return null;
+    double minX = double.infinity;
+    double minY = double.infinity;
+    double maxX = -double.infinity;
+    double maxY = -double.infinity;
+
+    void includePoint(double x, double y) {
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+
+    void includeRect(double x, double y, double w, double h) {
+      includePoint(x, y);
+      includePoint(x + w, y + h);
+    }
+
+    for (final s in _clipboard.strokes) {
+      final halfW = s.width * 0.5;
+      for (final p in s.points) {
+        includePoint(p.x - halfW, p.y - halfW);
+        includePoint(p.x + halfW, p.y + halfW);
+      }
+    }
+    for (final st in _clipboard.stencils) {
+      includeRect(st.x, st.y, st.width, st.height);
+    }
+    for (final t in _clipboard.texts) {
+      includeRect(t.x, t.y, t.width, t.height);
+    }
+    for (final img in _clipboard.images) {
+      includeRect(img.x, img.y, img.width, img.height);
+    }
+    for (final tp in _clipboard.tapes) {
+      includeRect(tp.x, tp.y, tp.width, tp.height);
+    }
+    for (final sn in _clipboard.stickyNotes) {
+      final double sw = sn.isCollapsed ? math.min(sn.width, 210.0) : sn.width;
+      final double sh = sn.isCollapsed ? 40.0 : sn.height;
+      includeRect(sn.x, sn.y, sw, sh);
+    }
+    for (final att in _clipboard.attachments) {
+      includeRect(att.x, att.y, att.width, att.height);
+    }
+
+    if (!minX.isFinite || !minY.isFinite) return null;
+    return Rect.fromLTRB(minX, minY, maxX, maxY);
+  }
+
+  /// Pastes clipboard contents onto [page] centered near [targetCenter] if
+  /// provided, otherwise shifted by [offset], and selects them.
   NotePage pasteClipboard(
     NotePage page, {
     required String Function() idGenerator,
     Offset offset = const Offset(28.0, 28.0),
+    Offset? targetCenter,
   }) {
     if (_clipboard.isEmpty) return page;
+    final Rect? clipBounds =
+        targetCenter != null ? _computeClipboardBounds() : null;
+    final Offset effectiveOffset = (targetCenter != null && clipBounds != null)
+        ? (targetCenter - clipBounds.center)
+        : offset;
 
     final newStrokeIds = <String>{};
     final newStencilIds = <String>{};
@@ -399,7 +484,10 @@ class LassoController extends ChangeNotifier {
       return s.copyWith(
         id: id,
         points: s.points
-            .map((p) => p.copyWith(x: p.x + offset.dx, y: p.y + offset.dy))
+            .map((p) => p.copyWith(
+                  x: p.x + effectiveOffset.dx,
+                  y: p.y + effectiveOffset.dy,
+                ))
             .toList(),
       );
     }).toList();
@@ -407,25 +495,41 @@ class LassoController extends ChangeNotifier {
     final addedStencils = _clipboard.stencils.map((st) {
       final id = idGenerator();
       newStencilIds.add(id);
-      return st.copyWith(id: id, x: st.x + offset.dx, y: st.y + offset.dy);
+      return st.copyWith(
+        id: id,
+        x: st.x + effectiveOffset.dx,
+        y: st.y + effectiveOffset.dy,
+      );
     }).toList();
 
     final addedTexts = _clipboard.texts.map((t) {
       final id = idGenerator();
       newTextIds.add(id);
-      return t.copyWith(id: id, x: t.x + offset.dx, y: t.y + offset.dy);
+      return t.copyWith(
+        id: id,
+        x: t.x + effectiveOffset.dx,
+        y: t.y + effectiveOffset.dy,
+      );
     }).toList();
 
     final addedImages = _clipboard.images.map((img) {
       final id = idGenerator();
       newImageIds.add(id);
-      return img.copyWith(id: id, x: img.x + offset.dx, y: img.y + offset.dy);
+      return img.copyWith(
+        id: id,
+        x: img.x + effectiveOffset.dx,
+        y: img.y + effectiveOffset.dy,
+      );
     }).toList();
 
     final addedTapes = _clipboard.tapes.map((tp) {
       final id = idGenerator();
       newTapeIds.add(id);
-      return tp.copyWith(id: id, x: tp.x + offset.dx, y: tp.y + offset.dy);
+      return tp.copyWith(
+        id: id,
+        x: tp.x + effectiveOffset.dx,
+        y: tp.y + effectiveOffset.dy,
+      );
     }).toList();
 
     final addedStickyNotes = _clipboard.stickyNotes.map((sn) {
@@ -433,8 +537,8 @@ class LassoController extends ChangeNotifier {
       newStickyNoteIds.add(id);
       return sn.copyWith(
         id: id,
-        x: sn.x + offset.dx,
-        y: sn.y + offset.dy,
+        x: sn.x + effectiveOffset.dx,
+        y: sn.y + effectiveOffset.dy,
         updatedAt: DateTime.now(),
       );
     }).toList();
@@ -442,7 +546,11 @@ class LassoController extends ChangeNotifier {
     final addedAttachments = _clipboard.attachments.map((att) {
       final id = idGenerator();
       newAttachmentIds.add(id);
-      return att.copyWith(id: id, x: att.x + offset.dx, y: att.y + offset.dy);
+      return att.copyWith(
+        id: id,
+        x: att.x + effectiveOffset.dx,
+        y: att.y + effectiveOffset.dy,
+      );
     }).toList();
 
     final updatedPage = page.copyWith(
@@ -723,6 +831,23 @@ class LassoController extends ChangeNotifier {
       tapeElements: updatedTapes,
       updatedAt: DateTime.now(),
     );
+    notifyListeners();
+    return updatedPage;
+  }
+
+  /// Sets absolute stroke width (thickness) on all selected strokes.
+  NotePage setSelectionStrokeWidth(NotePage page, double strokeWidth) {
+    if (_selection.strokeIds.isEmpty) return page;
+    final clampedWidth = strokeWidth.clamp(0.8, 60.0);
+    final updatedStrokes = page.strokes.map((s) {
+      if (!_selection.strokeIds.contains(s.id)) return s;
+      return s.copyWith(width: clampedWidth);
+    }).toList();
+    final updatedPage = page.copyWith(
+      strokes: updatedStrokes,
+      updatedAt: DateTime.now(),
+    );
+    _selectionBounds = computeBounds(updatedPage, _selection);
     notifyListeners();
     return updatedPage;
   }

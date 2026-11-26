@@ -158,6 +158,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   bool _isStylusInCooldown = false;
   Timer? _stylusHoverTimer;
   Timer? _stylusCooldownTimer;
+  DateTime? _lastStylusHoverAt;
+  DateTime? _lastStylusCooldownAt;
+  final ValueNotifier<int> _viewportGateNotifier = ValueNotifier<int>(0);
   Matrix4? _lockedMatrixDuringStylus;
   Matrix4? _lockedWhiteboardMatrixDuringStylus;
   bool _stylusPanMode = false;
@@ -183,6 +186,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   final ValueNotifier<bool> _zoomLockPillVisibleNotifier =
       ValueNotifier<bool>(false);
   Timer? _zoomLockHideTimer;
+
+  // Lasso long-press action bar state
+  Timer? _lassoLongPressTimer;
+  Offset? _lassoLongPressGlobalPos;
+  int? _lassoLongPressPointer;
+  bool _lassoLongPressMenuVisible = false;
+  Offset? _lassoLongPressPagePos;
+  String? _lassoLongPressPageId;
 
   // Smoothing & M-Pencil 3 curve
   bool _autoNeatenEnabled = true;
@@ -268,39 +279,111 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     );
   }
 
+  bool get _stylusBlocksViewport =>
+      !_stylusPanMode &&
+      (_isStylusDown || _isStylusHovering || _isStylusInCooldown);
+
+  bool _computeAllowZoomPan(AppState appState) {
+    return !_isOverlayDragging &&
+        (_stylusPanMode ||
+            (!_stylusBlocksViewport &&
+                (_activeTouchPointers.length >= 2 ||
+                    appState.readOnlyMode ||
+                    (appState.palmRejectionEnabled &&
+                        !_isDrawingPointerDown) ||
+                    (!_isDrawingPointerDown &&
+                        _activeTool == EditorTool.panZoom))));
+  }
+
+  void _bumpViewportGate() {
+    _viewportGateNotifier.value = _viewportGateNotifier.value + 1;
+  }
+
+  void _markStylusHoverActive() {
+    _lastStylusHoverAt = DateTime.now();
+    if (!_isStylusHovering) {
+      _isStylusHovering = true;
+      _bumpViewportGate();
+    }
+    if (!(_stylusHoverTimer?.isActive ?? false)) {
+      _scheduleStylusHoverCheck(320);
+    }
+  }
+
+  void _scheduleStylusHoverCheck(int delayMs) {
+    _stylusHoverTimer?.cancel();
+    _stylusHoverTimer = Timer(Duration(milliseconds: delayMs), () {
+      if (!mounted) return;
+      final last = _lastStylusHoverAt;
+      if (last != null) {
+        final int elapsed = DateTime.now().difference(last).inMilliseconds;
+        final int remaining = 320 - elapsed;
+        if (remaining > 16) {
+          _scheduleStylusHoverCheck(remaining);
+          return;
+        }
+      }
+      if (_isStylusHovering) {
+        _isStylusHovering = false;
+        if (!_isStylusDown && !_isStylusInCooldown) {
+          _lockedMatrixDuringStylus = null;
+          _lockedWhiteboardMatrixDuringStylus = null;
+        }
+        _bumpViewportGate();
+      }
+    });
+  }
+
   void _markStylusActivityCooldown({
     int ms = PalmRejectionFilter.stylusCooldownMs,
   }) {
     _palmFilter.notifyStylusActivity();
-    _stylusCooldownTimer?.cancel();
-    if (!_isStylusInCooldown && mounted) {
-      setState(() => _isStylusInCooldown = true);
-    } else {
+    _lastStylusCooldownAt = DateTime.now();
+    if (!_isStylusInCooldown) {
       _isStylusInCooldown = true;
+      _bumpViewportGate();
     }
-    _stylusCooldownTimer = Timer(Duration(milliseconds: ms), () {
+    if (!(_stylusCooldownTimer?.isActive ?? false)) {
+      _scheduleStylusCooldownCheck(ms, ms);
+    }
+  }
+
+  void _scheduleStylusCooldownCheck(int delayMs, int windowMs) {
+    _stylusCooldownTimer?.cancel();
+    _stylusCooldownTimer = Timer(Duration(milliseconds: delayMs), () {
       if (!mounted) return;
+      final last = _lastStylusCooldownAt;
+      if (last != null) {
+        final int elapsed = DateTime.now().difference(last).inMilliseconds;
+        final int remaining = windowMs - elapsed;
+        if (remaining > 16) {
+          _scheduleStylusCooldownCheck(remaining, windowMs);
+          return;
+        }
+      }
       final bool stillActive = _isStylusDown || _isStylusHovering;
       if (!stillActive) {
         _lockedMatrixDuringStylus = null;
         _lockedWhiteboardMatrixDuringStylus = null;
       }
       if (_isStylusInCooldown) {
-        setState(() => _isStylusInCooldown = false);
+        _isStylusInCooldown = false;
+        _bumpViewportGate();
       }
     });
   }
 
   void _rollbackRecentPalmShiftIfNeeded({bool forceFromCancel = false}) {
     final DateTime now = DateTime.now();
-    final DateTime? startedAt = _touchGestureStartedAt;
     final DateTime? endedAt = _touchGestureEndedAt;
-    final bool withinWindow = forceFromCancel ||
-        _activeTouchPointers.isNotEmpty ||
-        (startedAt != null && now.difference(startedAt).inMilliseconds <= 900) ||
-        (endedAt != null && now.difference(endedAt).inMilliseconds <= 650);
+    final bool activeOrCancelled =
+        forceFromCancel || _activeTouchPointers.isNotEmpty;
+    final bool justEnded =
+        endedAt != null && now.difference(endedAt).inMilliseconds <= 180;
 
-    if (withinWindow) {
+    if (activeOrCancelled || justEnded) {
+      final double maxMove = activeOrCancelled ? 180.0 : 45.0;
+      final double maxScaleDelta = activeOrCancelled ? 0.45 : 0.10;
       final Matrix4? pre = _matrixBeforeTouchGesture;
       if (pre != null) {
         final Matrix4 cur = _transformController.value;
@@ -312,9 +395,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         final double preS = pre.getMaxScaleOnAxis();
         final double ds = (curS - preS).abs();
         if ((dx > 0.1 || dy > 0.1 || ds > 0.002) &&
-            dx < 180.0 &&
-            dy < 180.0 &&
-            ds < 0.45) {
+            dx < maxMove &&
+            dy < maxMove &&
+            ds < maxScaleDelta) {
           _transformController.value = pre.clone();
           final double restored = preS.clamp(0.35, 4.0);
           _lastObservedZoomScale = restored;
@@ -335,9 +418,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         final double preS = wbPre.getMaxScaleOnAxis();
         final double ds = (curS - preS).abs();
         if ((dx > 0.1 || dy > 0.1 || ds > 0.002) &&
-            dx < 180.0 &&
-            dy < 180.0 &&
-            ds < 0.45) {
+            dx < maxMove &&
+            dy < maxMove &&
+            ds < maxScaleDelta) {
           _whiteboardTransformController.value = wbPre.clone();
           final double restored = preS.clamp(0.25, 4.0);
           _lastObservedZoomScale = restored;
@@ -568,6 +651,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _stylusHoverTimer?.cancel();
     _stylusCooldownTimer?.cancel();
     _zoomLockHideTimer?.cancel();
+    _lassoLongPressTimer?.cancel();
     _shapeHoldTimer?.cancel();
     _scrubPrefetchTimer?.cancel();
     _recordingElapsedTimer?.cancel();
@@ -592,6 +676,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _whiteboardZoomNotifier.dispose();
     _zoomScaleNotifier.dispose();
     _zoomLockPillVisibleNotifier.dispose();
+    _viewportGateNotifier.dispose();
     _imageDragNotifier.dispose();
     _stickyDragNotifier.dispose();
     _activeStickyStrokeNotifier.dispose();
@@ -652,8 +737,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     NotePage? undoSnapshot,
   }) async {
     if (undoSnapshot != null) _pushUndo(undoSnapshot);
+    _repaintVersion++;
     await context.read<AppState>().updatePage(_activeNotebookId, updatedPage);
-    if (mounted) setState(() => _repaintVersion++);
   }
 
   Future<void> _undo(NotePage currentPage) async {
@@ -662,8 +747,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     final previous = stack.removeLast();
     _redoFor(currentPage.id).add(currentPage);
     _lassoController.clear();
+    _repaintVersion++;
     await context.read<AppState>().updatePage(_activeNotebookId, previous);
-    if (mounted) setState(() => _repaintVersion++);
   }
 
   Future<void> _redo(NotePage currentPage) async {
@@ -672,8 +757,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     final next = stack.removeLast();
     _undoFor(currentPage.id).add(currentPage);
     _lassoController.clear();
+    _repaintVersion++;
     await context.read<AppState>().updatePage(_activeNotebookId, next);
-    if (mounted) setState(() => _repaintVersion++);
   }
 
   void _syncCurrentPageIndex(int idx) {
@@ -699,6 +784,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     if (!mounted) return;
     _zoomLockHideTimer?.cancel();
     _zoomLockPillVisibleNotifier.value = false;
+    _cancelLassoLongPressTimer();
     final targetNb = context.read<AppState>().getNotebookById(notebookId);
     final bool isWbTarget = targetNb?.isWhiteboard == true ||
         (targetNb?.pages.isNotEmpty == true &&
@@ -718,6 +804,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       _lockedZoomScale = null;
       _lastObservedZoomScale = syncedScale;
       _zoomScaleNotifier.value = syncedScale;
+      _lassoLongPressMenuVisible = false;
+      _lassoLongPressPagePos = null;
+      _lassoLongPressPageId = null;
       _lassoController.clear();
       _selectedTextId = null;
       _selectedImageId = null;
@@ -1040,8 +1129,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     if (isStylusEvent) {
       _palmFilter.notifyStylusActivity();
       if (!_isStylusDown) {
-        setState(() => _isStylusDown = true);
+        _isStylusDown = true;
         _syncStylusDrawingState();
+        _bumpViewportGate();
       }
       // When Stylus-Pan Mode is ON, M-Pencil 3 ONLY scrolls/pans and never draws!
       if (_stylusPanMode) return;
@@ -1139,8 +1229,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         return;
       }
       if (!_isDrawingPointerDown) {
-        setState(() => _isDrawingPointerDown = true);
+        _isDrawingPointerDown = true;
         _syncStylusDrawingState();
+        _bumpViewportGate();
       }
       _tapeDragStart = rawPos;
       _tapeDraftNotifier.value = Rect.fromPoints(rawPos, rawPos);
@@ -1152,8 +1243,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       if (!allowThisPointer) return;
       _syncCurrentPageIndex(pageIndex);
       if (!_isDrawingPointerDown) {
-        setState(() => _isDrawingPointerDown = true);
+        _isDrawingPointerDown = true;
         _syncStylusDrawingState();
+        _bumpViewportGate();
       }
       _laserController.beginStroke(rawPos, pageId: page.id);
       return;
@@ -1165,11 +1257,31 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       return;
     }
 
-    if (!allowThisPointer) return;
+    if (_activeTool == EditorTool.lasso &&
+        _lassoLongPressMenuVisible &&
+        !_lassoController.hasSelection) {
+      setState(() {
+        _lassoLongPressMenuVisible = false;
+        _lassoLongPressPagePos = null;
+        _lassoLongPressPageId = null;
+      });
+    }
+
+    if (!allowThisPointer) {
+      if (_activeTool == EditorTool.lasso &&
+          !isStylusEvent &&
+          _activeTouchPointers.length <= 1 &&
+          !_isStylusDown &&
+          !_isStylusHovering) {
+        _startLassoLongPressTimer(page, rawPos, event.position, event.pointer);
+      }
+      return;
+    }
 
     if (!_isDrawingPointerDown) {
-      setState(() => _isDrawingPointerDown = true);
+      _isDrawingPointerDown = true;
       _syncStylusDrawingState();
+      _bumpViewportGate();
     }
 
     // Clear overlay selections when starting a stroke on empty paper
@@ -1196,6 +1308,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         _isDraggingLassoSelection = false;
         _lassoController.startLasso(rawPos, pageId: page.id);
       }
+      _startLassoLongPressTimer(page, rawPos, event.position, event.pointer);
       return;
     }
 
@@ -1248,6 +1361,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   void _handlePointerMove(PointerMoveEvent event, NotePage page) {
     final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus;
+    if (_lassoLongPressPointer == event.pointer &&
+        _lassoLongPressGlobalPos != null &&
+        (event.position - _lassoLongPressGlobalPos!).distance > 10.0) {
+      _cancelLassoLongPressTimer();
+    }
     if (!isStylusEvent) {
       final startPos = _pointerDownPositions[event.pointer];
       if (startPos != null && (event.position - startPos).distance > 16.0) {
@@ -1359,6 +1477,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   }
 
   void _handlePointerUp(PointerEvent event, NotePage page) {
+    if (_lassoLongPressPointer == event.pointer) {
+      _cancelLassoLongPressTimer();
+    }
     _pointerDownPositions.remove(event.pointer);
     final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus;
@@ -1368,15 +1489,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         _markStylusActivityCooldown();
       }
       if (_isStylusDown || _isDrawingPointerDown) {
-        setState(() {
-          _isStylusDown = false;
-          _isDrawingPointerDown = false;
-        });
+        _isStylusDown = false;
+        _isDrawingPointerDown = false;
         _syncStylusDrawingState();
+        _bumpViewportGate();
       }
     } else if (_pointerDownPositions.isEmpty && _isDrawingPointerDown) {
-      setState(() => _isDrawingPointerDown = false);
+      _isDrawingPointerDown = false;
       _syncStylusDrawingState();
+      _bumpViewportGate();
     }
 
     // Multi-finger tap Undo/Redo is handled by the top-level viewport Listener
@@ -1522,7 +1643,54 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     }
   }
 
+  void _cancelLassoLongPressTimer() {
+    _lassoLongPressTimer?.cancel();
+    _lassoLongPressTimer = null;
+    _lassoLongPressGlobalPos = null;
+    _lassoLongPressPointer = null;
+  }
+
+  void _startLassoLongPressTimer(
+    NotePage page,
+    Offset rawPos,
+    Offset globalPos,
+    int pointer,
+  ) {
+    _cancelLassoLongPressTimer();
+    _lassoLongPressPointer = pointer;
+    _lassoLongPressGlobalPos = globalPos;
+    _lassoLongPressTimer = Timer(const Duration(milliseconds: 420), () {
+      if (!mounted ||
+          _activeTool != EditorTool.lasso ||
+          _lassoLongPressPointer != pointer) {
+        return;
+      }
+      _cancelLassoLongPressTimer();
+      HapticFeedback.selectionClick();
+      if (_lassoController.isDrawingLasso) {
+        _lassoController.cancelDrawing();
+      }
+      if (_isDraggingLassoSelection) {
+        _isDraggingLassoSelection = false;
+        _lassoDragOffsetNotifier.value = Offset.zero;
+        _lastLassoDragPos = null;
+      }
+      _pageBeforeGesture = null;
+      if (_isDrawingPointerDown) {
+        _isDrawingPointerDown = false;
+        _syncStylusDrawingState();
+        _bumpViewportGate();
+      }
+      setState(() {
+        _lassoLongPressMenuVisible = true;
+        _lassoLongPressPagePos = rawPos;
+        _lassoLongPressPageId = page.id;
+      });
+    });
+  }
+
   void _cancelActiveGesture() {
+    _cancelLassoLongPressTimer();
     _shapeHoldTimer?.cancel();
     _shapeSnappedLive = false;
     _activeStrokeNotifier.value = null;
@@ -1532,8 +1700,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _lassoDragOffsetNotifier.value = Offset.zero;
     _tapeDragStart = null;
     if (_isDrawingPointerDown) {
-      setState(() => _isDrawingPointerDown = false);
+      _isDrawingPointerDown = false;
       _syncStylusDrawingState();
+      _bumpViewportGate();
     }
   }
 
@@ -4852,7 +5021,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         tool == EditorTool.textBox);
                 _activeTool = isToggleOff ? _lastPenTool : tool;
                 if (_activeTool.isPenFamily) _lastPenTool = _activeTool;
-                if (_activeTool != EditorTool.lasso) _lassoController.clear();
+                if (_activeTool != EditorTool.lasso) {
+                  _lassoController.clear();
+                  _cancelLassoLongPressTimer();
+                  _lassoLongPressMenuVisible = false;
+                  _lassoLongPressPagePos = null;
+                  _lassoLongPressPageId = null;
+                }
                 if (_activeTool != EditorTool.image) _selectedImageId = null;
               });
               if (_activeTool.isPenFamily) _persistPenPrefs();
@@ -5107,21 +5282,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                   _zoomScaleNotifier.value = initScale;
                 }
 
-                final bool stylusBlocksViewport = !_stylusPanMode &&
-                    (_isStylusDown ||
-                        _isStylusHovering ||
-                        _isStylusInCooldown);
-
-                final bool allowZoomPan = !_isOverlayDragging &&
-                    (_stylusPanMode ||
-                        (!stylusBlocksViewport &&
-                            (_activeTouchPointers.length >= 2 ||
-                                appState.readOnlyMode ||
-                                (appState.palmRejectionEnabled &&
-                                    !_isDrawingPointerDown) ||
-                                (!_isDrawingPointerDown &&
-                                    _activeTool == EditorTool.panZoom))));
-
                 final double scrollMult =
                     appState.scrollSpeedMultiplier.clamp(1.0, 25.0);
                 final bool useSmartVerticalPan =
@@ -5139,22 +5299,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         _engageStylusViewportLock();
                       }
                       _markStylusActivityCooldown();
-                      _stylusHoverTimer?.cancel();
-                      _stylusHoverTimer = Timer(
-                        const Duration(milliseconds: 450),
-                        () {
-                          if (mounted && _isStylusHovering) {
-                            if (!_isStylusDown && !_isStylusInCooldown) {
-                              _lockedMatrixDuringStylus = null;
-                              _lockedWhiteboardMatrixDuringStylus = null;
-                            }
-                            setState(() => _isStylusHovering = false);
-                          }
-                        },
-                      );
-                      if (!_isStylusHovering) {
-                        setState(() => _isStylusHovering = true);
-                      }
+                      _markStylusHoverActive();
                     }
                   },
                   onPointerDown: (e) {
@@ -5169,13 +5314,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         _markStylusActivityCooldown();
                       }
                       if (!_isStylusDown) {
-                        setState(() => _isStylusDown = true);
+                        _isStylusDown = true;
                         _syncStylusDrawingState();
+                        _bumpViewportGate();
                       }
                       return;
                     }
                     if (e.kind == PointerDeviceKind.touch) {
-                      if (stylusBlocksViewport) {
+                      final bool blocked = _stylusBlocksViewport;
+                      if (blocked) {
                         _palmRejectedPointers.add(e.pointer);
                         return;
                       }
@@ -5183,10 +5330,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       _activeTouchPointers.add(e.pointer);
                       _activeTouchPositions[e.pointer] = e.position;
                       if (_activeTouchPointers.length == 1) {
-                        _matrixBeforeTouchGesture =
-                            _transformController.value.clone();
-                        _whiteboardMatrixBeforeTouchGesture =
-                            _whiteboardTransformController.value.clone();
+                        final bool isWbTarget =
+                            currentPage.isInfiniteWhiteboard ||
+                                notebook.isWhiteboard;
+                        if (isWbTarget) {
+                          _whiteboardMatrixBeforeTouchGesture =
+                              _whiteboardTransformController.value.clone();
+                          _matrixBeforeTouchGesture = null;
+                        } else {
+                          _matrixBeforeTouchGesture =
+                              _transformController.value.clone();
+                          _whiteboardMatrixBeforeTouchGesture = null;
+                        }
                         _touchGestureStartedAt = DateTime.now();
                         _touchGestureEndedAt = null;
                         _twoFingerInitialSpan = null;
@@ -5194,18 +5349,30 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       }
                       if (_activeTouchPointers.length >= 2 &&
                           !_isStylusDown &&
-                          !stylusBlocksViewport) {
+                          !blocked) {
+                        _cancelLassoLongPressTimer();
                         _resetPanTracking();
                         _cancelActiveGesture();
-                        final positions =
-                            _activeTouchPositions.values.toList();
-                        if (positions.length >= 2) {
-                          _twoFingerInitialSpan =
-                              (positions[0] - positions[1]).distance;
+                        final it = _activeTouchPositions.values.iterator;
+                        if (it.moveNext()) {
+                          final Offset p0 = it.current;
+                          if (it.moveNext()) {
+                            _twoFingerInitialSpan = (p0 - it.current).distance;
+                          }
                         }
                         if (prevLen < 2) {
-                          setState(() {});
+                          _bumpViewportGate();
                         }
+                      }
+                      if (_tapTouchStartTime != null &&
+                          DateTime.now()
+                                  .difference(_tapTouchStartTime!)
+                                  .inMilliseconds >
+                              700) {
+                        _tapTouchStarts.clear();
+                        _tapTouchStartTime = null;
+                        _tapMaxTouchCount = 0;
+                        _tapMovedTooFar = false;
                       }
                       if (_tapTouchStarts.isEmpty) {
                         _tapTouchStartTime = DateTime.now();
@@ -5218,11 +5385,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     }
                   },
                   onPointerMove: (e) {
+                    if (e.kind == PointerDeviceKind.touch &&
+                        _lassoLongPressPointer == e.pointer &&
+                        _lassoLongPressGlobalPos != null &&
+                        (e.position - _lassoLongPressGlobalPos!).distance >
+                            10.0) {
+                      _cancelLassoLongPressTimer();
+                    }
                     if (e.kind == PointerDeviceKind.touch) {
                       if (_palmRejectedPointers.contains(e.pointer)) {
                         return;
                       }
-                      if (stylusBlocksViewport) {
+                      if (_stylusBlocksViewport) {
                         _palmRejectedPointers.add(e.pointer);
                         _activeTouchPointers.remove(e.pointer);
                         _activeTouchPositions.remove(e.pointer);
@@ -5236,18 +5410,19 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       _activeTouchPositions[e.pointer] = e.position;
                       if (_isZoomLocked &&
                           _activeTouchPointers.length >= 2) {
-                        final positions =
-                            _activeTouchPositions.values.toList();
-                        if (positions.length >= 2) {
-                          final double span =
-                              (positions[0] - positions[1]).distance;
-                          if (_twoFingerInitialSpan != null &&
-                              (span - _twoFingerInitialSpan!).abs() > 14.0) {
-                            _showZoomLockPill(
-                              scale: _lockedZoomScale ??
-                                  _zoomScaleNotifier.value,
-                            );
-                            _twoFingerInitialSpan = span;
+                        final it = _activeTouchPositions.values.iterator;
+                        if (it.moveNext()) {
+                          final Offset p0 = it.current;
+                          if (it.moveNext()) {
+                            final double span = (p0 - it.current).distance;
+                            if (_twoFingerInitialSpan != null &&
+                                (span - _twoFingerInitialSpan!).abs() > 14.0) {
+                              _showZoomLockPill(
+                                scale: _lockedZoomScale ??
+                                    _zoomScaleNotifier.value,
+                              );
+                              _twoFingerInitialSpan = span;
+                            }
                           }
                         }
                       }
@@ -5269,22 +5444,26 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         (e.kind == PointerDeviceKind.stylus ||
                             e.kind == PointerDeviceKind.invertedStylus);
                     if (useSmartVerticalPan &&
-                        allowZoomPan &&
+                        _computeAllowZoomPan(appState) &&
                         !_isOverlayDragging &&
                         _overlayTouchPointers.isEmpty &&
-                        !stylusBlocksViewport &&
+                        !_stylusBlocksViewport &&
                         !_isDrawingPointerDown &&
                         _croppingImageId == null &&
                         (isTouchPan || isStylusPan)) {
                       _panAccumDelta += e.delta;
+                      bool justActivated = false;
                       if (isTouchPan && !_stylusPanMode && !_touchPanActivated) {
-                        if (_panAccumDelta.distance < 10.0) {
+                        if (_panAccumDelta.distance < 2.5) {
                           return;
                         }
                         _touchPanActivated = true;
+                        justActivated = true;
                       }
+                      final Offset effectiveDelta =
+                          justActivated ? _panAccumDelta : e.delta;
                       if (_panAxisLock == _ScrollAxisLock.none &&
-                          _panAccumDelta.distance >= 8.0) {
+                          _panAccumDelta.distance >= 6.0) {
                         _panAxisLock =
                             _panAccumDelta.dy.abs() >= _panAccumDelta.dx.abs() * 1.2
                                 ? _ScrollAxisLock.vertical
@@ -5300,20 +5479,21 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       final bool lockHorizontal =
                           _panAxisLock == _ScrollAxisLock.vertical ||
                               (_panAxisLock == _ScrollAxisLock.none &&
-                                  e.delta.dy.abs() >= e.delta.dx.abs() * 1.2);
+                                  effectiveDelta.dy.abs() >=
+                                      effectiveDelta.dx.abs() * 1.2);
                       final double rawDx = lockHorizontal
                           ? 0.0
                           : ((appState.freePaperMovement ||
                                   scaledW > vpSize.width)
-                              ? e.delta.dx
+                              ? effectiveDelta.dx
                               : 0.0);
 
                       final int nowUs = e.timeStamp.inMicroseconds;
                       if (_lastPanEventUs > 0 && nowUs > _lastPanEventUs) {
                         final double dt =
                             ((nowUs - _lastPanEventUs) / 1e6).clamp(0.002, 0.08);
-                        _panVelocityY =
-                            _panVelocityY * 0.62 + (e.delta.dy / dt) * 0.38;
+                        _panVelocityY = _panVelocityY * 0.62 +
+                            (effectiveDelta.dy / dt) * 0.38;
                         _panVelocityX =
                             _panVelocityX * 0.62 + (rawDx / dt) * 0.38;
                       }
@@ -5325,7 +5505,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       final double t =
                           ((speedY - 450.0) / 2750.0).clamp(0.0, 1.0);
                       final double accelBoost = 1.0 + (t * t) * 2.4;
-                      final double dy = e.delta.dy * scrollMult * accelBoost;
+                      final double dy =
+                          effectiveDelta.dy * scrollMult * accelBoost;
 
                       _applySmartScrollDelta(
                         notebook,
@@ -5338,6 +5519,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     }
                   },
                   onPointerUp: (e) {
+                    if (_lassoLongPressPointer == e.pointer) {
+                      _cancelLassoLongPressTimer();
+                    }
                     if (e.kind == PointerDeviceKind.stylus ||
                         e.kind == PointerDeviceKind.invertedStylus) {
                       _overlayTouchPointers.remove(e.pointer);
@@ -5379,11 +5563,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         _resetPanTracking();
                       }
                       if (_isStylusDown || _isDrawingPointerDown) {
-                        setState(() {
-                          _isStylusDown = false;
-                          _isDrawingPointerDown = false;
-                        });
+                        _isStylusDown = false;
+                        _isDrawingPointerDown = false;
                         _syncStylusDrawingState();
+                        _bumpViewportGate();
                       }
                       return;
                     }
@@ -5407,16 +5590,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       if (_activeTouchPointers.isEmpty &&
                           !_isStylusDown &&
                           _isDrawingPointerDown) {
-                        setState(() => _isDrawingPointerDown = false);
+                        _isDrawingPointerDown = false;
                         _syncStylusDrawingState();
+                        _bumpViewportGate();
                       }
                       return;
                     }
                     if (useSmartVerticalPan && _activeTouchPointers.isEmpty) {
                       if (wasSingleTouchPan &&
-                          allowZoomPan &&
+                          _computeAllowZoomPan(appState) &&
                           !_isOverlayDragging &&
-                          !stylusBlocksViewport &&
+                          !_stylusBlocksViewport &&
                           !_isDrawingPointerDown &&
                           _croppingImageId == null &&
                           _pullAddProgressNotifier.value < 0.1 &&
@@ -5449,8 +5633,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     if (_activeTouchPointers.isEmpty &&
                         !_isStylusDown &&
                         _isDrawingPointerDown) {
-                      setState(() => _isDrawingPointerDown = false);
+                      _isDrawingPointerDown = false;
                       _syncStylusDrawingState();
+                      _bumpViewportGate();
                     }
                     _tapTouchStarts.remove(e.pointer);
                     if (_tapTouchStarts.isEmpty && _tapTouchStartTime != null) {
@@ -5475,6 +5660,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     }
                   },
                   onPointerCancel: (e) {
+                    if (_lassoLongPressPointer == e.pointer) {
+                      _cancelLassoLongPressTimer();
+                    }
                     _stopScrollFling();
                     _resetPanTracking();
                     if (e.kind == PointerDeviceKind.stylus ||
@@ -5487,15 +5675,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         _lockedWhiteboardMatrixDuringStylus = null;
                       }
                       if (_isStylusDown || _isDrawingPointerDown) {
-                        setState(() {
-                          _isStylusDown = false;
-                          _isDrawingPointerDown = false;
-                        });
+                        _isStylusDown = false;
+                        _isDrawingPointerDown = false;
                         _syncStylusDrawingState();
+                        _bumpViewportGate();
                       }
                       return;
                     }
-                    if (e.kind != PointerDeviceKind.touch) return;
+                    if (e.kind == PointerDeviceKind.mouse) return;
                     _palmRejectedPointers.remove(e.pointer);
                     _activeTouchPointers.remove(e.pointer);
                     _activeTouchPositions.remove(e.pointer);
@@ -5514,8 +5701,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     if (_activeTouchPointers.isEmpty &&
                         !_isStylusDown &&
                         _isDrawingPointerDown) {
-                      setState(() => _isDrawingPointerDown = false);
+                      _isDrawingPointerDown = false;
                       _syncStylusDrawingState();
+                      _bumpViewportGate();
                     }
                     _tapTouchStarts.remove(e.pointer);
                     if (_tapTouchStarts.isEmpty) {
@@ -5536,77 +5724,95 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         appState,
                       )
                     else if (appState.verticalContinuousScroll)
-                      InteractiveViewer(
-                        transformationController: _transformController,
-                        constrained: false,
-                        minScale: 0.35,
-                        maxScale: 4.0,
-                        panAxis: appState.freePaperMovement
-                            ? PanAxis.free
-                            : PanAxis.aligned,
-                        boundaryMargin: appState.freePaperMovement
-                            ? const EdgeInsets.all(800)
-                            : const EdgeInsets.symmetric(
-                                horizontal: 360,
-                                vertical: 120,
-                              ),
-                        panEnabled: allowZoomPan &&
-                            (!useSmartVerticalPan ||
-                                _activeTouchPointers.length >= 2),
-                        scaleEnabled: !_isZoomLocked &&
-                            !_isOverlayDragging &&
-                            !stylusBlocksViewport,
-                        onInteractionStart: (_) {
-                          _lastObservedZoomScale = _transformController.value
-                              .getMaxScaleOnAxis()
-                              .clamp(0.35, 4.0);
-                        },
-                        onInteractionUpdate: (details) {
-                          _handleInteractiveViewerUpdate(
-                            details,
-                            controller: _transformController,
-                            lockedStylusMatrix: _lockedMatrixDuringStylus,
-                            minScale: 0.35,
-                            vpSize: vpSize,
-                          );
-                          if (!_stylusPanMode &&
-                              (_isStylusDown ||
-                                  _isStylusHovering ||
-                                  _isStylusInCooldown) &&
-                              _lockedMatrixDuringStylus != null) {
-                            return;
-                          }
-                          _updatePullToAddProgress(notebook, vpSize);
-                        },
-                        onInteractionEnd: (_) =>
-                            _finishPullToAddIfReady(notebook),
+                      ValueListenableBuilder<int>(
+                        valueListenable: _viewportGateNotifier,
                         child: _buildVerticalContinuousPages(notebook),
+                        builder: (_, __, cachedPages) {
+                          final bool blocked = _stylusBlocksViewport;
+                          final bool allowPan = _computeAllowZoomPan(appState);
+                          return InteractiveViewer(
+                            transformationController: _transformController,
+                            constrained: false,
+                            minScale: 0.35,
+                            maxScale: 4.0,
+                            panAxis: appState.freePaperMovement
+                                ? PanAxis.free
+                                : PanAxis.aligned,
+                            boundaryMargin: appState.freePaperMovement
+                                ? const EdgeInsets.all(800)
+                                : const EdgeInsets.symmetric(
+                                    horizontal: 360,
+                                    vertical: 120,
+                                  ),
+                            panEnabled: allowPan &&
+                                (!useSmartVerticalPan ||
+                                    _activeTouchPointers.length >= 2),
+                            scaleEnabled: !_isZoomLocked &&
+                                !_isOverlayDragging &&
+                                !blocked,
+                            onInteractionStart: (_) {
+                              _lastObservedZoomScale = _transformController
+                                  .value
+                                  .getMaxScaleOnAxis()
+                                  .clamp(0.35, 4.0);
+                            },
+                            onInteractionUpdate: (details) {
+                              _handleInteractiveViewerUpdate(
+                                details,
+                                controller: _transformController,
+                                lockedStylusMatrix: _lockedMatrixDuringStylus,
+                                minScale: 0.35,
+                                vpSize: vpSize,
+                              );
+                              if (!_stylusPanMode &&
+                                  (_isStylusDown ||
+                                      _isStylusHovering ||
+                                      _isStylusInCooldown) &&
+                                  _lockedMatrixDuringStylus != null) {
+                                return;
+                              }
+                              _updatePullToAddProgress(notebook, vpSize);
+                            },
+                            onInteractionEnd: (_) =>
+                                _finishPullToAddIfReady(notebook),
+                            child: cachedPages!,
+                          );
+                        },
                       )
                     else
-                      InteractiveViewer(
-                        transformationController: _transformController,
-                        minScale: 0.35,
-                        maxScale: 4.0,
-                        boundaryMargin: const EdgeInsets.all(800),
-                        panEnabled: allowZoomPan,
-                        scaleEnabled: !_isZoomLocked &&
-                            !_isOverlayDragging &&
-                            !stylusBlocksViewport,
-                        onInteractionStart: (_) {
-                          _lastObservedZoomScale = _transformController.value
-                              .getMaxScaleOnAxis()
-                              .clamp(0.35, 4.0);
-                        },
-                        onInteractionUpdate: (details) {
-                          _handleInteractiveViewerUpdate(
-                            details,
-                            controller: _transformController,
-                            lockedStylusMatrix: _lockedMatrixDuringStylus,
+                      ValueListenableBuilder<int>(
+                        valueListenable: _viewportGateNotifier,
+                        child: _buildHorizontalFlipPages(notebook),
+                        builder: (_, __, cachedFlipPages) {
+                          final bool blocked = _stylusBlocksViewport;
+                          final bool allowPan = _computeAllowZoomPan(appState);
+                          return InteractiveViewer(
+                            transformationController: _transformController,
                             minScale: 0.35,
-                            vpSize: vpSize,
+                            maxScale: 4.0,
+                            boundaryMargin: const EdgeInsets.all(800),
+                            panEnabled: allowPan,
+                            scaleEnabled: !_isZoomLocked &&
+                                !_isOverlayDragging &&
+                                !blocked,
+                            onInteractionStart: (_) {
+                              _lastObservedZoomScale = _transformController
+                                  .value
+                                  .getMaxScaleOnAxis()
+                                  .clamp(0.35, 4.0);
+                            },
+                            onInteractionUpdate: (details) {
+                              _handleInteractiveViewerUpdate(
+                                details,
+                                controller: _transformController,
+                                lockedStylusMatrix: _lockedMatrixDuringStylus,
+                                minScale: 0.35,
+                                vpSize: vpSize,
+                              );
+                            },
+                            child: cachedFlipPages!,
                           );
                         },
-                        child: _buildHorizontalFlipPages(notebook),
                       ),
 
                     // Pull-down-to-add-new-page animated spring pill (vertical continuous mode)
@@ -6234,69 +6440,178 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     );
                   }(),
 
-                // Pro Lasso Floating Context Menu
-                if (_lassoController.hasSelection)
+                // Pro Lasso Floating Context Menu (selection OR long-press)
+                if (_lassoController.hasSelection ||
+                    (_activeTool == EditorTool.lasso &&
+                        _lassoLongPressMenuVisible))
                   Positioned(
                     top: 12,
                     left: 58,
                     right: 58,
                     child: Center(
-                      child: LassoFloatingMenu(
-                        selectedCount: _lassoController.selection.totalCount,
-                        hasClipboard: _lassoController.hasClipboard,
-                        onCut: () {
-                          final updated =
-                              _lassoController.cutSelection(currentPage);
-                          _commitPage(updated, undoSnapshot: currentPage);
-                        },
-                        onCopy: () {
-                          _lassoController.copySelection(currentPage);
-                        },
-                        onPaste: () {
-                          final updated = _lassoController.pasteClipboard(
-                            currentPage,
-                            idGenerator: _uuid.v4,
-                          );
-                          _commitPage(updated, undoSnapshot: currentPage);
-                        },
-                        onDuplicate: () {
-                          final updated = _lassoController.duplicateSelection(
-                            currentPage,
-                            idGenerator: _uuid.v4,
-                          );
-                          _commitPage(updated, undoSnapshot: currentPage);
-                        },
-                        onRotate: () {
-                          final updated = _lassoController.rotateSelection(
-                            currentPage,
-                            math.pi / 12,
-                          );
-                          _commitPage(updated, undoSnapshot: currentPage);
-                        },
-                        onScaleUp: () {
-                          final updated =
-                              _lassoController.scaleSelection(currentPage, 1.15);
-                          _commitPage(updated, undoSnapshot: currentPage);
-                        },
-                        onScaleDown: () {
-                          final updated =
-                              _lassoController.scaleSelection(currentPage, 0.85);
-                          _commitPage(updated, undoSnapshot: currentPage);
-                        },
-                        onRecolor: (color) {
-                          final updated = _lassoController.recolorSelection(
-                            currentPage,
-                            // ignore: deprecated_member_use
-                            color.value,
-                          );
-                          _commitPage(updated, undoSnapshot: currentPage);
-                        },
-                        onDelete: () {
-                          final updated =
-                              _lassoController.deleteSelection(currentPage);
-                          _commitPage(updated, undoSnapshot: currentPage);
-                        },
-                        onClear: _lassoController.clear,
+                      child: Listener(
+                        onPointerDown: (e) =>
+                            _overlayTouchPointers.add(e.pointer),
+                        onPointerUp: (e) =>
+                            _overlayTouchPointers.remove(e.pointer),
+                        onPointerCancel: (e) =>
+                            _overlayTouchPointers.remove(e.pointer),
+                        child: Builder(
+                          builder: (_) {
+                            final NotePage activeSelectionPage =
+                                (_lassoController.activePageId != null
+                                        ? notebook.pages
+                                            .where(
+                                              (p) =>
+                                                  p.id ==
+                                                  _lassoController
+                                                      .activePageId,
+                                            )
+                                            .firstOrNull
+                                        : null) ??
+                                    currentPage;
+                            final NotePage pasteTargetPage =
+                                (_lassoLongPressPageId != null
+                                        ? notebook.pages
+                                            .where(
+                                              (p) =>
+                                                  p.id == _lassoLongPressPageId,
+                                            )
+                                            .firstOrNull
+                                        : null) ??
+                                    currentPage;
+                            return LassoFloatingMenu(
+                              selectedCount:
+                                  _lassoController.selection.totalCount,
+                              hasClipboard: _lassoController.hasClipboard,
+                              onCut: () {
+                                final updated = _lassoController
+                                    .cutSelection(activeSelectionPage);
+                                _commitPage(
+                                  updated,
+                                  undoSnapshot: activeSelectionPage,
+                                );
+                              },
+                              onCopy: () {
+                                _lassoController
+                                    .copySelection(activeSelectionPage);
+                              },
+                              onPaste: () {
+                                final Offset? targetCenter =
+                                    _lassoLongPressPageId == pasteTargetPage.id
+                                        ? _lassoLongPressPagePos
+                                        : null;
+                                final updated = _lassoController.pasteClipboard(
+                                  pasteTargetPage,
+                                  idGenerator: _uuid.v4,
+                                  targetCenter: targetCenter,
+                                );
+                                _commitPage(
+                                  updated,
+                                  undoSnapshot: pasteTargetPage,
+                                );
+                                setState(() {
+                                  _lassoLongPressMenuVisible = false;
+                                  _lassoLongPressPagePos = null;
+                                  _lassoLongPressPageId = null;
+                                });
+                              },
+                              onSelectAll: () {
+                                _lassoController.selectAll(pasteTargetPage);
+                              },
+                              onDuplicate: () {
+                                final updated =
+                                    _lassoController.duplicateSelection(
+                                  activeSelectionPage,
+                                  idGenerator: _uuid.v4,
+                                );
+                                _commitPage(
+                                  updated,
+                                  undoSnapshot: activeSelectionPage,
+                                );
+                              },
+                              onRotate: () {
+                                final updated = _lassoController.rotateSelection(
+                                  activeSelectionPage,
+                                  math.pi / 12,
+                                );
+                                _commitPage(
+                                  updated,
+                                  undoSnapshot: activeSelectionPage,
+                                );
+                              },
+                              onScaleUp: () {
+                                final updated = _lassoController.scaleSelection(
+                                  activeSelectionPage,
+                                  1.15,
+                                );
+                                _commitPage(
+                                  updated,
+                                  undoSnapshot: activeSelectionPage,
+                                );
+                              },
+                              onScaleDown: () {
+                                final updated = _lassoController.scaleSelection(
+                                  activeSelectionPage,
+                                  0.85,
+                                );
+                                _commitPage(
+                                  updated,
+                                  undoSnapshot: activeSelectionPage,
+                                );
+                              },
+                              onScaleBy: (factor) {
+                                final updated = _lassoController.scaleSelection(
+                                  activeSelectionPage,
+                                  factor,
+                                );
+                                _commitPage(
+                                  updated,
+                                  undoSnapshot: activeSelectionPage,
+                                );
+                              },
+                              onSetStrokeWidth: (width) {
+                                final updated = _lassoController
+                                    .setSelectionStrokeWidth(
+                                  activeSelectionPage,
+                                  width,
+                                );
+                                _commitPage(
+                                  updated,
+                                  undoSnapshot: activeSelectionPage,
+                                );
+                              },
+                              onRecolor: (color) {
+                                final updated =
+                                    _lassoController.recolorSelection(
+                                  activeSelectionPage,
+                                  // ignore: deprecated_member_use
+                                  color.value,
+                                );
+                                _commitPage(
+                                  updated,
+                                  undoSnapshot: activeSelectionPage,
+                                );
+                              },
+                              onDelete: () {
+                                final updated = _lassoController
+                                    .deleteSelection(activeSelectionPage);
+                                _commitPage(
+                                  updated,
+                                  undoSnapshot: activeSelectionPage,
+                                );
+                              },
+                              onClear: () {
+                                _lassoController.clear();
+                                setState(() {
+                                  _lassoLongPressMenuVisible = false;
+                                  _lassoLongPressPagePos = null;
+                                  _lassoLongPressPageId = null;
+                                });
+                              },
+                            );
+                          },
+                        ),
                       ),
                     ),
                   ),
@@ -6378,18 +6693,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     int pageIndex,
     AppState appState,
   ) {
-    final bool stylusBlocksViewport = !_stylusPanMode &&
-        (_isStylusDown || _isStylusHovering || _isStylusInCooldown);
-    final bool allowWhiteboardPanZoom = !_isOverlayDragging &&
-        (_stylusPanMode ||
-            (!stylusBlocksViewport &&
-                (_pointerDownPositions.length >= 2 ||
-                    _activeTouchPointers.length >= 2 ||
-                    appState.readOnlyMode ||
-                    (!_isDrawingPointerDown &&
-                        (appState.palmRejectionEnabled ||
-                            _activeTool == EditorTool.panZoom)))));
-
     return LayoutBuilder(
       builder: (ctx, constraints) {
         final viewportSize = Size(constraints.maxWidth, constraints.maxHeight);
@@ -6402,31 +6705,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
 
         return Stack(
           children: [
-            InteractiveViewer(
-              transformationController: _whiteboardTransformController,
-              constrained: false,
-              minScale: 0.25,
-              maxScale: 4.0,
-              boundaryMargin: const EdgeInsets.all(800),
-              panEnabled: allowWhiteboardPanZoom,
-              scaleEnabled: !_isZoomLocked &&
-                  !_isOverlayDragging &&
-                  !stylusBlocksViewport,
-              onInteractionStart: (_) {
-                _lastObservedZoomScale = _whiteboardTransformController.value
-                    .getMaxScaleOnAxis()
-                    .clamp(0.25, 4.0);
-              },
-              onInteractionUpdate: (details) {
-                _handleInteractiveViewerUpdate(
-                  details,
-                  controller: _whiteboardTransformController,
-                  lockedStylusMatrix: _lockedWhiteboardMatrixDuringStylus,
-                  minScale: 0.25,
-                  vpSize: viewportSize,
-                  isWhiteboard: true,
-                );
-              },
+            ValueListenableBuilder<int>(
+              valueListenable: _viewportGateNotifier,
               child: _buildSinglePageCanvas(
                 notebook,
                 page.isInfiniteWhiteboard
@@ -6434,6 +6714,45 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     : page.copyWith(isInfiniteWhiteboard: true),
                 pageIndex,
               ),
+              builder: (_, __, cachedCanvas) {
+                final bool blocked = _stylusBlocksViewport;
+                final bool allowWhiteboardPanZoom = !_isOverlayDragging &&
+                    (_stylusPanMode ||
+                        (!blocked &&
+                            (_pointerDownPositions.length >= 2 ||
+                                _activeTouchPointers.length >= 2 ||
+                                appState.readOnlyMode ||
+                                (!_isDrawingPointerDown &&
+                                    (appState.palmRejectionEnabled ||
+                                        _activeTool == EditorTool.panZoom)))));
+                return InteractiveViewer(
+                  transformationController: _whiteboardTransformController,
+                  constrained: false,
+                  minScale: 0.25,
+                  maxScale: 4.0,
+                  boundaryMargin: const EdgeInsets.all(800),
+                  panEnabled: allowWhiteboardPanZoom,
+                  scaleEnabled:
+                      !_isZoomLocked && !_isOverlayDragging && !blocked,
+                  onInteractionStart: (_) {
+                    _lastObservedZoomScale = _whiteboardTransformController
+                        .value
+                        .getMaxScaleOnAxis()
+                        .clamp(0.25, 4.0);
+                  },
+                  onInteractionUpdate: (details) {
+                    _handleInteractiveViewerUpdate(
+                      details,
+                      controller: _whiteboardTransformController,
+                      lockedStylusMatrix: _lockedWhiteboardMatrixDuringStylus,
+                      minScale: 0.25,
+                      vpSize: viewportSize,
+                      isWhiteboard: true,
+                    );
+                  },
+                  child: cachedCanvas!,
+                );
+              },
             ),
             // Floating bottom-right Về tâm (Center) + Zoom % pill
             Positioned(
