@@ -1073,6 +1073,9 @@ void main() {
         createdAt: tNew,
         updatedAt: tNew,
         lastOpenedAt: tNew,
+        pages: [
+          NotePage(id: 'p-first', index: 0, updatedAt: tNew),
+        ],
       );
       final nbSecond = Notebook(
         id: 'nb-second',
