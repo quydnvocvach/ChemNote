@@ -19,6 +19,7 @@ class CreateNotebookResult {
   final bool isWhiteboard;
   final String? customCoverImagePath;
   final bool useFirstPageAsCover;
+  final bool allowAutoRandomCover;
 
   const CreateNotebookResult({
     required this.title,
@@ -30,6 +31,7 @@ class CreateNotebookResult {
     this.isWhiteboard = false,
     this.customCoverImagePath,
     this.useFirstPageAsCover = false,
+    this.allowAutoRandomCover = false,
   });
 }
 
@@ -65,6 +67,15 @@ class _CreateNotebookDialogState extends State<CreateNotebookDialog> {
     'HỌA TIẾT',
     'CỔ ĐIỂN',
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    final appState = context.read<AppState>();
+    if (appState.randomCoverEnabled && appState.randomCoverPaths.isNotEmpty) {
+      _customCoverImagePath = appState.pickRandomCoverPath();
+    }
+  }
 
   @override
   void dispose() {
@@ -107,6 +118,7 @@ class _CreateNotebookDialogState extends State<CreateNotebookDialog> {
         isWhiteboard: _isWhiteboard,
         customCoverImagePath: _useFirstPageAsCover ? null : _customCoverImagePath,
         useFirstPageAsCover: _useFirstPageAsCover,
+        allowAutoRandomCover: false,
       ),
     );
   }
@@ -186,6 +198,21 @@ class _CreateNotebookDialogState extends State<CreateNotebookDialog> {
                     onTap: () => setState(() => _mode = _CreatorMode.cover),
                     child: _buildCoverPreview(),
                   ),
+                  if (appState.randomCoverPaths.length > 1) ...[
+                    const SizedBox(width: 10),
+                    IconButton.filledTonal(
+                      tooltip: 'Bốc ảnh bìa ngẫu nhiên khác',
+                      onPressed: () {
+                        final picked = appState.pickRandomCoverPath(force: true);
+                        if (picked == null) return;
+                        setState(() {
+                          _customCoverImagePath = picked;
+                          _useFirstPageAsCover = false;
+                        });
+                      },
+                      icon: const Icon(Icons.shuffle_rounded, size: 18),
+                    ),
+                  ],
                   const SizedBox(width: 24),
                   _PreviewCard(
                     label: _isWhiteboard ? 'Nền vô cực' : 'Mẫu giấy',

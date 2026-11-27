@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -57,6 +58,12 @@ class AppState extends ChangeNotifier {
 
   // Danh sách ảnh bìa cá nhân do người dùng thêm trong "TÙY CHỈNH"
   List<String> _customCoverPaths = [];
+
+  // Kho ảnh bìa ngẫu nhiên trong Cài đặt ứng dụng (tự bốc random khi tạo ghi chú mới)
+  List<String> _randomCoverPaths = [];
+  bool _randomCoverEnabled = true;
+  String? _lastRandomCoverPicked;
+  final math.Random _random = math.Random();
 
   // Danh sách đường dẫn ảnh chèn gần đây ("Ảnh gần đây" trong Image Popover)
   List<String> _recentImagePaths = [];
@@ -164,6 +171,8 @@ class AppState extends ChangeNotifier {
   bool get showFavoritesBar => _showFavoritesBar;
   List<String> get customStickers => List.unmodifiable(_customStickers);
   List<String> get customCoverPaths => List.unmodifiable(_customCoverPaths);
+  List<String> get randomCoverPaths => List.unmodifiable(_randomCoverPaths);
+  bool get randomCoverEnabled => _randomCoverEnabled;
   List<String> get recentImagePaths => List.unmodifiable(_recentImagePaths);
   String? get pdfExportDirectory => _pdfExportDirectory;
   String? get defaultImportDirectory => _defaultImportDirectory;
@@ -337,6 +346,7 @@ class AppState extends ChangeNotifier {
         'idleSyncDays': _idleSyncDays,
         'wifiOnlySync': _wifiOnlySync,
         'autoExportPdfOnSync': _autoExportPdfOnSync,
+        'randomCoverEnabled': _randomCoverEnabled,
       }),
     );
   }
@@ -619,6 +629,68 @@ class AppState extends ChangeNotifier {
     unawaited(_storage.saveCustomCovers(_customCoverPaths));
   }
 
+  void setRandomCoverEnabled(bool value) {
+    if (_randomCoverEnabled == value) return;
+    _randomCoverEnabled = value;
+    _bumpLibraryRevision();
+    notifyListeners();
+    _persistPrefsMap();
+  }
+
+  void addRandomCoverPaths(Iterable<String> paths) {
+    final cleaned = <String>[];
+    for (final raw in paths) {
+      final trimmed = raw.trim();
+      if (trimmed.isNotEmpty && !cleaned.contains(trimmed)) {
+        cleaned.add(trimmed);
+      }
+    }
+    if (cleaned.isEmpty) return;
+    final incomingSet = cleaned.toSet();
+    _randomCoverPaths = [
+      ...cleaned,
+      ..._randomCoverPaths.where((p) => !incomingSet.contains(p)),
+    ];
+    _bumpLibraryRevision();
+    notifyListeners();
+    unawaited(_storage.saveRandomCovers(_randomCoverPaths));
+  }
+
+  void removeRandomCoverPath(String path) {
+    if (!_randomCoverPaths.contains(path)) return;
+    _randomCoverPaths = _randomCoverPaths.where((p) => p != path).toList();
+    if (_lastRandomCoverPicked == path) {
+      _lastRandomCoverPicked = null;
+    }
+    _bumpLibraryRevision();
+    notifyListeners();
+    unawaited(_storage.saveRandomCovers(_randomCoverPaths));
+  }
+
+  void clearRandomCoverPaths() {
+    if (_randomCoverPaths.isEmpty) return;
+    _randomCoverPaths = [];
+    _lastRandomCoverPicked = null;
+    _bumpLibraryRevision();
+    notifyListeners();
+    unawaited(_storage.saveRandomCovers(_randomCoverPaths));
+  }
+
+  /// Chọn ngẫu nhiên 1 ảnh bìa trong kho, ưu tiên không lặp lại ngay ảnh vừa chọn trước đó.
+  String? pickRandomCoverPath({bool force = false}) {
+    if (!force && !_randomCoverEnabled) return null;
+    final pool =
+        _randomCoverPaths.where((p) => p.trim().isNotEmpty).toList();
+    if (pool.isEmpty) return null;
+    final candidates = pool.length > 1 && _lastRandomCoverPicked != null
+        ? pool.where((p) => p != _lastRandomCoverPicked).toList()
+        : pool;
+    final activePool = candidates.isNotEmpty ? candidates : pool;
+    final chosen = activePool[_random.nextInt(activePool.length)];
+    _lastRandomCoverPicked = chosen;
+    return chosen;
+  }
+
   Future<void> loadAll() async {
     _isLoading = true;
     _bumpLibraryRevision();
@@ -633,6 +705,7 @@ class AppState extends ChangeNotifier {
         _storage.loadPdfExportDirectory(),
         _storage.loadPenPrefs(),
         _storage.loadImportDirectory(),
+        _storage.loadRandomCovers(),
       ]);
       _folders = results[0] as List<Folder>;
       _notebooks = results[1] as List<Notebook>;
@@ -642,6 +715,7 @@ class AppState extends ChangeNotifier {
       _customCoverPaths = results[4] as List<String>;
       _pdfExportDirectory = results[5] as String?;
       _defaultImportDirectory = results[7] as String?;
+      _randomCoverPaths = results[8] as List<String>;
       final penPrefs = results[6] as Map<String, dynamic>;
       if (penPrefs.isNotEmpty) {
         _lastPenTool = toolTypeFromJson(penPrefs['lastPenTool']);
@@ -684,6 +758,8 @@ class AppState extends ChangeNotifier {
         _wifiOnlySync = penPrefs['wifiOnlySync'] as bool? ?? _wifiOnlySync;
         _autoExportPdfOnSync =
             penPrefs['autoExportPdfOnSync'] as bool? ?? _autoExportPdfOnSync;
+        _randomCoverEnabled =
+            penPrefs['randomCoverEnabled'] as bool? ?? _randomCoverEnabled;
       }
     } finally {
       _isLoading = false;
@@ -862,9 +938,16 @@ class AppState extends ChangeNotifier {
     bool isWhiteboard = false,
     String? customCoverImagePath,
     bool useFirstPageAsCover = false,
+    bool autoRandomCover = true,
     List<NotePage>? initialPages,
   }) async {
     final now = DateTime.now();
+    final String? resolvedCustomCover = (customCoverImagePath != null &&
+            customCoverImagePath.trim().isNotEmpty)
+        ? customCoverImagePath.trim()
+        : (!useFirstPageAsCover && autoRandomCover
+            ? pickRandomCoverPath()
+            : null);
     final pages = initialPages ??
         [
           NotePage(
@@ -888,7 +971,7 @@ class AppState extends ChangeNotifier {
       defaultPaperColor: defaultPaperColor,
       defaultOrientationLandscape: defaultOrientationLandscape,
       isWhiteboard: isWhiteboard,
-      customCoverImagePath: customCoverImagePath,
+      customCoverImagePath: resolvedCustomCover,
       useFirstPageAsCover: useFirstPageAsCover,
       pages: pages,
       createdAt: now,

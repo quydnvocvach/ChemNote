@@ -558,6 +558,159 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     },
                   ),
                   const Divider(height: 1),
+                  // Kho ảnh bìa ngẫu nhiên khi tạo ghi chú mới
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.collections_bookmark_outlined, size: 22),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      const Flexible(
+                                        child: Text(
+                                          'Kho ảnh bìa ngẫu nhiên',
+                                          style: TextStyle(fontSize: 15),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 7,
+                                          vertical: 2,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: AppTheme.accentBlue.withAlpha(34),
+                                          borderRadius: BorderRadius.circular(10),
+                                        ),
+                                        child: Text(
+                                          '${state.randomCoverPaths.length} ảnh',
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                            color: AppTheme.accentBlue,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 2),
+                                  const Text(
+                                    'Tự chọn ngẫu nhiên 1 ảnh trong kho khi tạo ghi chú mới',
+                                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Switch(
+                              value: state.randomCoverEnabled,
+                              onChanged: state.setRandomCoverEnabled,
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            FilledButton.tonalIcon(
+                              onPressed: () async {
+                                try {
+                                  final picked = await ImagePicker().pickMultiImage();
+                                  if (picked.isEmpty || !ctx.mounted) return;
+                                  final savedPaths = <String>[];
+                                  for (final img in picked) {
+                                    final saved = await state.storage.saveImportedFile(
+                                      File(img.path),
+                                      subfolder: 'covers',
+                                    );
+                                    savedPaths.add(saved);
+                                  }
+                                  state.addRandomCoverPaths(savedPaths);
+                                } catch (_) {}
+                              },
+                              icon: const Icon(Icons.add_photo_alternate_outlined, size: 18),
+                              label: const Text('Thêm nhiều ảnh'),
+                            ),
+                            const Spacer(),
+                            if (state.randomCoverPaths.isNotEmpty)
+                              TextButton.icon(
+                                onPressed: state.clearRandomCoverPaths,
+                                icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+                                label: const Text('Xóa hết'),
+                              ),
+                          ],
+                        ),
+                        if (state.randomCoverPaths.isNotEmpty) ...[
+                          const SizedBox(height: 10),
+                          GridView.builder(
+                            shrinkWrap: true,
+                            physics: const NeverScrollableScrollPhysics(),
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 4,
+                              mainAxisSpacing: 8,
+                              crossAxisSpacing: 8,
+                              childAspectRatio: 0.75,
+                            ),
+                            itemCount: state.randomCoverPaths.length,
+                            itemBuilder: (_, idx) {
+                              final path = state.randomCoverPaths[idx];
+                              return Stack(
+                                fit: StackFit.expand,
+                                children: [
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(10),
+                                    child: Image.file(
+                                      File(path),
+                                      fit: BoxFit.cover,
+                                      cacheWidth: 200,
+                                      filterQuality: FilterQuality.medium,
+                                      gaplessPlayback: true,
+                                      errorBuilder: (_, __, ___) => const ColoredBox(
+                                        color: Color(0xFF22252E),
+                                        child: Icon(
+                                          Icons.broken_image_outlined,
+                                          size: 20,
+                                          color: Colors.white54,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  Positioned(
+                                    top: 4,
+                                    right: 4,
+                                    child: GestureDetector(
+                                      onTap: () => state.removeRandomCoverPath(path),
+                                      child: Container(
+                                        width: 20,
+                                        height: 20,
+                                        decoration: BoxDecoration(
+                                          color: Colors.black.withAlpha(180),
+                                          shape: BoxShape.circle,
+                                        ),
+                                        child: const Icon(
+                                          Icons.close_rounded,
+                                          size: 13,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              );
+                            },
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 1),
                   ListTile(
                     contentPadding: const EdgeInsets.symmetric(horizontal: 4),
                     leading: checkingUpdate
@@ -1517,6 +1670,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       isWhiteboard: result.isWhiteboard,
       customCoverImagePath: result.customCoverImagePath,
       useFirstPageAsCover: result.useFirstPageAsCover,
+      autoRandomCover: result.allowAutoRandomCover,
     );
     if (!context.mounted) return;
     await _openNotebook(context, notebook);

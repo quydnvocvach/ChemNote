@@ -8,6 +8,7 @@ import 'package:chemnote/core/models/note_page.dart';
 import 'package:chemnote/core/models/notebook.dart';
 import 'package:chemnote/core/providers/app_state.dart';
 import 'package:chemnote/core/storage/local_storage_service.dart';
+import 'package:chemnote/features/calculator/casio_math_engine.dart';
 import 'package:chemnote/features/canvas/canvas_painter.dart';
 import 'package:chemnote/features/canvas/image_transform_utils.dart';
 import 'package:chemnote/features/canvas/lasso_controller.dart';
@@ -1126,6 +1127,126 @@ void main() {
       expect(appState.hasPendingEditedSaves, isFalse);
       expect(appState.hasPendingSaves, isFalse);
       expect(syncCalls, 1);
+    });
+  });
+
+  group('Casio fx-880BTG engine & Random cover pool', () {
+    test('MathDocument AST builds stacked fraction, power & supports 4-way nav + eval', () {
+      final doc = MathDocument();
+      // Build x^2 / (0.1 - x) = 1.8 * 10^-5 via AST operations
+      doc.insertChar('x', evalText: 'x');
+      doc.insertPowerWith('2');
+      doc.insertFraction(); // wraps x^2 into numerator and puts cursor at den[0]
+      doc.insertChar('0');
+      doc.insertChar('.');
+      doc.insertChar('1');
+      doc.insertChar('−', evalText: '-');
+      doc.insertChar('x', evalText: 'x');
+      doc.moveRight(); // exit fraction onto baseline
+      doc.insertChar('=');
+      doc.insertChar('1');
+      doc.insertChar('.');
+      doc.insertChar('8');
+      doc.insertPow10();
+      doc.insertChar('−', evalText: '-');
+      doc.insertChar('5');
+
+      expect(doc.hasEquals, isTrue);
+      final res = CasioSolvers.solveArbitraryEquation(
+        doc.toEvalString(),
+        initialGuess: 0.001,
+      );
+      expect(res.hasRoots, isTrue);
+      expect(res.roots.first, closeTo(0.00133267, 1e-6));
+
+      // Move back into denominator with moveLeft/moveUp and edit
+      doc.moveUp(); // no-op at root baseline
+      doc.setCursor(doc.rootRow.id, 1);
+      doc.moveLeft(); // enters frac den at end
+      doc.backspace(); // removes 'x' in den
+      doc.insertChar('x', evalText: 'x');
+      expect(doc.toEvalString(), contains('0.1-x'));
+    });
+
+    test('CasioSolvers solves arbitrary equations, 2/3/4-var systems, and polynomials', () {
+      final quadEq = CasioSolvers.solveArbitraryEquation(
+        '6x - 8x^2 = 0',
+        initialGuess: 1.0,
+      );
+      expect(quadEq.hasRoots, isTrue);
+      expect(quadEq.roots.first, closeTo(0.75, 1e-6));
+
+      final sys3 = CasioSolvers.solveLinearSystem([
+        [1, 1, 1, 6],
+        [2, -1, 1, 3],
+        [1, 2, -1, 2],
+      ]);
+      expect(sys3.status, LinearSystemStatus.unique);
+      expect(sys3.values[0], closeTo(1.0, 1e-9));
+      expect(sys3.values[1], closeTo(2.0, 1e-9));
+      expect(sys3.values[2], closeTo(3.0, 1e-9));
+
+      final poly3 = CasioSolvers.solveCubic(1, -6, 11, -6);
+      expect(poly3.realRoots.length, 3);
+      final sorted = [...poly3.realRoots]..sort();
+      expect(sorted[0], closeTo(1.0, 1e-6));
+      expect(sorted[1], closeTo(2.0, 1e-6));
+      expect(sorted[2], closeTo(3.0, 1e-6));
+    });
+
+    test('CasioFormatter formats FRAC and concise 5-sig-fig SCI cleanly', () {
+      final frac = CasioFormatter.toFraction(0.75);
+      expect(frac, isNotNull);
+      expect(frac!.num, 3);
+      expect(frac.den, 4);
+
+      final sci = CasioFormatter.formatScientificParts(0.00133267);
+      expect(sci.mantissa, '1.3327');
+      expect(sci.exponent, -3);
+    });
+
+    test('AppState random cover pool persists, draws non-repeating random covers & respects toggle', () async {
+      final tempDir = Directory.systemTemp.createTempSync('chemnote_random_cover_');
+      addTearDown(() {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final storage = LocalStorageService(baseDirectory: tempDir);
+      final appState = AppState(storage: storage);
+      addTearDown(appState.dispose);
+      await appState.loadAll();
+
+      appState.addRandomCoverPaths([
+        '/tmp/cover_a.png',
+        '/tmp/cover_b.png',
+        '/tmp/cover_c.png',
+      ]);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      final reloaded = AppState(storage: storage);
+      addTearDown(reloaded.dispose);
+      await reloaded.loadAll();
+      expect(reloaded.randomCoverPaths.length, 3);
+      expect(reloaded.randomCoverEnabled, isTrue);
+
+      final nb1 = await reloaded.createNotebook(title: 'Auto Cover 1');
+      final nb2 = await reloaded.createNotebook(title: 'Auto Cover 2');
+      expect(nb1.customCoverImagePath, isNotNull);
+      expect(nb2.customCoverImagePath, isNotNull);
+      // Pool has 3 covers, so consecutive random draws must never repeat
+      expect(nb1.customCoverImagePath, isNot(equals(nb2.customCoverImagePath)));
+
+      // Explicit cover overrides random pool
+      final manualNb = await reloaded.createNotebook(
+        title: 'Manual Cover',
+        customCoverImagePath: '/tmp/explicit_cover.png',
+      );
+      expect(manualNb.customCoverImagePath, '/tmp/explicit_cover.png');
+
+      // Disabling random cover pool stops auto assignment
+      reloaded.setRandomCoverEnabled(false);
+      final disabledNb = await reloaded.createNotebook(title: 'No Random');
+      expect(disabledNb.customCoverImagePath, isNull);
     });
   });
 }

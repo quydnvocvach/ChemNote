@@ -103,6 +103,11 @@ class LocalStorageService {
     return File('${root.path}${Platform.pathSeparator}custom_covers.json');
   }
 
+  Future<File> _getRandomCoversFile() async {
+    final root = await getRootDirectory();
+    return File('${root.path}${Platform.pathSeparator}random_covers.json');
+  }
+
   Future<File> _getPdfExportDirFile() async {
     final root = await getRootDirectory();
     return File('${root.path}${Platform.pathSeparator}pdf_export_dir.txt');
@@ -207,6 +212,28 @@ class LocalStorageService {
   Future<void> saveCustomCovers(List<String> coverPaths) async {
     try {
       final file = await _getCustomCoversFile();
+      await _atomicWriteString(file, jsonEncode(coverPaths), flush: true);
+    } catch (_) {
+      // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
+    }
+  }
+
+  Future<List<String>> loadRandomCovers() async {
+    try {
+      final file = await _getRandomCoversFile();
+      if (!await file.exists()) return [];
+      final raw = await file.readAsString();
+      if (raw.trim().isEmpty) return [];
+      final decoded = jsonDecode(raw) as List<dynamic>;
+      return decoded.whereType<String>().toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> saveRandomCovers(List<String> coverPaths) async {
+    try {
+      final file = await _getRandomCoversFile();
       await _atomicWriteString(file, jsonEncode(coverPaths), flush: true);
     } catch (_) {
       // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.

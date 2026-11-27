@@ -160,22 +160,22 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.8.5 with APK
+      - name: Publish Release v3.8.6 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.8.5
-          name: ChemNote Pro v3.8.5 (Zoom ảnh giữ tâm kiểu Huawei, nút cắt/zoom nhạy 0ms, dán ảnh nhấn giữ & mở/đóng ghi chú mượt)
+          tag_name: v3.8.6
+          name: ChemNote Pro v3.8.6 (Máy tính Casio fx-880BTG nổi MathIO, Kho ảnh bìa ngẫu nhiên & làm gọn thanh công cụ)
           body: |
-            ### ChemNote Pro v3.8.5
-            - **Zoom ảnh giữ tâm cố định & nút kéo siêu nhạy kiểu Huawei Notes:**
-              - Kéo 4 nút góc ảnh phóng to/thu nhỏ đồng tâm đều ra 4 phía, giữ nguyên vị trí tâm ảnh theo đúng tỷ lệ góc nhìn 1:1.
-              - Thu gọn kích thước nút vuông cắt/resize xuống `10×10px` tinh tế nhưng giữ vùng chạm tàng hình `56–60px` và chuyển sang `Listener` trực tiếp (**0px delay, không qua `GestureDetector` slop**), loại bỏ `setState` toàn màn hình khi kéo.
-            - **Sao chép & nhấn giữ để dán ảnh:**
-              - Nhấn **Sao chép** (hoặc **Cắt**) lưu ảnh vào clipboard thay vì nhân bản ngay lên ảnh gốc.
-              - Nhấn giữ trên trang bằng bút hoặc ngón tay để bật thanh nổi **Dán** ngay tại vị trí vừa chạm, dán bản sao với hỗ trợ Undo/Redo đầy đủ.
-              - Căn giữa thanh điều khiển cắt **Xong | Đặt lại | Hủy** và thanh tác vụ ảnh thẳng hàng theo tâm ảnh.
-            - **Khử khựng triệt để khi mở & đóng ghi chú:**
-              - Dùng chuyển cảnh mở/đóng trình soạn thảo nhẹ (`AppTheme.buildEditorRoute`), đồng bộ giải phóng trang lân cận sau khi kết thúc animation, không ép flush/sync đĩa với sổ chưa chỉnh sửa khi đóng, và vẽ giấy chấm bi / Bảng vô cực qua `drawRawPoints` + clip-culling GPU.
+            ### ChemNote Pro v3.8.6
+            - **Máy tính Casio fx-880BTG nổi ngay trong trình ghi chú:**
+              - Kích thước mặc định ~1/5 màn ngang (tùy chọn chuyển nhanh 1/6 ↔ 1/5 ↔ 1/4 màn hình), kéo di chuyển tự do hoặc thu gọn thành viên nhỏ, không vẽ nhầm nét bút hay cuộn trang khi bấm.
+              - Hiển thị Toán học Tự nhiên (MathIO: phân số xếp dọc, số mũ, căn thức SVG) với khả năng **chạm bút trực tiếp vào bất kì vị trí nào trên LCD** để đặt con trỏ sửa nhanh và cụm phím điều hướng 4 hướng `▲ ▼ ◀ ▶ + OK`.
+              - Hỗ trợ Tính thường, **`SHIFT + SOLVE`** giải phương trình ẩn `x` bất kì ngay trên màn hình tính chính, **Giải hệ PT 2 / 3 / 4 ẩn**, **Đa thức bậc 2 / 3**, và phím **`S⇔D`** xoay vòng `Thập phân (DEC) ↔ Phân số (FRAC) ↔ Chữ số khoa học (SCI)`.
+            - **Kho ảnh bìa ngẫu nhiên (Cài đặt ChemNote):**
+              - Cho phép thêm nhiều ảnh vào kho ảnh bìa riêng trong Cài đặt Thư viện; khi tạo ghi chú mới (tạo sổ, tạo nhanh, bảng vô cực, nhập PDF/Word/Ảnh) app tự bốc ngẫu nhiên 1 ảnh trong kho (hạn chế lặp lại bìa vừa bốc).
+            - **Làm gọn thanh công cụ & cập nhật icon Lasso:**
+              - Đổi icon công cụ Lasso sang vòng tròn nét đứt gọn gàng.
+              - Rút **Viết cận cảnh (Zoom to)** và **Nhập văn bản (Text)** vào menu cài đặt 3 chấm (`⋯`) để thanh công cụ thoáng hơn.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

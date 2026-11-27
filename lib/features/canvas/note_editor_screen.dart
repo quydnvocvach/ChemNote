@@ -20,6 +20,7 @@ import '../../core/services/app_updater_service.dart';
 import '../../core/services/hardware_service.dart';
 import '../chemistry/chemistry_hub_sheet.dart';
 import '../chemistry/widgets/stencil_picker_sheet.dart';
+import '../calculator/casio_880_overlay.dart';
 import '../library/search_screen.dart';
 import '../pdf/page_image_export_service.dart';
 import '../pdf/pdf_export_service.dart';
@@ -253,6 +254,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   Rect _zoomFocusRect = const Rect.fromLTWH(80, 140, 260, 110);
   bool _rulerVisible = false;
   final RulerState _rulerState = RulerState();
+  bool _calculatorVisible = false;
 
   // Gesture tracking (top-level 2-finger Undo / 3-finger Redo)
   final Map<int, Offset> _pointerDownPositions = {};
@@ -5789,6 +5791,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
             _toggleAudioRecording(currentPage);
           }
         },
+        zoomWindowEnabled: _zoomWindowEnabled,
+        onToggleZoomWindow: (val) => setState(() => _zoomWindowEnabled = val),
+        textBoxActive: _activeTool == EditorTool.textBox,
+        onToggleTextBox: () {
+          _commitActiveTextEdit();
+          setState(() {
+            _activeTool = _activeTool == EditorTool.textBox
+                ? _lastPenTool
+                : EditorTool.textBox;
+          });
+        },
       ),
       body: RepaintBoundary(
         child: Column(
@@ -5826,6 +5839,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
             canRedo: _redoStackFor(notebook.id).isNotEmpty,
             zoomWindowEnabled: _zoomWindowEnabled,
             rulerVisible: _rulerVisible,
+            calculatorVisible: _calculatorVisible,
             palmRejectionEnabled: appState.palmRejectionEnabled,
             stylusPanMode: _stylusPanMode,
             isRecordingAudio: _isRecordingAudio,
@@ -5978,6 +5992,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
             onAddStickyNote: () => _addStickyNote(currentPage),
             onToggleZoomWindow: () =>
                 setState(() => _zoomWindowEnabled = !_zoomWindowEnabled),
+            onToggleCalculator: () =>
+                setState(() => _calculatorVisible = !_calculatorVisible),
             onToggleRuler: () => setState(() {
               _rulerVisible = !_rulerVisible;
               if (_rulerVisible &&
@@ -6867,6 +6883,58 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                             setState(() => _isOverlayDragging = false),
                       ),
 
+                    // Floating Text Box active pill (since Text Box toggle was moved to 3-dot settings)
+                    if (_activeTool == EditorTool.textBox)
+                      Positioned(
+                        top: 10,
+                        left: 0,
+                        right: 0,
+                        child: Center(
+                          child: Material(
+                            elevation: 6,
+                            borderRadius: BorderRadius.circular(20),
+                            color: EditorColors.obsidianSurface.withAlpha(235),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 5),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.text_fields_rounded,
+                                    size: 15,
+                                    color: EditorColors.activeBlue,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  const Text(
+                                    'Đang bật Nhập văn bản (Chạm trang để gõ chữ)',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  GestureDetector(
+                                    onTap: () {
+                                      _commitActiveTextEdit();
+                                      setState(
+                                        () => _activeTool = _lastPenTool,
+                                      );
+                                    },
+                                    child: const Icon(
+                                      Icons.close_rounded,
+                                      size: 17,
+                                      color: Colors.white70,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+
                     // Floating Study Tape close pill
                     if (_activeTool == EditorTool.studyTape)
                       Positioned(
@@ -7722,6 +7790,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                           ),
                         ),
                       ),
+                      // Floating Casio fx-880BTG Calculator (1/6 - 1/4 screen landscape, pointer-owned)
+                      if (_calculatorVisible)
+                        Casio880Overlay(
+                          onClose: () =>
+                              setState(() => _calculatorVisible = false),
+                          onPointerAcquired: _acquireOverlayPointer,
+                          onPointerReleased: _releaseOverlayPointer,
+                          onDragStart: () => _setOverlayDragging(true),
+                          onDragEnd: () => _setOverlayDragging(false),
+                        ),
                     ],
                   ),
                 );

@@ -474,8 +474,10 @@ class EditorToolBar extends StatelessWidget {
   final VoidCallback onInsertImage;
   final VoidCallback onOpenStickerPicker;
   final VoidCallback onAddStickyNote;
-  final VoidCallback onToggleZoomWindow;
+  final VoidCallback? onToggleZoomWindow;
   final VoidCallback onToggleRuler;
+  final bool calculatorVisible;
+  final VoidCallback? onToggleCalculator;
   final VoidCallback onTogglePalmRejection;
   final VoidCallback? onToggleStylusPan;
   final VoidCallback onToggleAudioRecording;
@@ -489,8 +491,9 @@ class EditorToolBar extends StatelessWidget {
     required this.activeColor,
     required this.canUndo,
     required this.canRedo,
-    required this.zoomWindowEnabled,
+    this.zoomWindowEnabled = false,
     required this.rulerVisible,
+    this.calculatorVisible = false,
     required this.palmRejectionEnabled,
     this.stylusPanMode = false,
     required this.isRecordingAudio,
@@ -502,8 +505,9 @@ class EditorToolBar extends StatelessWidget {
     required this.onInsertImage,
     required this.onOpenStickerPicker,
     required this.onAddStickyNote,
-    required this.onToggleZoomWindow,
+    this.onToggleZoomWindow,
     required this.onToggleRuler,
+    this.onToggleCalculator,
     required this.onTogglePalmRejection,
     this.onToggleStylusPan,
     required this.onToggleAudioRecording,
@@ -597,25 +601,21 @@ class EditorToolBar extends StatelessWidget {
               },
             ),
 
-            // Lasso
+            // Lasso (Dashed circle icon)
             _ChromeIconBtn(
               icon: Icons.gesture_rounded,
+              customIcon: _DashedCircleLassoIcon(
+                color: activeTool == EditorTool.lasso
+                    ? EditorColors.activeBlue
+                    : fg,
+              ),
               tooltip: 'Lasso chọn tự do',
               color: fg,
               isActive: activeTool == EditorTool.lasso,
               onTap: () => onSelectTool(EditorTool.lasso),
             ),
 
-            // Text Box
-            _ChromeIconBtn(
-              icon: Icons.text_fields_rounded,
-              tooltip: 'Hộp văn bản',
-              color: fg,
-              isActive: activeTool == EditorTool.textBox,
-              onTap: () => onSelectTool(EditorTool.textBox),
-            ),
-
-            // Auto Shape
+            // Auto Shape (Text Box & Zoom Window moved into 3-dot settings drawer)
             _ChromeIconBtn(
               icon: Icons.hexagon_outlined,
               tooltip: 'Hình học tự động',
@@ -652,13 +652,6 @@ class EditorToolBar extends StatelessWidget {
             _vDivider(border),
 
             // Pro Note Tools
-            _ChromeIconBtn(
-              icon: Icons.zoom_in_rounded,
-              tooltip: 'Cửa sổ phóng to',
-              color: fg,
-              isActive: zoomWindowEnabled,
-              onTap: onToggleZoomWindow,
-            ),
             _ChromeIconBtn(
               icon: Icons.flare_rounded,
               tooltip: 'Con trỏ Laser',
@@ -699,6 +692,14 @@ class EditorToolBar extends StatelessWidget {
               isActive: rulerVisible,
               onTap: onToggleRuler,
             ),
+            if (onToggleCalculator != null)
+              _ChromeIconBtn(
+                icon: Icons.calculate_outlined,
+                tooltip: 'Máy tính Casio fx-880BTG',
+                color: fg,
+                isActive: calculatorVisible,
+                onTap: onToggleCalculator!,
+              ),
             Tooltip(
               message: isRecordingAudio
                   ? 'Đang ghi âm bài giảng — Nhấn để dừng'
@@ -787,6 +788,7 @@ class EditorToolBar extends StatelessWidget {
 
 class _ChromeIconBtn extends StatelessWidget {
   final IconData icon;
+  final Widget? customIcon;
   final String tooltip;
   final Color color;
   final bool isActive;
@@ -795,6 +797,7 @@ class _ChromeIconBtn extends StatelessWidget {
 
   const _ChromeIconBtn({
     required this.icon,
+    this.customIcon,
     required this.tooltip,
     required this.color,
     this.isActive = false,
@@ -826,17 +829,62 @@ class _ChromeIconBtn extends StatelessWidget {
                   )
                 : null,
           ),
-          child: Icon(
-            icon,
-            size: 19,
-            color: !enabled
-                ? color.withAlpha(75)
-                : (isActive ? EditorColors.activeBlue : color),
-          ),
+          child: customIcon != null
+              ? Center(child: customIcon)
+              : Icon(
+                  icon,
+                  size: 19,
+                  color: !enabled
+                      ? color.withAlpha(75)
+                      : (isActive ? EditorColors.activeBlue : color),
+                ),
         ),
       ),
     );
   }
+}
+
+class _DashedCircleLassoIcon extends StatelessWidget {
+  final Color color;
+
+  const _DashedCircleLassoIcon({required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      size: const Size(18, 18),
+      painter: _DashedCirclePainter(color: color),
+    );
+  }
+}
+
+class _DashedCirclePainter extends CustomPainter {
+  final Color color;
+
+  const _DashedCirclePainter({required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width * 0.5, size.height * 0.5);
+    final radius = math.min(size.width, size.height) * 0.39;
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 2.0
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.butt;
+
+    const int dashes = 12;
+    const double step = (math.pi * 2) / dashes;
+    const double sweep = step * 0.52;
+    final rect = Rect.fromCircle(center: center, radius: radius);
+    for (int i = 0; i < dashes; i++) {
+      canvas.drawArc(rect, i * step - math.pi * 0.5, sweep, false, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DashedCirclePainter oldDelegate) =>
+      oldDelegate.color != color;
 }
 
 class _QuickColorDot extends StatelessWidget {
@@ -2455,6 +2503,10 @@ class EditorSettingsDrawer extends StatelessWidget {
   final VoidCallback onCheckForUpdate;
   final int audioRecordingsCount;
   final VoidCallback? onOpenAudioRecordings;
+  final bool zoomWindowEnabled;
+  final ValueChanged<bool>? onToggleZoomWindow;
+  final bool textBoxActive;
+  final VoidCallback? onToggleTextBox;
 
   const EditorSettingsDrawer({
     super.key,
@@ -2477,6 +2529,10 @@ class EditorSettingsDrawer extends StatelessWidget {
     required this.onCheckForUpdate,
     this.audioRecordingsCount = 0,
     this.onOpenAudioRecordings,
+    this.zoomWindowEnabled = false,
+    this.onToggleZoomWindow,
+    this.textBoxActive = false,
+    this.onToggleTextBox,
   });
 
   @override
@@ -2530,6 +2586,41 @@ class EditorSettingsDrawer extends StatelessWidget {
                 ],
               ),
             const SizedBox(height: 8),
+            if (onToggleZoomWindow != null || onToggleTextBox != null) ...[
+              _sectionLabel('Công cụ mở rộng'),
+              if (onToggleZoomWindow != null)
+                SwitchListTile(
+                  dense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                  secondary: const Icon(Icons.zoom_in_rounded, size: 20),
+                  title: const Text('Viết cận cảnh (Zoom to)'),
+                  subtitle: const Text(
+                    'Bật cửa sổ phóng to để viết nét chi tiết',
+                    style: TextStyle(fontSize: 11.5),
+                  ),
+                  value: zoomWindowEnabled,
+                  onChanged: (v) {
+                    onToggleZoomWindow!(v);
+                  },
+                ),
+              if (onToggleTextBox != null)
+                SwitchListTile(
+                  dense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                  secondary: const Icon(Icons.text_fields_rounded, size: 20),
+                  title: const Text('Nhập văn bản (Text)'),
+                  subtitle: const Text(
+                    'Chạm vào trang giấy để gõ hoặc dán chữ',
+                    style: TextStyle(fontSize: 11.5),
+                  ),
+                  value: textBoxActive,
+                  onChanged: (_) {
+                    Navigator.pop(context);
+                    onToggleTextBox!();
+                  },
+                ),
+              const Divider(height: 16),
+            ],
             _drawerTile(
               icon: isCurrentPageBookmarked
                   ? Icons.bookmark_rounded
