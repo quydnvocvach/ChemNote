@@ -21,6 +21,9 @@ class ChemNoteApp extends StatefulWidget {
 }
 
 class _ChemNoteAppState extends State<ChemNoteApp> with WidgetsBindingObserver {
+  static final ThemeData _lightTheme = AppTheme.lightTheme();
+  static final ThemeData _darkTheme = AppTheme.darkTheme();
+
   late final AppState _appState;
   late final SyncManager _syncManager;
   late final bool _ownsAppState;
@@ -74,14 +77,15 @@ class _ChemNoteAppState extends State<ChemNoteApp> with WidgetsBindingObserver {
         ChangeNotifierProvider<AppState>.value(value: _appState),
         ChangeNotifierProvider<SyncManager>.value(value: _syncManager),
       ],
-      child: Consumer<AppState>(
-        builder: (context, state, _) {
+      child: Selector<AppState, ThemeMode>(
+        selector: (_, state) => state.themeMode,
+        builder: (context, themeMode, _) {
           return MaterialApp(
             title: 'ChemNote',
             debugShowCheckedModeBanner: false,
-            theme: AppTheme.lightTheme(),
-            darkTheme: AppTheme.darkTheme(),
-            themeMode: state.themeMode,
+            theme: _lightTheme,
+            darkTheme: _darkTheme,
+            themeMode: themeMode,
             home: const LibraryScreen(),
           );
         },

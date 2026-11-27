@@ -13,6 +13,9 @@ import 'package:chemnote/features/canvas/paper_templates.dart';
 import 'package:chemnote/features/canvas/stroke_engine.dart';
 import 'package:chemnote/features/pdf/page_image_export_service.dart';
 import 'package:chemnote/features/pdf/pdf_export_service.dart';
+import 'package:chemnote/features/sync/google_auth_service.dart';
+import 'package:chemnote/features/sync/google_drive_service.dart';
+import 'package:chemnote/features/sync/sync_manager.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -746,4 +749,209 @@ void main() {
       expect(persisted.pages[1].id, deletedPageId);
     });
   });
+
+  group('Smoothness, atomic storage & sync safety (v3.8.4)', () {
+    test('LocalStorageService coalesces concurrent writes atomically with zero tmp leftovers', () async {
+      final tempDir = Directory.systemTemp.createTempSync('chemnote_atomic_io_');
+      addTearDown(() {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final storage = LocalStorageService(baseDirectory: tempDir);
+      final now = DateTime.utc(2026, 11, 27);
+      Notebook makeNb(String title) => Notebook(
+            id: 'nb-race',
+            title: title,
+            createdAt: now,
+            updatedAt: now,
+          );
+
+      // Enqueue multiple out-of-order concurrent writes for the same notebook
+      await Future.wait([
+        storage.saveNotebook(makeNb('Title v1')),
+        storage.saveNotebook(makeNb('Title v2')),
+        storage.saveNotebook(makeNb('Title v3 Final')),
+      ]);
+
+      final loaded = await storage.loadNotebooks();
+      expect(loaded.length, 1);
+      expect(loaded.first.title, 'Title v3 Final');
+
+      final root = await storage.getRootDirectory();
+      final nbDir = Directory('${root.path}${Platform.pathSeparator}notebooks');
+      final tmpLeftovers = nbDir
+          .listSync()
+          .whereType<File>()
+          .where((f) => f.path.contains('.tmp.'))
+          .toList();
+      expect(tmpLeftovers, isEmpty);
+
+      // Deleting during an in-flight save never leaves a resurrected file behind
+      final inflight = storage.saveNotebook(makeNb('Should Not Ghost'));
+      await storage.deleteNotebookFile('nb-race');
+      await inflight;
+      expect(await storage.loadNotebooks(), isEmpty);
+    });
+
+    test('AppState.libraryUiRevision ignores same-day stroke edits but bumps on structural changes', () async {
+      final tempDir = Directory.systemTemp.createTempSync('chemnote_lib_rev_');
+      addTearDown(() {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final storage = LocalStorageService(baseDirectory: tempDir);
+      final appState = AppState(storage: storage);
+      addTearDown(appState.dispose);
+
+      final revBeforeCreate = appState.libraryUiRevision;
+      final nb = await appState.createNotebook(title: 'Revision Test');
+      expect(appState.libraryUiRevision, greaterThan(revBeforeCreate));
+
+      final revBeforeStrokes = appState.libraryUiRevision;
+      final page0 = nb.pages.first;
+      await appState.updatePage(
+        nb.id,
+        page0.copyWith(
+          strokes: const [
+            Stroke(
+              id: 'stroke-rev-1',
+              toolType: ToolType.fountainPen,
+              colorValue: 0xFF1D4ED8,
+              width: 2.0,
+              points: [
+                StrokePoint(x: 10, y: 10, pressure: 0.5),
+                StrokePoint(x: 40, y: 40, pressure: 0.6),
+              ],
+            ),
+          ],
+        ),
+      );
+      expect(appState.libraryUiRevision, revBeforeStrokes);
+
+      await appState.addPage(nb.id);
+      expect(appState.libraryUiRevision, greaterThan(revBeforeStrokes));
+
+      final revBeforeToggle = appState.libraryUiRevision;
+      await appState.toggleFavorite(nb.id);
+      expect(appState.libraryUiRevision, greaterThan(revBeforeToggle));
+
+      final revBeforeFolder = appState.libraryUiRevision;
+      await appState.createFolder(name: 'Vô Cơ');
+      expect(appState.libraryUiRevision, greaterThan(revBeforeFolder));
+
+      final revBeforeDeletePage = appState.libraryUiRevision;
+      await appState.deletePage(nb.id, nb.pages.first.id);
+      expect(appState.libraryUiRevision, greaterThan(revBeforeDeletePage));
+    });
+
+    test('AppState.upsertNotebookFromSync preserves newer unsaved local debounced edit', () async {
+      final tempDir = Directory.systemTemp.createTempSync('chemnote_sync_clobber_');
+      addTearDown(() {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final storage = LocalStorageService(baseDirectory: tempDir);
+      final appState = AppState(storage: storage);
+      addTearDown(appState.dispose);
+
+      final nb = await appState.createNotebook(title: 'Sync Clobber Guard');
+      await Future<void>.delayed(const Duration(milliseconds: 25));
+
+      final editedPage = nb.pages.first.copyWith(
+        strokes: const [
+          Stroke(
+            id: 'local-new-stroke',
+            toolType: ToolType.fountainPen,
+            colorValue: 0xFF000000,
+            width: 2.0,
+            points: [StrokePoint(x: 5, y: 5, pressure: 0.5)],
+          ),
+        ],
+      );
+      // Schedules debounced local save in _pendingSaveNotebooks with newer updatedAt
+      await appState.updatePage(nb.id, editedPage);
+      final localAfterEdit = appState.getNotebookById(nb.id)!;
+
+      // Older remote snapshot arrives -> must NOT clobber newer pending local edit
+      final olderRemote = nb.copyWith(
+        updatedAt: localAfterEdit.updatedAt.subtract(const Duration(seconds: 5)),
+        pages: [nb.pages.first.copyWith(strokes: const [])],
+      );
+      await appState.upsertNotebookFromSync(olderRemote);
+
+      final preserved = appState.getNotebookById(nb.id)!;
+      expect(preserved.pages.first.strokes.length, 1);
+      expect(preserved.pages.first.strokes.first.id, 'local-new-stroke');
+    });
+
+    test('SyncManager keeps pendingUpload status when notebook is edited during upload', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final tempDir = Directory.systemTemp.createTempSync('chemnote_mid_upload_');
+      addTearDown(() {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final storage = LocalStorageService(baseDirectory: tempDir);
+      final appState = AppState(storage: storage);
+      addTearDown(appState.dispose);
+
+      final auth = GoogleAuthService();
+      await auth.signInDemo();
+
+      bool triggerEditOnce = true;
+      final drive = _MidUploadEditDriveService(
+        authService: auth,
+        onBeforeUpload: (uploadingNb) async {
+          if (!triggerEditOnce) return;
+          triggerEditOnce = false;
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          await appState.updatePage(
+            uploadingNb.id,
+            uploadingNb.pages.first.copyWith(
+              strokes: const [
+                Stroke(
+                  id: 'edited-mid-upload',
+                  toolType: ToolType.fountainPen,
+                  colorValue: 0xFFDC2626,
+                  width: 3.0,
+                  points: [StrokePoint(x: 12, y: 12, pressure: 0.6)],
+                ),
+              ],
+            ),
+          );
+        },
+      );
+
+      final manager = SyncManager(
+        appState: appState,
+        authService: auth,
+        driveService: drive,
+        attachConnectivityListener: false,
+        debounceDuration: const Duration(milliseconds: 20),
+      );
+      addTearDown(manager.dispose);
+
+      final nb = await appState.createNotebook(title: 'Mid Upload Edit');
+      await manager.syncNow(isManualSync: true);
+
+      final current = appState.getNotebookById(nb.id)!;
+      expect(current.syncStatus, SyncStatus.pendingUpload);
+      expect(manager.pendingUploadIds, contains(nb.id));
+    });
+  });
+}
+
+class _MidUploadEditDriveService extends GoogleDriveService {
+  _MidUploadEditDriveService({
+    required super.authService,
+    this.onBeforeUpload,
+  });
+
+  final Future<void> Function(Notebook notebook)? onBeforeUpload;
+
+  @override
+  Future<String> uploadNotebook(Notebook notebook) async {
+    await onBeforeUpload?.call(notebook);
+    return super.uploadNotebook(notebook);
+  }
 }

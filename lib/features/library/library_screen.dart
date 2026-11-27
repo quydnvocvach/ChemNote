@@ -113,7 +113,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final appState = context.watch<AppState>();
+    context.select<AppState, int>((s) => s.libraryUiRevision);
+    final appState = context.read<AppState>();
     final isWide = MediaQuery.sizeOf(context).width >= 820;
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
@@ -1406,12 +1407,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     final appState = context.read<AppState>();
     appState.openTab(notebook.id);
-    unawaited(appState.markNotebookOpened(notebook.id));
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => NoteEditorScreen(notebookId: notebook.id),
       ),
     );
+    Future<void>.delayed(const Duration(milliseconds: 320), () {
+      unawaited(appState.markNotebookOpened(notebook.id));
+    });
   }
 
   Future<bool> _promptPinVerification(

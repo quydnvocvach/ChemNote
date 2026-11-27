@@ -160,24 +160,24 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.8.3 with APK
+      - name: Publish Release v3.8.4 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.8.3
-          name: ChemNote Pro v3.8.3 (Menu Lasso tại chỗ, Ẩn thanh thông báo, Xuất ảnh PNG + Watermark & Undo/Redo toàn trang)
+          tag_name: v3.8.4
+          name: ChemNote Pro v3.8.4 (Tối ưu toàn app mượt mà với tần số quét thích ứng, mở sổ/cài đặt tức thì & chống xung đột dữ liệu)
           body: |
-            ### ChemNote Pro v3.8.3
-            - **Menu Lasso neo ngay tại vị trí nhấn giữ hoặc vùng chọn:**
-              - Khi giữ lâu hoặc khoanh vùng Lasso, thanh công cụ nổi xuất hiện sát phía trên (tự động lật xuống dưới nếu sát mép trên) và di chuyển theo vùng chọn khi cuộn/zoom.
-            - **Ẩn thanh thông báo hệ thống (Immersive Status Bar):**
-              - Tự động ẩn thanh trạng thái Android/HarmonyOS để tối đa không gian viết, vuốt nhẹ từ cạnh trên xuống để xem lại khi cần.
-            - **Gọn gàng thanh bút yêu thích:**
-              - Xoá dòng chú thích "Kéo lên / xuống để di chuyển thanh bút yêu thích" mà vẫn giữ nguyên thao tác kéo thả.
-            - **Xuất trang ra ảnh PNG & Watermark "Đinh Ngọc Quý" (Cormorant Garamond SemiBold Italic):**
-              - Thêm nút **Xuất ảnh PNG** cho từng trang hoặc nhiều trang đã chọn trong danh sách trang (lưu vào Thư viện ảnh hoặc chia sẻ ngay).
-              - Tự động gắn chữ ký *"Đinh Ngọc Quý"* màu đen in nghiêng ở góc dưới bên phải vùng xanh lá của mẫu giấy xanh lá trên tất cả ảnh PNG xuất ra, tệp PDF xuất trong app và PDF tự động đồng bộ lên Google Drive.
-            - **Mở rộng Hoàn tác / Làm lại (2 mũi tên & chạm 2/3 ngón):**
-              - Hỗ trợ đầy đủ Undo / Redo cho **chèn/xoá/sửa ảnh**, **thêm trang**, **xoá trang (lẻ hoặc hàng loạt)**, **dán trang**, **nhân bản trang**, **sắp xếp lại thứ tự trang** và **nhập PDF** song song với các nét vẽ tay.
+            ### ChemNote Pro v3.8.4
+            - **Tối ưu mượt mà khi mở sổ tay, mở cài đặt ghi chú & vuốt cuộn ở chế độ Tần số quét thích ứng (Dynamic Refresh Rate):**
+              - Chuyển sang gợi ý `preferredRefreshRate` thay vì khóa cứng `preferredDisplayModeId` để HarmonyOS điều phối tần số quét thích ứng mượt mà theo tác vụ, không bị khựng khi chuyển tầng.
+              - Thay hiệu ứng chuyển trang nặng GPU bằng `CupertinoPageTransitionsBuilder`, cache tĩnh `ThemeData` + `Selector<AppState, ThemeMode>` thay cho `Consumer<AppState>` ở gốc ứng dụng.
+              - Trì hoãn lưu mốc `markNotebookOpened` & prefetch các trang PDF lân cận sau khi mở trang xong để hiệu ứng mở ghi chú vào khung hình đầu tiên tức thì.
+              - Bọc `RepaintBoundary` cách ly thân trình soạn thảo + `Drawer` cài đặt, và tách trượt thanh **Tốc độ lướt trang** sang state cục bộ để mở/kéo bảng cài đặt mượt không giật khung.
+            - **Tăng tốc viết/lướt Canvas & sửa rò rỉ bộ nhớ:**
+              - Tách riêng **Layer 0** (giấy nền & PDF nền) khỏi Layer nét vẽ, cô lập repaint theo từng trang (`_pageRepaintVersions`), loại bỏ rebuild thừa khi khoanh Lasso hoặc chạy vòng `ui.Image`/`ui.Codec`.
+              - Thu hẹp cửa sổ render trang dọc (`liveRadius = 4`), khắc phục nhịp trễ khung đầu khi thả tay lướt quán tính, và loại bỏ các lệnh kiểm tra tệp đồng bộ `existsSync()` trong `build()`.
+            - **An toàn dữ liệu & chống xung đột đồng bộ Google Drive:**
+              - Ghi tệp ghi chú nguyên tử (temp + rename) kèm hàng đợi tuần tự gộp phiên bản mới nhất (`saveNotebook`), tránh hỏng JSON hay mất nét khi ghi chồng.
+              - Tạm hoãn đồng bộ nền khi bút M-Pencil đang viết, bảo vệ sửa đổi cục bộ mới hơn khi tải bản Drive về hoặc khi người dùng vừa viết vừa upload.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

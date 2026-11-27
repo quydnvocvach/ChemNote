@@ -359,7 +359,7 @@ class _CreateNotebookDialogState extends State<CreateNotebookDialog> {
                 ),
               ),
               for (final path in customCovers)
-                if (File(path).existsSync())
+                if (path.trim().isNotEmpty)
                   GestureDetector(
                     onTap: () => setState(() {
                       _customCoverImagePath = path;
@@ -386,6 +386,16 @@ class _CreateNotebookDialogState extends State<CreateNotebookDialog> {
                           cacheWidth: 240,
                           filterQuality: FilterQuality.medium,
                           gaplessPlayback: true,
+                          errorBuilder: (_, __, ___) => const ColoredBox(
+                            color: Color(0xFF22252E),
+                            child: Center(
+                              child: Icon(
+                                Icons.broken_image_outlined,
+                                size: 22,
+                                color: Colors.white38,
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     ),

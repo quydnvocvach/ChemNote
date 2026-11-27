@@ -28,12 +28,42 @@ Notebook? _decodeNotebookFromJsonString(String raw) {
 class LocalStorageService {
   final Directory? _overrideBaseDir;
   final Uuid _uuid;
+  final Map<String, Future<void>> _notebookWriteChains = {};
+  final Map<String, Notebook> _latestPendingNotebookWrites = {};
 
   LocalStorageService({
     Directory? baseDirectory,
     Uuid? uuid,
   })  : _overrideBaseDir = baseDirectory,
         _uuid = uuid ?? const Uuid();
+
+  Future<void> _atomicWriteString(
+    File target,
+    String content, {
+    bool flush = true,
+  }) async {
+    final parent = target.parent;
+    if (!await parent.exists()) {
+      await parent.create(recursive: true);
+    }
+    final tmp = File(
+      '${target.path}.tmp.${DateTime.now().microsecondsSinceEpoch}',
+    );
+    try {
+      await tmp.writeAsString(content, flush: flush);
+      await tmp.rename(target.path);
+    } catch (_) {
+      try {
+        await target.writeAsString(content, flush: flush);
+      } finally {
+        try {
+          if (await tmp.exists()) {
+            await tmp.delete();
+          }
+        } catch (_) {}
+      }
+    }
+  }
 
   Future<Directory> getRootDirectory() async {
     final base = _overrideBaseDir ?? await getApplicationDocumentsDirectory();
@@ -111,7 +141,7 @@ class LocalStorageService {
   Future<void> saveFolders(List<Folder> folders) async {
     final file = await _getFoldersFile();
     final encoded = jsonEncode(folders.map((f) => f.toJson()).toList());
-    await file.writeAsString(encoded, flush: true);
+    await _atomicWriteString(file, encoded, flush: true);
   }
 
   Future<List<PenPreset>> loadFavoritePens() async {
@@ -133,7 +163,7 @@ class LocalStorageService {
     try {
       final file = await _getFavoritePensFile();
       final encoded = jsonEncode(pens.map((p) => p.toJson()).toList());
-      await file.writeAsString(encoded, flush: true);
+      await _atomicWriteString(file, encoded, flush: true);
     } catch (_) {
       // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
     }
@@ -155,7 +185,7 @@ class LocalStorageService {
   Future<void> saveCustomStickers(List<String> stickerPaths) async {
     try {
       final file = await _getCustomStickersFile();
-      await file.writeAsString(jsonEncode(stickerPaths), flush: true);
+      await _atomicWriteString(file, jsonEncode(stickerPaths), flush: true);
     } catch (_) {
       // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
     }
@@ -177,7 +207,7 @@ class LocalStorageService {
   Future<void> saveCustomCovers(List<String> coverPaths) async {
     try {
       final file = await _getCustomCoversFile();
-      await file.writeAsString(jsonEncode(coverPaths), flush: true);
+      await _atomicWriteString(file, jsonEncode(coverPaths), flush: true);
     } catch (_) {
       // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
     }
@@ -200,7 +230,7 @@ class LocalStorageService {
       if (directory == null || directory.trim().isEmpty) {
         if (await file.exists()) await file.delete();
       } else {
-        await file.writeAsString(directory.trim(), flush: true);
+        await _atomicWriteString(file, directory.trim(), flush: true);
       }
     } catch (_) {
       // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
@@ -224,7 +254,7 @@ class LocalStorageService {
       if (directory == null || directory.trim().isEmpty) {
         if (await file.exists()) await file.delete();
       } else {
-        await file.writeAsString(directory.trim(), flush: true);
+        await _atomicWriteString(file, directory.trim(), flush: true);
       }
     } catch (_) {
       // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
@@ -248,7 +278,7 @@ class LocalStorageService {
   Future<void> savePenPrefs(Map<String, dynamic> prefs) async {
     try {
       final file = await _getPenPrefsFile();
-      await file.writeAsString(jsonEncode(prefs), flush: true);
+      await _atomicWriteString(file, jsonEncode(prefs), flush: true);
     } catch (_) {
       // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
     }
@@ -297,10 +327,24 @@ class LocalStorageService {
     }
   }
 
-  Future<void> saveNotebook(Notebook notebook) async {
-    final file = await _getNotebookFile(notebook.id);
-    final encoded = await compute(_serializeNotebookToJson, notebook);
-    await file.writeAsString(encoded);
+  Future<void> saveNotebook(Notebook notebook) {
+    _latestPendingNotebookWrites[notebook.id] = notebook;
+    final prev = _notebookWriteChains[notebook.id] ?? Future<void>.value();
+    final Future<void> next = prev.catchError((_) {}).then((_) async {
+      final latest = _latestPendingNotebookWrites.remove(notebook.id);
+      if (latest == null) return;
+      final file = await _getNotebookFile(latest.id);
+      final encoded = await compute(_serializeNotebookToJson, latest);
+      await _atomicWriteString(file, encoded, flush: false);
+    });
+    late final Future<void> tracked;
+    tracked = next.whenComplete(() {
+      if (identical(_notebookWriteChains[notebook.id], tracked)) {
+        _notebookWriteChains.remove(notebook.id);
+      }
+    });
+    _notebookWriteChains[notebook.id] = tracked;
+    return tracked;
   }
 
   Future<void> saveNotebooks(List<Notebook> notebooks) async {
@@ -310,6 +354,13 @@ class LocalStorageService {
   }
 
   Future<void> deleteNotebookFile(String notebookId) async {
+    _latestPendingNotebookWrites.remove(notebookId);
+    final inflight = _notebookWriteChains[notebookId];
+    if (inflight != null) {
+      try {
+        await inflight;
+      } catch (_) {}
+    }
     final file = await _getNotebookFile(notebookId);
     if (await file.exists()) {
       await file.delete();

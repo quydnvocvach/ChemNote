@@ -138,6 +138,12 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        pendingRecordResult = null
+        pendingImagesResult = null
+        pendingGalleryResult = null
+        pendingDocumentResult = null
+        hardwareChannel?.setMethodCallHandler(null)
+        hardwareChannel = null
         releaseRecorder()
         releasePlayer()
         super.onDestroy()
@@ -616,10 +622,13 @@ class MainActivity : FlutterActivity() {
                 BitmapFactory.decodeStream(stream, null, decodeOpts)
             } ?: return
 
-            FileOutputStream(outFile).use { fos ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 82, fos)
+            try {
+                FileOutputStream(outFile).use { fos ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 82, fos)
+                }
+            } finally {
+                bitmap.recycle()
             }
-            bitmap.recycle()
         } catch (_: Exception) {}
     }
 
@@ -780,8 +789,9 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * Quét tất cả display.supportedModes và chọn tần số quét cao nhất
-     * (ví dụ: 144Hz trên Huawei MatePad 11.5"S PaperMatte).
+     * Quét display.supportedModes để gợi ý tần số quét đỉnh mượt nhất (ví dụ 144Hz trên MatePad 11.5"S)
+     * thông qua preferredRefreshRate mà KHÔNG khóa cứng preferredDisplayModeId, giúp HarmonyOS ở chế độ
+     * Tần số quét thích ứng chuyển tầng mượt mà không khựng.
      */
     private fun enableHighestRefreshRate() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
@@ -805,9 +815,20 @@ class MainActivity : FlutterActivity() {
             ?: modes.maxByOrNull { it.refreshRate }
             ?: return
 
+        val targetHz = bestMode.refreshRate
         val params = window.attributes
-        if (params.preferredDisplayModeId != bestMode.modeId) {
-            params.preferredDisplayModeId = bestMode.modeId
+        var changed = false
+        if (params.preferredDisplayModeId != 0) {
+            params.preferredDisplayModeId = 0
+            changed = true
+        }
+        @Suppress("DEPRECATION")
+        if (kotlin.math.abs(params.preferredRefreshRate - targetHz) > 0.5f) {
+            @Suppress("DEPRECATION")
+            params.preferredRefreshRate = targetHz
+            changed = true
+        }
+        if (changed) {
             window.attributes = params
         }
     }

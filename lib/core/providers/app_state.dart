@@ -118,6 +118,12 @@ class AppState extends ChangeNotifier {
   // Debounce lưu đĩa cho các thay đổi trang liên tiếp (tránh nghẽn luồng UI / ANR khi viết nhanh)
   final Map<String, Timer> _pendingSaveTimers = {};
   final Map<String, Notebook> _pendingSaveNotebooks = {};
+  int _libraryUiRevision = 0;
+
+  int get libraryUiRevision => _libraryUiRevision;
+  void _bumpLibraryRevision() {
+    _libraryUiRevision++;
+  }
 
   AppState({
     LocalStorageService? storage,
@@ -194,6 +200,7 @@ class AppState extends ChangeNotifier {
   void setThemeMode(ThemeMode mode) {
     if (_themeMode == mode) return;
     _themeMode = mode;
+    _bumpLibraryRevision();
     notifyListeners();
   }
 
@@ -204,6 +211,7 @@ class AppState extends ChangeNotifier {
   void toggleTheme() {
     _themeMode =
         _themeMode == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
+    _bumpLibraryRevision();
     notifyListeners();
   }
 
@@ -595,6 +603,7 @@ class AppState extends ChangeNotifier {
       trimmed,
       ..._customCoverPaths.where((p) => p != trimmed),
     ];
+    _bumpLibraryRevision();
     notifyListeners();
     unawaited(_storage.saveCustomCovers(_customCoverPaths));
   }
@@ -602,12 +611,14 @@ class AppState extends ChangeNotifier {
   void removeCustomCoverPath(String path) {
     if (!_customCoverPaths.contains(path)) return;
     _customCoverPaths = _customCoverPaths.where((p) => p != path).toList();
+    _bumpLibraryRevision();
     notifyListeners();
     unawaited(_storage.saveCustomCovers(_customCoverPaths));
   }
 
   Future<void> loadAll() async {
     _isLoading = true;
+    _bumpLibraryRevision();
     notifyListeners();
     try {
       final results = await Future.wait<dynamic>([
@@ -673,6 +684,7 @@ class AppState extends ChangeNotifier {
       }
     } finally {
       _isLoading = false;
+      _bumpLibraryRevision();
       notifyListeners();
     }
   }
@@ -770,6 +782,7 @@ class AppState extends ChangeNotifier {
     );
     _folders = [..._folders, folder];
     await _storage.saveFolders(_folders);
+    _bumpLibraryRevision();
     notifyListeners();
     return folder;
   }
@@ -778,6 +791,7 @@ class AppState extends ChangeNotifier {
     final updated = folder.copyWith(updatedAt: DateTime.now());
     _folders = _folders.map((f) => f.id == updated.id ? updated : f).toList();
     await _storage.saveFolders(_folders);
+    _bumpLibraryRevision();
     notifyListeners();
   }
 
@@ -795,6 +809,7 @@ class AppState extends ChangeNotifier {
         : folder.copyWith(parentId: targetParentId, updatedAt: now);
     _folders = _folders.map((f) => f.id == folderId ? updated : f).toList();
     await _storage.saveFolders(_folders);
+    _bumpLibraryRevision();
     notifyListeners();
   }
 
@@ -829,6 +844,7 @@ class AppState extends ChangeNotifier {
     for (final nb in affectedNotebooks) {
       await _storage.saveNotebook(nb);
     }
+    _bumpLibraryRevision();
     notifyListeners();
   }
 
@@ -881,6 +897,7 @@ class AppState extends ChangeNotifier {
     _notebooks = [notebook, ..._notebooks];
     _notebooks.sort(_compareByLastOpened);
     await _storage.saveNotebook(notebook);
+    _bumpLibraryRevision();
     notifyListeners();
     onNotebookChangedForSync?.call(notebook);
     return notebook;
@@ -905,6 +922,7 @@ class AppState extends ChangeNotifier {
     }
     _notebooks.sort(_compareByLastOpened);
     await _storage.saveNotebook(updated);
+    _bumpLibraryRevision();
     notifyListeners();
     if (markPendingSync) {
       onNotebookChangedForSync?.call(updated);
@@ -920,6 +938,7 @@ class AppState extends ChangeNotifier {
     _notebooks =
         _notebooks.map((n) => n.id == notebookId ? updated : n).toList();
     _notebooks.sort(_compareByLastOpened);
+    _bumpLibraryRevision();
     notifyListeners();
     await _storage.saveNotebook(updated);
   }
@@ -934,6 +953,7 @@ class AppState extends ChangeNotifier {
     _pendingSaveNotebooks.remove(notebookId);
     _notebooks = _notebooks.where((n) => n.id != notebookId).toList();
     await _storage.deleteNotebookFile(notebookId);
+    _bumpLibraryRevision();
     notifyListeners();
     if (deletedNotebook != null && onNotebookPermanentlyDeletedForSync != null) {
       unawaited(onNotebookPermanentlyDeletedForSync!(deletedNotebook));
@@ -1061,6 +1081,7 @@ class AppState extends ChangeNotifier {
     for (final copy in created) {
       await _storage.saveNotebook(copy);
     }
+    _bumpLibraryRevision();
     notifyListeners();
     for (final copy in created) {
       onNotebookChangedForSync?.call(copy);
@@ -1092,6 +1113,7 @@ class AppState extends ChangeNotifier {
     for (final nb in updatedList) {
       await _storage.saveNotebook(nb);
     }
+    _bumpLibraryRevision();
     notifyListeners();
     for (final nb in updatedList) {
       onNotebookChangedForSync?.call(nb);
@@ -1131,6 +1153,7 @@ class AppState extends ChangeNotifier {
     for (final nb in updatedList) {
       await _storage.saveNotebook(nb);
     }
+    _bumpLibraryRevision();
     notifyListeners();
     for (final nb in updatedList) {
       onNotebookChangedForSync?.call(nb);
@@ -1163,6 +1186,7 @@ class AppState extends ChangeNotifier {
     for (final nb in updatedList) {
       await _storage.saveNotebook(nb);
     }
+    _bumpLibraryRevision();
     notifyListeners();
     for (final nb in updatedList) {
       onNotebookChangedForSync?.call(nb);
@@ -1192,6 +1216,7 @@ class AppState extends ChangeNotifier {
     for (final nb in updatedList) {
       await _storage.saveNotebook(nb);
     }
+    _bumpLibraryRevision();
     notifyListeners();
     for (final nb in updatedList) {
       onNotebookChangedForSync?.call(nb);
@@ -1212,6 +1237,14 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> upsertNotebookFromSync(Notebook remoteNotebook) async {
+    final pendingLocal = _pendingSaveNotebooks[remoteNotebook.id];
+    if (pendingLocal != null &&
+        pendingLocal.updatedAt.isAfter(remoteNotebook.updatedAt)) {
+      return;
+    }
+    _pendingSaveTimers.remove(remoteNotebook.id)?.cancel();
+    _pendingSaveNotebooks.remove(remoteNotebook.id);
+
     final existing = getNotebookById(remoteNotebook.id);
     final synced = remoteNotebook.copyWith(
       syncStatus: SyncStatus.synced,
@@ -1226,6 +1259,7 @@ class AppState extends ChangeNotifier {
     }
     _notebooks.sort(_compareByLastOpened);
     await _storage.saveNotebook(synced);
+    _bumpLibraryRevision();
     notifyListeners();
   }
 
@@ -1244,7 +1278,11 @@ class AppState extends ChangeNotifier {
     );
     _notebooks =
         _notebooks.map((n) => n.id == notebookId ? updated : n).toList();
+    if (_pendingSaveNotebooks.containsKey(notebookId)) {
+      _pendingSaveNotebooks[notebookId] = updated;
+    }
     await _storage.saveNotebook(updated);
+    _bumpLibraryRevision();
     notifyListeners();
   }
 
@@ -1294,6 +1332,7 @@ class AppState extends ChangeNotifier {
   }
 
   bool _isStylusDrawingActive = false;
+  bool get isStylusDrawingActive => _isStylusDrawingActive;
 
   void setStylusDrawingActive(bool active) {
     _isStylusDrawingActive = active;
@@ -1320,6 +1359,13 @@ class AppState extends ChangeNotifier {
     );
     _notebooks =
         _notebooks.map((n) => n.id == updated.id ? updated : n).toList();
+    final bool dayChanged = notebook.updatedAt.year != now.year ||
+        notebook.updatedAt.month != now.month ||
+        notebook.updatedAt.day != now.day;
+    final bool syncChanged = updated.syncStatus != notebook.syncStatus;
+    if (dayChanged || syncChanged) {
+      _bumpLibraryRevision();
+    }
     if (notify) {
       notifyListeners();
     }

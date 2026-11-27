@@ -98,6 +98,7 @@ class SyncManager extends ChangeNotifier {
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   Timer? _debounceTimer;
   Timer? _foregroundTimer;
+  Timer? _retryAfterStylusTimer;
 
   bool _autoSyncEnabled = true;
   bool _isSyncing = false;
@@ -377,6 +378,12 @@ class SyncManager extends ChangeNotifier {
   void _runScheduledForegroundSync() {
     if (!_autoSyncEnabled || !isSignedIn || _isSyncing) return;
     if (!canAutoSyncOnCurrentNetwork) return;
+    if (_appState?.isStylusDrawingActive == true) {
+      _retryAfterStylusTimer?.cancel();
+      _retryAfterStylusTimer =
+          Timer(const Duration(seconds: 10), _runScheduledForegroundSync);
+      return;
+    }
     // Chỉ chạy khi thực sự có sổ tay đang chờ tải lên để tiết kiệm pin tuyệt đối.
     if (!_hasPendingChanges()) return;
     unawaited(syncNow());
@@ -433,6 +440,8 @@ class SyncManager extends ChangeNotifier {
   Future<void> signOut() async {
     _debounceTimer?.cancel();
     _foregroundTimer?.cancel();
+    _retryAfterStylusTimer?.cancel();
+    _retryAfterStylusTimer = null;
     await _authService.signOut();
     _driveService.resetSessionCache();
     _statusMessage = 'Đã đăng xuất khỏi Google Drive';
@@ -935,14 +944,28 @@ class SyncManager extends ChangeNotifier {
       );
       final driveFileId = await _driveService.uploadNotebook(notebookWithPdfId);
 
-      await _appState?.updateNotebookSyncStatus(
-        notebook.id,
-        SyncStatus.synced,
-        driveFileId: driveFileId,
-        drivePdfFileId: drivePdfFileId,
-      );
-      _pendingUploadIds.remove(notebook.id);
-      _pendingSnapshots.remove(notebook.id);
+      final live = _appState?.getNotebookById(notebook.id);
+      final bool editedDuringUpload =
+          live != null && live.updatedAt.isAfter(notebook.updatedAt);
+      if (editedDuringUpload) {
+        await _appState?.updateNotebookSyncStatus(
+          notebook.id,
+          SyncStatus.pendingUpload,
+          driveFileId: driveFileId,
+          drivePdfFileId: drivePdfFileId,
+        );
+        _pendingUploadIds.add(notebook.id);
+        _pendingSnapshots[notebook.id] = live;
+      } else {
+        await _appState?.updateNotebookSyncStatus(
+          notebook.id,
+          SyncStatus.synced,
+          driveFileId: driveFileId,
+          drivePdfFileId: drivePdfFileId,
+        );
+        _pendingUploadIds.remove(notebook.id);
+        _pendingSnapshots.remove(notebook.id);
+      }
       await _setLastSyncedAt(DateTime.now());
     } catch (e) {
       if (!_pendingDeleteNotebookIds.contains(notebook.id)) {
@@ -1283,6 +1306,7 @@ class SyncManager extends ChangeNotifier {
   void dispose() {
     _debounceTimer?.cancel();
     _foregroundTimer?.cancel();
+    _retryAfterStylusTimer?.cancel();
     _connectivitySub?.cancel();
     super.dispose();
   }

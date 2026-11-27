@@ -125,7 +125,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   double _cachedTotalHeight = 0.0;
   double _cachedMaxPageWidth = 0.0;
   int _repaintVersion = 0;
-  double _refreshRateHz = 60.0;
+  final Map<String, int> _pageRepaintVersions = {};
+  final ValueNotifier<double> _refreshRateHzNotifier =
+      ValueNotifier<double>(60.0);
+  bool _initialTransitionSettled = false;
+  Timer? _transitionSettleTimer;
+  bool _lastLassoHasSelection = false;
+  Rect? _lastLassoBounds;
+
+  void _bumpPageRepaint(String pageId) {
+    _pageRepaintVersions[pageId] = (_pageRepaintVersions[pageId] ?? 0) + 1;
+  }
 
   // Huawei Notes smart vertical axis-lock + ballistic fling state
   _ScrollAxisLock _panAxisLock = _ScrollAxisLock.none;
@@ -135,6 +145,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   int _lastPanEventUs = 0;
   Ticker? _scrollFlingTicker;
   Duration _lastFlingElapsed = Duration.zero;
+  bool _flingFirstTick = false;
   double _flingVx = 0.0;
   double _flingVy = 0.0;
 
@@ -626,7 +637,19 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      context.read<AppState>().openTab(_activeNotebookId);
+      final state = context.read<AppState>();
+      if (!state.openNotebooks.any((n) => n.id == _activeNotebookId)) {
+        state.openTab(_activeNotebookId);
+      }
+    });
+
+    _transitionSettleTimer = Timer(const Duration(milliseconds: 240), () {
+      if (!mounted) return;
+      _initialTransitionSettled = true;
+      final nb = _getNotebook(context, listen: false);
+      if (nb != null) {
+        _prefetchNearbyPdfPages(nb);
+      }
     });
 
     _initHardwareBridge();
@@ -636,7 +659,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _syncNativePalmShieldIfChanged(_appStateRef);
     final hz = await HardwareService.instance.getRefreshRate();
     if (mounted) {
-      setState(() => _refreshRateHz = hz);
+      _refreshRateHzNotifier.value = hz;
     }
   }
 
@@ -655,6 +678,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _stylusHoverTimer?.cancel();
     _stylusCooldownTimer?.cancel();
     _zoomLockHideTimer?.cancel();
+    _transitionSettleTimer?.cancel();
     _lassoLongPressTimer?.cancel();
     _shapeHoldTimer?.cancel();
     _scrubPrefetchTimer?.cancel();
@@ -681,6 +705,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _zoomScaleNotifier.dispose();
     _zoomLockPillVisibleNotifier.dispose();
     _viewportGateNotifier.dispose();
+    _refreshRateHzNotifier.dispose();
     _imageDragNotifier.dispose();
     _stickyDragNotifier.dispose();
     _activeStickyStrokeNotifier.dispose();
@@ -705,7 +730,19 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
 
   void _onLassoChanged() {
     _lassoPathNotifier.value = List<Offset>.from(_lassoController.lassoPath);
-    if (mounted) setState(() => _repaintVersion++);
+    final bool hasSel = _lassoController.hasSelection;
+    final Rect? bounds = _lassoController.selectionBounds;
+    final bool selChanged =
+        hasSel != _lastLassoHasSelection || bounds != _lastLassoBounds;
+    _lastLassoHasSelection = hasSel;
+    _lastLassoBounds = bounds;
+    if (mounted && (!_lassoController.isDrawingLasso || selChanged)) {
+      final pageId = _lassoController.activePageId;
+      if (pageId != null) {
+        _bumpPageRepaint(pageId);
+      }
+      setState(() {});
+    }
   }
 
   // ===========================================================================
@@ -755,7 +792,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     NotePage? undoSnapshot,
   }) async {
     if (undoSnapshot != null) _pushUndo(undoSnapshot);
-    _repaintVersion++;
+    _bumpPageRepaint(updatedPage.id);
     await context.read<AppState>().updatePage(_activeNotebookId, updatedPage);
   }
 
@@ -834,7 +871,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       toStack.add(_EditorUndoEntry.page(currentPageMatch));
       if (toStack.length > _maxHistory) toStack.removeAt(0);
       _clearActiveSelectionOverlaysAfterHistory(targetPage: targetPage);
-      _repaintVersion++;
+      _bumpPageRepaint(targetPage.id);
       final appState = context.read<AppState>();
       await appState.updatePage(notebook.id, targetPage);
       if (!mounted) return;
@@ -1155,15 +1192,43 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _loadPdfImage(path);
   }
 
+  static const int _maxCachedElementImages = 36;
+
+  void _touchElementImageCache(String path) {
+    final existing = _elementImageCache.remove(path);
+    if (existing != null) {
+      _elementImageCache[path] = existing;
+    }
+  }
+
+  Set<String> _nearbyElementImageKeepPaths(Notebook notebook) {
+    final int center = _currentPageIndex.clamp(0, notebook.pages.length - 1);
+    final int keepStart = math.max(0, center - 4);
+    final int keepEnd = math.min(notebook.pages.length - 1, center + 4);
+    final keepPaths = <String>{};
+    for (int i = keepStart; i <= keepEnd; i++) {
+      for (final img in notebook.pages[i].imageElements) {
+        if (img.filePath.isNotEmpty) keepPaths.add(img.filePath);
+      }
+    }
+    return keepPaths;
+  }
+
   Future<void> _loadPdfImage(String path) async {
     try {
       final file = File(path);
       if (!await file.exists()) return;
       final bytes = await file.readAsBytes();
       final codec = await ui.instantiateImageCodec(bytes, targetWidth: 2048);
-      final frame = await codec.getNextFrame();
+      final ui.Image decodedImage;
+      try {
+        final frame = await codec.getNextFrame();
+        decodedImage = frame.image;
+      } finally {
+        codec.dispose();
+      }
       if (!mounted) {
-        frame.image.dispose();
+        decodedImage.dispose();
         return;
       }
       final notebook = _getNotebook(context, listen: false);
@@ -1173,12 +1238,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
               : const <String>{};
       if (keepPaths.isNotEmpty && !keepPaths.contains(path)) {
         // Bỏ qua ảnh cũ vừa giải mã xong sau khi người dùng đã kéo tới vị trí khác xa
-        frame.image.dispose();
+        decodedImage.dispose();
         return;
       }
       final evictedImages = <ui.Image>[];
       setState(() {
-        _pdfImageCache[path] = frame.image;
+        _pdfImageCache[path] = decodedImage;
         if (_pdfImageCache.length > _maxCachedPdfPages + 4) {
           final keys = _pdfImageCache.keys.toList();
           for (final k in keys) {
@@ -1188,7 +1253,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
             if (removed != null) evictedImages.add(removed);
           }
         }
-        _repaintVersion++;
+        if (notebook != null) {
+          for (final p in notebook.pages) {
+            if (p.pdfBackgroundPath == path) {
+              _bumpPageRepaint(p.id);
+            }
+          }
+        } else {
+          _repaintVersion++;
+        }
       });
       if (evictedImages.isNotEmpty) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1206,8 +1279,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
 
   void _ensureElementImageLoaded(String path) {
     if (path.isEmpty) return;
-    if (_elementImageCache.containsKey(path) ||
-        _loadingElementImagePaths.contains(path)) {
+    if (_elementImageCache.containsKey(path)) {
+      _touchElementImageCache(path);
+      return;
+    }
+    if (_loadingElementImagePaths.contains(path)) {
       return;
     }
     _loadingElementImagePaths.add(path);
@@ -1219,16 +1295,55 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       final file = File(path);
       if (!await file.exists()) return;
       final bytes = await file.readAsBytes();
-      final codec = await ui.instantiateImageCodec(bytes);
-      final frame = await codec.getNextFrame();
+      final codec = await ui.instantiateImageCodec(
+        bytes,
+        targetWidth: bytes.length > 400 * 1024 ? 1600 : null,
+      );
+      final ui.Image decodedImage;
+      try {
+        final frame = await codec.getNextFrame();
+        decodedImage = frame.image;
+      } finally {
+        codec.dispose();
+      }
       if (!mounted) {
-        frame.image.dispose();
+        decodedImage.dispose();
         return;
       }
+      final notebook = _getNotebook(context, listen: false);
+      final Set<String> keepPaths =
+          notebook != null && notebook.pages.isNotEmpty
+              ? _nearbyElementImageKeepPaths(notebook)
+              : const <String>{};
+      final evictedImages = <ui.Image>[];
       setState(() {
-        _elementImageCache[path] = frame.image;
-        _repaintVersion++;
+        _elementImageCache[path] = decodedImage;
+        if (_elementImageCache.length > _maxCachedElementImages) {
+          final keys = _elementImageCache.keys.toList();
+          for (final k in keys) {
+            if (_elementImageCache.length <= _maxCachedElementImages) break;
+            if (k == path || keepPaths.contains(k)) continue;
+            final removed = _elementImageCache.remove(k);
+            if (removed != null) evictedImages.add(removed);
+          }
+        }
+        if (notebook != null) {
+          for (final p in notebook.pages) {
+            if (p.imageElements.any((e) => e.filePath == path)) {
+              _bumpPageRepaint(p.id);
+            }
+          }
+        } else {
+          _repaintVersion++;
+        }
       });
+      if (evictedImages.isNotEmpty) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          for (final img in evictedImages) {
+            img.dispose();
+          }
+        });
+      }
     } catch (_) {
       // Ignore missing/corrupt image file
     } finally {
@@ -2225,13 +2340,22 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         final file = File(savedPath);
         if (await file.exists()) {
           final bytes = await file.readAsBytes();
-          final codec = await ui.instantiateImageCodec(bytes);
-          final frame = await codec.getNextFrame();
+          final codec = await ui.instantiateImageCodec(
+            bytes,
+            targetWidth: bytes.length > 400 * 1024 ? 1600 : null,
+          );
+          final ui.Image imgFrame;
+          try {
+            final frame = await codec.getNextFrame();
+            imgFrame = frame.image;
+          } finally {
+            codec.dispose();
+          }
           if (mounted) {
-            decoded = frame.image;
+            decoded = imgFrame;
             _elementImageCache[savedPath] = decoded;
           } else {
-            frame.image.dispose();
+            imgFrame.dispose();
             return;
           }
         }
@@ -3715,14 +3839,24 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _flingVx = vx;
     _flingVy = vy;
     _lastFlingElapsed = Duration.zero;
+    _flingFirstTick = true;
     _scrollFlingTicker ??= createTicker(_onScrollFlingTick);
     _scrollFlingTicker!.start();
   }
 
   void _onScrollFlingTick(Duration elapsed) {
-    final double dt = ((elapsed - _lastFlingElapsed).inMicroseconds / 1e6)
-        .clamp(0.0, 0.05);
-    _lastFlingElapsed = elapsed;
+    final double dt;
+    if (_flingFirstTick) {
+      _flingFirstTick = false;
+      _lastFlingElapsed = elapsed;
+      dt = elapsed.inMicroseconds > 0
+          ? (elapsed.inMicroseconds / 1e6).clamp(0.004, 0.05)
+          : (1.0 / 120.0);
+    } else {
+      dt = ((elapsed - _lastFlingElapsed).inMicroseconds / 1e6)
+          .clamp(0.0, 0.05);
+      _lastFlingElapsed = elapsed;
+    }
     if (dt <= 0.0) return;
 
     if (!mounted ||
@@ -3761,6 +3895,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
 
     if (_flingVx.abs() < 28.0 && _flingVy.abs() < 28.0) {
       _stopScrollFling();
+      if (_renderedWindowCenter != _currentPageIndex && mounted) {
+        setState(() => _renderedWindowCenter = _currentPageIndex);
+      }
     }
   }
 
@@ -3794,7 +3931,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     }
     if (visibleIdx != _currentPageIndex) {
       _syncCurrentPageIndex(visibleIdx);
-      if ((visibleIdx - _renderedWindowCenter).abs() >= 3) {
+      final int windowThreshold =
+          (_scrollFlingTicker?.isActive ?? false) ? 4 : 3;
+      if ((visibleIdx - _renderedWindowCenter).abs() >= windowThreshold) {
         setState(() => _renderedWindowCenter = visibleIdx);
       }
       _prefetchNearbyPdfPages(notebook);
@@ -5320,7 +5459,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         notebook: notebook,
         activePageIndex: currentIdx,
         isCurrentPageBookmarked: currentPage.isBookmarked,
-        refreshRateHz: _refreshRateHz,
+        refreshRateHz: _refreshRateHzNotifier.value,
+        refreshRateHzListenable: _refreshRateHzNotifier,
         appState: appState,
         onToggleBookmark: () =>
             appState.toggleBookmark(notebook.id, currentPage.id),
@@ -5391,8 +5531,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
           }
         },
       ),
-      body: Column(
-        children: [
+      body: RepaintBoundary(
+        child: Column(
+          children: [
           // Row 1: Multi-Notebook Tab Bar + Top-Right 5-Item Insert `+` Menu
           EditorTabBar(
             openNotebooks: openTabs,
@@ -7172,6 +7313,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
             ),
         ],
       ),
+    ),
     );
   }
 
@@ -7339,8 +7481,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   Widget _buildVerticalContinuousPages(Notebook notebook) {
     // No nested SingleChildScrollView fighting InteractiveViewer!
     // One unified InteractiveViewer handles 144fps 1-finger scroll & 2-finger pinch-zoom cleanly.
-    const int liveRadius = 8;
-    final bool useWindowing = notebook.pages.length > 24;
+    const int liveRadius = 4;
+    final bool useWindowing = notebook.pages.length > 8;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 24),
       child: Column(
@@ -7443,7 +7585,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     int pageIndex,
   ) {
     if (!_isScrubbingPages &&
-        (pageIndex - _currentPageIndex).abs() <= _pdfPreloadRadius) {
+        ((pageIndex - _currentPageIndex).abs() <=
+            (_initialTransitionSettled ? _pdfPreloadRadius : 0))) {
       _ensurePdfImageLoaded(page.pdfBackgroundPath);
     }
     for (final img in page.imageElements) {
@@ -7455,76 +7598,98 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     );
     final bool isActivePage = pageIndex == _currentPageIndex;
     final bool isLassoOwner = _lassoController.activePageId == page.id;
+    final int effectiveRepaintVersion =
+        _repaintVersion + (_pageRepaintVersions[page.id] ?? 0);
+    final ui.Image? pdfBgImg = page.pdfBackgroundPath != null
+        ? _pdfImageCache[page.pdfBackgroundPath!]
+        : null;
 
-    return Container(
-      width: pageSize.width,
-      height: pageSize.height,
-      decoration: BoxDecoration(
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withAlpha(65),
-            blurRadius: 18,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
-      child: ClipRect(
-        child: Stack(
-          children: [
-            // Layer 1 (Cached RepaintBoundary): Paper + PDF + Chronological Z-Index Images/Ink/Stencils
-            // When Sticky Notes exist, base layer paints everything <= first sticky note's zIndex,
-            // and upper slices paint newer images/strokes cleanly ON TOP OF earlier Sticky Notes!
-            ...() {
-              final sortedStickies = List<StickyNoteElement>.from(page.stickyNotes)
-                ..sort((a, b) => a.zIndex.compareTo(b.zIndex));
-              final bool hasStickies = sortedStickies.isNotEmpty;
-              final int? baseMaxZ =
-                  hasStickies ? sortedStickies.first.zIndex : null;
-              final bool readOnly = context.read<AppState>().readOnlyMode;
-
-              bool hasCanvasItemInRange(int minExcl, int? maxIncl) {
-                bool match(int z) =>
-                    z > minExcl && (maxIncl == null || z <= maxIncl);
-                return page.strokes.any((s) => match(s.zIndex)) ||
-                    page.imageElements.any((e) => match(e.zIndex)) ||
-                    page.stencilElements.any((e) => match(e.zIndex));
-              }
-
-              return <Widget>[
-                Positioned.fill(
+    return RepaintBoundary(
+      child: Container(
+        width: pageSize.width,
+        height: pageSize.height,
+        decoration: BoxDecoration(
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withAlpha(55),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: ClipRect(
+          child: Stack(
+            children: [
+              // Layer 0 (Static Cached RepaintBoundary): Paper template & immutable PDF slide background.
+              // Isolated from strokes/annotations so drawing never re-rasterizes paper or PDF backgrounds!
+              Positioned.fill(
+                child: IgnorePointer(
                   child: RepaintBoundary(
                     child: CustomPaint(
                       size: pageSize,
-                      painter: CanvasPainter(
-                        page: page,
-                        pdfBackgroundImage: page.pdfBackgroundPath != null
-                            ? _pdfImageCache[page.pdfBackgroundPath!]
-                            : null,
-                        elementImageCache: _elementImageCache,
-                        lassoSelection: isLassoOwner
-                            ? _lassoController.selection
-                            : const LassoSelection(),
-                        lassoSelectionBounds: isLassoOwner
-                            ? _lassoController.selectionBounds
-                            : null,
-                        lassoDragOffset:
-                            isLassoOwner ? _lassoDragOffsetNotifier : null,
-                        erasingStrokesNotifier: _erasingStrokesNotifier,
-                        hiddenImageId: _selectedImageId,
-                        playingAudioId: _playingAudioId,
-                        playingAudioTimeMsNotifier: (_playingAudioId != null &&
-                                page.strokes.any((s) => s.audioId == _playingAudioId))
-                            ? _audioPositionMsNotifier
-                            : null,
-                        repaintVersion: _repaintVersion,
-                        drawBackground: true,
-                        drawOverlays: !hasStickies,
-                        drawTapes: false,
-                        maxZInclusive: baseMaxZ,
+                      painter: _PageBackgroundPainter(
+                        templateType: page.templateType,
+                        paperColor: page.paperColor,
+                        isLandscape: page.isLandscape,
+                        isInfiniteWhiteboard: page.isInfiniteWhiteboard,
+                        pdfBackgroundImage: pdfBgImg,
                       ),
                     ),
                   ),
                 ),
+              ),
+
+              // Layer 1 (Cached RepaintBoundary): Chronological Z-Index Images/Ink/Stencils
+              // When Sticky Notes exist, base layer paints everything <= first sticky note's zIndex,
+              // and upper slices paint newer images/strokes cleanly ON TOP OF earlier Sticky Notes!
+              ...() {
+                final sortedStickies = List<StickyNoteElement>.from(page.stickyNotes)
+                  ..sort((a, b) => a.zIndex.compareTo(b.zIndex));
+                final bool hasStickies = sortedStickies.isNotEmpty;
+                final int? baseMaxZ =
+                    hasStickies ? sortedStickies.first.zIndex : null;
+                final bool readOnly = context.read<AppState>().readOnlyMode;
+
+                bool hasCanvasItemInRange(int minExcl, int? maxIncl) {
+                  bool match(int z) =>
+                      z > minExcl && (maxIncl == null || z <= maxIncl);
+                  return page.strokes.any((s) => match(s.zIndex)) ||
+                      page.imageElements.any((e) => match(e.zIndex)) ||
+                      page.stencilElements.any((e) => match(e.zIndex));
+                }
+
+                return <Widget>[
+                  Positioned.fill(
+                    child: RepaintBoundary(
+                      child: CustomPaint(
+                        size: pageSize,
+                        painter: CanvasPainter(
+                          page: page,
+                          elementImageCache: _elementImageCache,
+                          lassoSelection: isLassoOwner
+                              ? _lassoController.selection
+                              : const LassoSelection(),
+                          lassoSelectionBounds: isLassoOwner
+                              ? _lassoController.selectionBounds
+                              : null,
+                          lassoDragOffset:
+                              isLassoOwner ? _lassoDragOffsetNotifier : null,
+                          erasingStrokesNotifier: _erasingStrokesNotifier,
+                          hiddenImageId: _selectedImageId,
+                          playingAudioId: _playingAudioId,
+                          playingAudioTimeMsNotifier: (_playingAudioId != null &&
+                                  page.strokes.any((s) => s.audioId == _playingAudioId))
+                              ? _audioPositionMsNotifier
+                              : null,
+                          repaintVersion: effectiveRepaintVersion,
+                          drawBackground: false,
+                          drawOverlays: !hasStickies,
+                          drawTapes: false,
+                          maxZInclusive: baseMaxZ,
+                        ),
+                      ),
+                    ),
+                  ),
 
                 // Layer 2 (144Hz Live Ink Overlay in its own RepaintBoundary — Zero Widget Rebuilds)
                 Positioned.fill(
@@ -7608,7 +7773,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                           .any((s) => s.audioId == _playingAudioId))
                                   ? _audioPositionMsNotifier
                                   : null,
-                              repaintVersion: _repaintVersion,
+                              repaintVersion: effectiveRepaintVersion,
                               drawBackground: false,
                               drawOverlays: si == sortedStickies.length - 1,
                               drawTapes: false,
@@ -7808,6 +7973,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
           ],
         ),
       ),
+      ),
     );
   }
 
@@ -7840,7 +8006,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                               ? _pdfImageCache[page.pdfBackgroundPath!]
                               : null,
                           elementImageCache: _elementImageCache,
-                          repaintVersion: _repaintVersion,
+                          repaintVersion: _repaintVersion +
+                              (_pageRepaintVersions[page.id] ?? 0),
                         ),
                       ),
                     ),
@@ -8272,13 +8439,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                   dimOutsideRect: cropRect,
                                 ),
                               )
-                            : (file.existsSync()
-                                ? Image.file(
-                                    file,
-                                    fit: BoxFit.fill,
-                                    gaplessPlayback: true,
-                                  )
-                                : const SizedBox.expand()),
+                            : Image.file(
+                                file,
+                                fit: BoxFit.fill,
+                                filterQuality: FilterQuality.medium,
+                                cacheWidth: 1600,
+                                gaplessPlayback: true,
+                                errorBuilder: (_, __, ___) =>
+                                    const SizedBox.expand(),
+                              ),
                       ),
                     ),
                     // Crisp blue live crop border
@@ -8784,33 +8953,32 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                         freehandClipPath: img.freehandClipPath,
                                       ),
                                     )
-                                  : (file.existsSync()
-                                      ? Image.file(
-                                          file,
-                                          fit: BoxFit.contain,
-                                          filterQuality: FilterQuality.medium,
-                                          cacheWidth: 1600,
-                                          gaplessPlayback: true,
-                                        )
-                                      : Container(
-                                          color: Colors.grey.shade200,
-                                          alignment: Alignment.center,
-                                          child: const Icon(
-                                            Icons.broken_image_outlined,
-                                            size: 32,
-                                          ),
-                                        )))
+                                  : Image.file(
+                                      file,
+                                      fit: BoxFit.contain,
+                                      filterQuality: FilterQuality.medium,
+                                      cacheWidth: 1600,
+                                      gaplessPlayback: true,
+                                      errorBuilder: (_, __, ___) => Container(
+                                        color: Colors.grey.shade200,
+                                        alignment: Alignment.center,
+                                        child: const Icon(
+                                          Icons.broken_image_outlined,
+                                          size: 32,
+                                        ),
+                                      ),
+                                    ))
                               : (cachedUiImg != null
                                   ? const SizedBox.expand()
-                                  : (file.existsSync()
-                                      ? Image.file(
-                                          file,
-                                          fit: BoxFit.contain,
-                                          filterQuality: FilterQuality.medium,
-                                          cacheWidth: 1600,
-                                          gaplessPlayback: true,
-                                        )
-                                      : const SizedBox.expand())),
+                                  : Image.file(
+                                      file,
+                                      fit: BoxFit.contain,
+                                      filterQuality: FilterQuality.medium,
+                                      cacheWidth: 1600,
+                                      gaplessPlayback: true,
+                                      errorBuilder: (_, __, ___) =>
+                                          const SizedBox.expand(),
+                                    )),
                         ),
                       ),
                     ),
@@ -10379,4 +10547,64 @@ class _EditorUndoEntry {
       );
 
   bool get isNotebookLevel => notebookPagesSnapshot != null;
+}
+
+class _PageBackgroundPainter extends CustomPainter {
+  final PaperTemplateType templateType;
+  final PaperColorType paperColor;
+  final bool isLandscape;
+  final bool isInfiniteWhiteboard;
+  final ui.Image? pdfBackgroundImage;
+
+  const _PageBackgroundPainter({
+    required this.templateType,
+    required this.paperColor,
+    required this.isLandscape,
+    required this.isInfiniteWhiteboard,
+    this.pdfBackgroundImage,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    PaperTemplatePainter(
+      templateType: templateType,
+      paperColor: paperColor,
+      isLandscape: isLandscape,
+      isInfiniteWhiteboard: isInfiniteWhiteboard,
+    ).paint(canvas, size);
+
+    final pdfImg = pdfBackgroundImage;
+    if (pdfImg != null) {
+      final src = Rect.fromLTWH(
+        0,
+        0,
+        pdfImg.width.toDouble(),
+        pdfImg.height.toDouble(),
+      );
+      final fitted = applyBoxFit(
+        BoxFit.contain,
+        Size(pdfImg.width.toDouble(), pdfImg.height.toDouble()),
+        size,
+      );
+      final dst =
+          Alignment.center.inscribe(fitted.destination, Offset.zero & size);
+      canvas.drawImageRect(
+        pdfImg,
+        src,
+        dst,
+        Paint()
+          ..filterQuality = FilterQuality.high
+          ..isAntiAlias = true,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _PageBackgroundPainter oldDelegate) {
+    return oldDelegate.templateType != templateType ||
+        oldDelegate.paperColor != paperColor ||
+        oldDelegate.isLandscape != isLandscape ||
+        oldDelegate.isInfiniteWhiteboard != isInfiniteWhiteboard ||
+        oldDelegate.pdfBackgroundImage != pdfBackgroundImage;
+  }
 }

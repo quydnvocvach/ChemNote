@@ -1,6 +1,17 @@
 import 'package:flutter/material.dart';
 
 class AppTheme {
+  static const PageTransitionsTheme _smoothPageTransitions =
+      PageTransitionsTheme(
+    builders: {
+      TargetPlatform.android: CupertinoPageTransitionsBuilder(),
+      TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+      TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
+      TargetPlatform.windows: FadeUpwardsPageTransitionsBuilder(),
+      TargetPlatform.linux: FadeUpwardsPageTransitionsBuilder(),
+    },
+  );
+
   // Bảng màu Obsidian Dark theo phong cách Huawei Notes × GoodNotes 6
   static const Color obsidianBg = Color(0xFF0B0C10);
   static const Color obsidianSurface = Color(0xFF16181D);
@@ -50,6 +61,7 @@ class AppTheme {
     return ThemeData(
       useMaterial3: true,
       colorScheme: colorScheme,
+      pageTransitionsTheme: _smoothPageTransitions,
       scaffoldBackgroundColor: obsidianBg,
       appBarTheme: const AppBarTheme(
         backgroundColor: obsidianSurface,
@@ -135,6 +147,7 @@ class AppTheme {
     return ThemeData(
       useMaterial3: true,
       colorScheme: colorScheme,
+      pageTransitionsTheme: _smoothPageTransitions,
       scaffoldBackgroundColor: lightBg,
       appBarTheme: const AppBarTheme(
         backgroundColor: lightSurface,

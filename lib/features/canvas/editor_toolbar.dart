@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../../core/models/drawing_elements.dart';
 import '../../core/models/notebook.dart';
@@ -2439,6 +2440,7 @@ class EditorSettingsDrawer extends StatelessWidget {
   final int activePageIndex;
   final bool isCurrentPageBookmarked;
   final double refreshRateHz;
+  final ValueListenable<double>? refreshRateHzListenable;
   final AppState appState;
   final VoidCallback onToggleBookmark;
   final VoidCallback onOpenTemplateSwitcher;
@@ -2460,6 +2462,7 @@ class EditorSettingsDrawer extends StatelessWidget {
     required this.activePageIndex,
     required this.isCurrentPageBookmarked,
     required this.refreshRateHz,
+    this.refreshRateHzListenable,
     required this.appState,
     required this.onToggleBookmark,
     required this.onOpenTemplateSwitcher,
@@ -2479,40 +2482,53 @@ class EditorSettingsDrawer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    return Drawer(
-      width: 320,
-      backgroundColor:
-          isDark ? EditorColors.obsidianSurface : EditorColors.lightSurface,
-      child: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          children: [
-            Row(
-              children: [
-                Text(
-                  'Trang ${activePageIndex + 1} / ${notebook.pages.length}',
-                  style: const TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.w700),
-                ),
-                const Spacer(),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: EditorColors.activeBlue.withAlpha(36),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    '${refreshRateHz.round()}Hz',
+    return RepaintBoundary(
+      child: Drawer(
+        width: 320,
+        backgroundColor:
+            isDark ? EditorColors.obsidianSurface : EditorColors.lightSurface,
+        child: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            children: [
+              Row(
+                children: [
+                  Text(
+                    'Trang ${activePageIndex + 1} / ${notebook.pages.length}',
                     style: const TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      color: EditorColors.activeBlue,
-                    ),
+                        fontSize: 16, fontWeight: FontWeight.w700),
                   ),
-                ),
-              ],
-            ),
+                  const Spacer(),
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: EditorColors.activeBlue.withAlpha(36),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: refreshRateHzListenable != null
+                        ? ValueListenableBuilder<double>(
+                            valueListenable: refreshRateHzListenable!,
+                            builder: (_, hz, __) => Text(
+                              '${hz.round()}Hz',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: EditorColors.activeBlue,
+                              ),
+                            ),
+                          )
+                        : Text(
+                            '${refreshRateHz.round()}Hz',
+                            style: const TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: EditorColors.activeBlue,
+                            ),
+                          ),
+                  ),
+                ],
+              ),
             const SizedBox(height: 8),
             _drawerTile(
               icon: isCurrentPageBookmarked
@@ -2691,41 +2707,9 @@ class EditorSettingsDrawer extends StatelessWidget {
               onChanged: appState.setDarkMode,
             ),
             const SizedBox(height: 6),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Text(
-                        'Tốc độ lướt trang',
-                        style: TextStyle(
-                          fontSize: 13.5,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const Spacer(),
-                      Text(
-                        '${appState.scrollSpeedMultiplier.toStringAsFixed(1)}×',
-                        style: const TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: EditorColors.activeBlue,
-                        ),
-                      ),
-                    ],
-                  ),
-                  Slider(
-                    value: appState.scrollSpeedMultiplier.clamp(1.0, 25.0),
-                    min: 1.0,
-                    max: 25.0,
-                    divisions: 24,
-                    activeColor: EditorColors.activeBlue,
-                    onChanged: appState.setScrollSpeedMultiplier,
-                  ),
-                ],
-              ),
+            _DrawerScrollSpeedSlider(
+              initialValue: appState.scrollSpeedMultiplier.clamp(1.0, 25.0),
+              onCommit: appState.setScrollSpeedMultiplier,
             ),
             const Divider(height: 24),
             _drawerTile(
@@ -2740,6 +2724,7 @@ class EditorSettingsDrawer extends StatelessWidget {
           ],
         ),
       ),
+    ),
     );
   }
 
@@ -2770,6 +2755,79 @@ class EditorSettingsDrawer extends StatelessWidget {
       leading: Icon(icon, size: 20, color: color),
       title: Text(title, style: TextStyle(fontSize: 13.5, color: color)),
       onTap: onTap,
+    );
+  }
+}
+
+class _DrawerScrollSpeedSlider extends StatefulWidget {
+  final double initialValue;
+  final ValueChanged<double> onCommit;
+
+  const _DrawerScrollSpeedSlider({
+    required this.initialValue,
+    required this.onCommit,
+  });
+
+  @override
+  State<_DrawerScrollSpeedSlider> createState() =>
+      _DrawerScrollSpeedSliderState();
+}
+
+class _DrawerScrollSpeedSliderState extends State<_DrawerScrollSpeedSlider> {
+  late double _draftValue;
+
+  @override
+  void initState() {
+    super.initState();
+    _draftValue = widget.initialValue.clamp(1.0, 25.0);
+  }
+
+  @override
+  void didUpdateWidget(covariant _DrawerScrollSpeedSlider oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if ((oldWidget.initialValue - widget.initialValue).abs() > 0.01) {
+      _draftValue = widget.initialValue.clamp(1.0, 25.0);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Text(
+                'Tốc độ lướt trang',
+                style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                '${_draftValue.toStringAsFixed(1)}×',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: EditorColors.activeBlue,
+                ),
+              ),
+            ],
+          ),
+          Slider(
+            value: _draftValue.clamp(1.0, 25.0),
+            min: 1.0,
+            max: 25.0,
+            divisions: 24,
+            activeColor: EditorColors.activeBlue,
+            onChanged: (v) => setState(() => _draftValue = v),
+            onChangeEnd: widget.onCommit,
+          ),
+        ],
+      ),
     );
   }
 }
