@@ -105,19 +105,19 @@ class _Casio880OverlayState extends State<Casio880Overlay>
   Size _computeBoxSize(Size viewport) {
     final bool isLandscape = viewport.width >= viewport.height;
     if (!isLandscape) {
-      final w = (viewport.width * 0.62).clamp(248.0, 340.0);
-      final h = (viewport.height * 0.44).clamp(395.0, viewport.height - 20.0);
+      final w = (viewport.width * 0.55).clamp(225.0, 306.0);
+      final h = (viewport.height * 0.52).clamp(420.0, viewport.height - 16.0);
       return Size(w, h);
     }
     final (double wf, double hf) = switch (_sizePreset) {
-      _CasioSizePreset.compact => (0.255, 0.665),
-      _CasioSizePreset.standard => (0.278, 0.740),
-      _CasioSizePreset.wide => (0.305, 0.800),
+      _CasioSizePreset.compact => (0.230, 0.760),
+      _CasioSizePreset.standard => (0.250, 0.855),
+      _CasioSizePreset.wide => (0.274, 0.920),
     };
-    final double maxW = math.max(250.0, viewport.width - 16.0);
-    final double maxH = math.max(380.0, viewport.height - 16.0);
-    final double w = (viewport.width * wf).clamp(250.0, math.min(390.0, maxW));
-    final double h = (viewport.height * hf).clamp(385.0, maxH);
+    final double maxW = math.max(225.0, viewport.width - 16.0);
+    final double maxH = math.max(410.0, viewport.height - 12.0);
+    final double w = (viewport.width * wf).clamp(225.0, math.min(350.0, maxW));
+    final double h = (viewport.height * hf).clamp(410.0, maxH);
     return Size(w, h);
   }
 
@@ -806,7 +806,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
       onPanEnd: (_) => widget.onDragEnd?.call(),
       onPanCancel: () => widget.onDragEnd?.call(),
       child: Container(
-        height: 30,
+        height: 36,
         padding: const EdgeInsets.symmetric(horizontal: 8),
         decoration: BoxDecoration(
           color: Colors.white.withAlpha(8),
@@ -821,24 +821,24 @@ class _Casio880OverlayState extends State<Casio880Overlay>
               size: 14,
               color: Colors.white.withAlpha(110),
             ),
-            const SizedBox(width: 4),
+            const SizedBox(width: 3),
             const Text(
               'CASIO',
               style: TextStyle(
                 color: Colors.white,
-                fontSize: 10.5,
+                fontSize: 10,
                 fontWeight: FontWeight.w900,
-                letterSpacing: 0.7,
+                letterSpacing: 0.6,
               ),
             ),
-            const SizedBox(width: 5),
+            const SizedBox(width: 4),
             const Flexible(
               child: Text(
                 'fx-880BTG',
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   color: Color(0xFF60A5FA),
-                  fontSize: 10,
+                  fontSize: 9.5,
                   fontWeight: FontWeight.w700,
                 ),
               ),
@@ -849,7 +849,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
               borderRadius: BorderRadius.circular(6),
               child: Container(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                    const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
                 decoration: BoxDecoration(
                   color: Colors.white.withAlpha(18),
                   borderRadius: BorderRadius.circular(6),
@@ -864,28 +864,41 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                 ),
               ),
             ),
-            const SizedBox(width: 4),
+            const Spacer(),
             InkWell(
               onTap: () => setState(() => _minimized = true),
-              borderRadius: BorderRadius.circular(6),
-              child: const Padding(
-                padding: EdgeInsets.all(3),
-                child: Icon(
+              borderRadius: BorderRadius.circular(8),
+              child: Container(
+                width: 28,
+                height: 28,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.white.withAlpha(20),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(
                   Icons.remove_rounded,
-                  size: 15,
-                  color: Colors.white70,
+                  size: 20,
+                  color: Colors.white,
                 ),
               ),
             ),
+            const SizedBox(width: 6),
             InkWell(
               onTap: widget.onClose,
-              borderRadius: BorderRadius.circular(6),
-              child: const Padding(
-                padding: EdgeInsets.all(3),
-                child: Icon(
+              borderRadius: BorderRadius.circular(8),
+              child: Container(
+                width: 28,
+                height: 28,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEF4444).withAlpha(42),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(
                   Icons.close_rounded,
-                  size: 15,
-                  color: Colors.white70,
+                  size: 20,
+                  color: Color(0xFFFCA5A5),
                 ),
               ),
             ),
@@ -1959,8 +1972,8 @@ class _Casio880OverlayState extends State<Casio880Overlay>
       child: Column(
         children: [
           // Top Cluster: HOME+SHIFT | Circular 4-Way D-Pad (▲▼◀▶+OK) | = + CALC(SOLVE)
-          SizedBox(
-            height: 60,
+          Expanded(
+            flex: 19,
             child: Row(
               children: [
                 Expanded(
@@ -2004,6 +2017,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                         child: _casioTopPill(
                           legend: '≠',
                           label: '=',
+                          labelFontSize: 14.0,
                           bg: const Color(0xFF2B303C),
                           fg: const Color(0xFF6EE7B7),
                           onTap: () => _insertChar('='),
@@ -2026,11 +2040,11 @@ class _Casio880OverlayState extends State<Casio880Overlay>
               ],
             ),
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 5),
 
-          // Sci Row 1: x | □/□ | √□ | x□ | x² | log
-          SizedBox(
-            height: 33,
+          // Sci Row 1: x | □/□ | √□ | x□ | x² | log (taller & no "a b/c")
+          Expanded(
+            flex: 12,
             child: Row(
               children: [
                 _sciKey(
@@ -2042,7 +2056,6 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                   ),
                 ),
                 _sciKey(
-                  legend: 'a b/c',
                   label: '□/□',
                   onTap: () => _insertDocMutation(_doc.insertFraction),
                 ),
@@ -2081,11 +2094,11 @@ class _Casio880OverlayState extends State<Casio880Overlay>
               ],
             ),
           ),
-          const SizedBox(height: 3),
+          const SizedBox(height: 4),
 
           // Sci Row 2: Ans | sin | cos | ( | ) | ln (NO tan, NO sin⁻¹, NO cos⁻¹)
-          SizedBox(
-            height: 33,
+          Expanded(
+            flex: 12,
             child: Row(
               children: [
                 _sciKey(
@@ -2128,16 +2141,18 @@ class _Casio880OverlayState extends State<Casio880Overlay>
               ],
             ),
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 5),
 
-          // Numpad (5 cols × 4 rows)
+          // Numpad (5 cols × 4 rows) with large crisp characters
           Expanded(
+            flex: 45,
             child: Column(
               children: [
                 _numRow([
                   _numKey(
                     '7',
                     legend: 'π',
+                    fontSize: 16.5,
                     onTap: () => _pressShiftAware(
                       () => _insertChar('7'),
                       () => _insertConst('π', 'pi'),
@@ -2146,6 +2161,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                   _numKey(
                     '8',
                     legend: 'e',
+                    fontSize: 16.5,
                     onTap: () => _pressShiftAware(
                       () => _insertChar('8'),
                       () => _insertConst('e', 'e'),
@@ -2156,17 +2172,18 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                     '⌫',
                     bg: const Color(0xFF475569),
                     fg: const Color(0xFFFDE68A),
+                    fontSize: 17.5,
                     onTap: _pressBackspace,
                   ),
                   _numKey(
                     'AC',
                     bg: const Color(0xFF64748B),
                     fg: Colors.white,
-                    fontSize: 11,
+                    fontSize: 14.5,
                     onTap: _pressClear,
                   ),
                 ]),
-                const SizedBox(height: 3),
+                const SizedBox(height: 4),
                 _numRow([
                   _numKey('4', onTap: () => _insertChar('4')),
                   _numKey('5', onTap: () => _insertChar('5')),
@@ -2182,7 +2199,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                     onTap: () => _insertChar('/'),
                   ),
                 ]),
-                const SizedBox(height: 3),
+                const SizedBox(height: 4),
                 _numRow([
                   _numKey('1', onTap: () => _insertChar('1')),
                   _numKey('2', onTap: () => _insertChar('2')),
@@ -2198,27 +2215,27 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                     onTap: () => _insertChar('-'),
                   ),
                 ]),
-                const SizedBox(height: 3),
+                const SizedBox(height: 4),
                 _numRow([
                   _numKey('0', onTap: () => _insertChar('0')),
                   _numKey('.', onTap: () => _insertChar('.')),
                   _numKey(
                     '×10ˣ',
-                    fontSize: 10.5,
+                    fontSize: 13.5,
                     onTap: () => _insertDocMutation(_doc.insertPow10),
                   ),
                   _numKey(
                     'S⇔D',
                     bg: const Color(0xFF2E3440),
                     fg: const Color(0xFF60A5FA),
-                    fontSize: 10.5,
+                    fontSize: 13.5,
                     onTap: _toggleFormat,
                   ),
                   _numKey(
                     'EXE',
                     bg: const Color(0xFF2563EB),
                     fg: Colors.white,
-                    fontSize: 11.5,
+                    fontSize: 14.5,
                     onTap: _pressExe,
                   ),
                 ]),
@@ -2234,7 +2251,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
     return Container(
       decoration: BoxDecoration(
         color: const Color(0xFF232733),
-        borderRadius: BorderRadius.circular(30),
+        borderRadius: BorderRadius.circular(32),
         border: Border.all(color: Colors.white.withAlpha(32)),
       ),
       child: Stack(
@@ -2250,7 +2267,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                   padding: EdgeInsets.symmetric(horizontal: 10, vertical: 2),
                   child: Text(
                     '▲',
-                    style: TextStyle(color: Colors.white, fontSize: 9.5),
+                    style: TextStyle(color: Colors.white, fontSize: 11.5),
                   ),
                 ),
               ),
@@ -2267,7 +2284,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                   padding: EdgeInsets.symmetric(horizontal: 10, vertical: 2),
                   child: Text(
                     '▼',
-                    style: TextStyle(color: Colors.white, fontSize: 9.5),
+                    style: TextStyle(color: Colors.white, fontSize: 11.5),
                   ),
                 ),
               ),
@@ -2284,7 +2301,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                   padding: EdgeInsets.symmetric(horizontal: 4, vertical: 8),
                   child: Text(
                     '◀',
-                    style: TextStyle(color: Colors.white, fontSize: 9.5),
+                    style: TextStyle(color: Colors.white, fontSize: 11.5),
                   ),
                 ),
               ),
@@ -2301,7 +2318,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                   padding: EdgeInsets.symmetric(horizontal: 4, vertical: 8),
                   child: Text(
                     '▶',
-                    style: TextStyle(color: Colors.white, fontSize: 9.5),
+                    style: TextStyle(color: Colors.white, fontSize: 11.5),
                   ),
                 ),
               ),
@@ -2312,8 +2329,8 @@ class _Casio880OverlayState extends State<Casio880Overlay>
               onTap: _pressOk,
               borderRadius: BorderRadius.circular(14),
               child: Container(
-                width: 30,
-                height: 22,
+                width: 34,
+                height: 24,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
                   color: const Color(0xFF3A4152),
@@ -2324,7 +2341,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                   'OK',
                   style: TextStyle(
                     color: Colors.white,
-                    fontSize: 8.5,
+                    fontSize: 10.5,
                     fontWeight: FontWeight.w800,
                   ),
                 ),
@@ -2342,22 +2359,26 @@ class _Casio880OverlayState extends State<Casio880Overlay>
     required Color bg,
     required Color fg,
     required VoidCallback onTap,
+    double labelFontSize = 11.0,
     bool highlight = false,
   }) {
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        Text(
-          legend,
-          maxLines: 1,
-          style: TextStyle(
-            color: highlight ? Colors.amberAccent : _shiftLegend,
-            fontSize: 7,
-            fontWeight: FontWeight.w800,
-            height: 1,
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            legend,
+            maxLines: 1,
+            style: TextStyle(
+              color: highlight ? Colors.amberAccent : _shiftLegend,
+              fontSize: 9.0,
+              fontWeight: FontWeight.w800,
+              height: 1,
+            ),
           ),
         ),
-        const SizedBox(height: 1),
+        const SizedBox(height: 1.5),
         Expanded(
           child: SizedBox(
             width: double.infinity,
@@ -2369,6 +2390,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                 borderRadius: BorderRadius.circular(12),
                 child: Container(
                   alignment: Alignment.center,
+                  padding: const EdgeInsets.symmetric(horizontal: 3),
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
@@ -2378,12 +2400,15 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                       width: highlight ? 1.2 : 0.8,
                     ),
                   ),
-                  child: Text(
-                    label,
-                    style: TextStyle(
-                      color: fg,
-                      fontSize: 9,
-                      fontWeight: FontWeight.w800,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      label,
+                      style: TextStyle(
+                        color: fg,
+                        fontSize: labelFontSize,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                   ),
                 ),
@@ -2407,34 +2432,44 @@ class _Casio880OverlayState extends State<Casio880Overlay>
         padding: const EdgeInsets.symmetric(horizontal: 1.5),
         child: Column(
           children: [
-            Text(
-              legend ?? '',
-              maxLines: 1,
-              style: const TextStyle(
-                color: _shiftLegend,
-                fontSize: 6.8,
-                fontWeight: FontWeight.w700,
-                height: 1,
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(
+                legend ?? '',
+                maxLines: 1,
+                style: const TextStyle(
+                  color: _shiftLegend,
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w800,
+                  height: 1.0,
+                ),
               ),
             ),
-            const SizedBox(height: 1),
+            const SizedBox(height: 1.5),
             Expanded(
               child: Material(
                 color: const Color(0xFF2D323E),
-                borderRadius: BorderRadius.circular(6),
+                borderRadius: BorderRadius.circular(7),
                 child: InkWell(
                   onTap: onTap,
-                  borderRadius: BorderRadius.circular(6),
+                  borderRadius: BorderRadius.circular(7),
                   child: Center(
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      style: TextStyle(
-                        color: fg,
-                        fontFamily: italic ? 'serif' : null,
-                        fontStyle: italic ? FontStyle.italic : FontStyle.normal,
-                        fontSize: italic ? 12 : 9.5,
-                        fontWeight: FontWeight.w600,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 2),
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          label,
+                          maxLines: 1,
+                          style: TextStyle(
+                            color: fg,
+                            fontFamily: italic ? 'serif' : null,
+                            fontStyle:
+                                italic ? FontStyle.italic : FontStyle.normal,
+                            fontSize: italic ? 15.5 : 12.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -2461,7 +2496,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
     String? legend,
     Color bg = const Color(0xFF3F4554),
     Color fg = Colors.white,
-    double fontSize = 13,
+    double fontSize = 18.5,
     required VoidCallback onTap,
   }) {
     return Expanded(
@@ -2474,38 +2509,45 @@ class _Casio880OverlayState extends State<Casio880Overlay>
             onTap: onTap,
             borderRadius: BorderRadius.circular(8),
             child: Center(
-              child: legend != null
-                  ? Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(
-                          legend,
-                          style: const TextStyle(
-                            color: _shiftLegend,
-                            fontSize: 6.5,
-                            fontWeight: FontWeight.w800,
-                            height: 0.9,
-                          ),
-                        ),
-                        Text(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2),
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: legend != null
+                      ? Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              legend,
+                              style: const TextStyle(
+                                color: _shiftLegend,
+                                fontSize: 9.5,
+                                fontWeight: FontWeight.w800,
+                                height: 0.95,
+                              ),
+                            ),
+                            Text(
+                              label,
+                              style: TextStyle(
+                                color: fg,
+                                fontSize: fontSize,
+                                fontWeight: FontWeight.w700,
+                                height: 1.05,
+                              ),
+                            ),
+                          ],
+                        )
+                      : Text(
                           label,
                           style: TextStyle(
                             color: fg,
-                            fontSize: fontSize - 1,
+                            fontSize: fontSize,
                             fontWeight: FontWeight.w700,
-                            height: 1.05,
                           ),
                         ),
-                      ],
-                    )
-                  : Text(
-                      label,
-                      style: TextStyle(
-                        color: fg,
-                        fontSize: fontSize,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
+                ),
+              ),
             ),
           ),
         ),

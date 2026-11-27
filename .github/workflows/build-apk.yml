@@ -160,22 +160,18 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.8.6 with APK
+      - name: Publish Release v3.8.7 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.8.6
-          name: ChemNote Pro v3.8.6 (Máy tính Casio fx-880BTG nổi MathIO, Kho ảnh bìa ngẫu nhiên & làm gọn thanh công cụ)
+          tag_name: v3.8.7
+          name: ChemNote Pro v3.8.7 (Phóng to phím Casio fx-880BTG, thu gọn ngang 10% & kéo dài cân đối)
           body: |
-            ### ChemNote Pro v3.8.6
-            - **Máy tính Casio fx-880BTG nổi ngay trong trình ghi chú:**
-              - Kích thước mặc định ~1/5 màn ngang (tùy chọn chuyển nhanh 1/6 ↔ 1/5 ↔ 1/4 màn hình), kéo di chuyển tự do hoặc thu gọn thành viên nhỏ, không vẽ nhầm nét bút hay cuộn trang khi bấm.
-              - Hiển thị Toán học Tự nhiên (MathIO: phân số xếp dọc, số mũ, căn thức SVG) với khả năng **chạm bút trực tiếp vào bất kì vị trí nào trên LCD** để đặt con trỏ sửa nhanh và cụm phím điều hướng 4 hướng `▲ ▼ ◀ ▶ + OK`.
-              - Hỗ trợ Tính thường, **`SHIFT + SOLVE`** giải phương trình ẩn `x` bất kì ngay trên màn hình tính chính, **Giải hệ PT 2 / 3 / 4 ẩn**, **Đa thức bậc 2 / 3**, và phím **`S⇔D`** xoay vòng `Thập phân (DEC) ↔ Phân số (FRAC) ↔ Chữ số khoa học (SCI)`.
-            - **Kho ảnh bìa ngẫu nhiên (Cài đặt ChemNote):**
-              - Cho phép thêm nhiều ảnh vào kho ảnh bìa riêng trong Cài đặt Thư viện; khi tạo ghi chú mới (tạo sổ, tạo nhanh, bảng vô cực, nhập PDF/Word/Ảnh) app tự bốc ngẫu nhiên 1 ảnh trong kho (hạn chế lặp lại bìa vừa bốc).
-            - **Làm gọn thanh công cụ & cập nhật icon Lasso:**
-              - Đổi icon công cụ Lasso sang vòng tròn nét đứt gọn gàng.
-              - Rút **Viết cận cảnh (Zoom to)** và **Nhập văn bản (Text)** vào menu cài đặt 3 chấm (`⋯`) để thanh công cụ thoáng hơn.
+            ### ChemNote Pro v3.8.7
+            - **Tinh chỉnh bố cục & kích thước Casio fx-880BTG trên MatePad:**
+              - Thu gọn bề ngang máy tính 10% và kéo dài chiều cao tổng thể để vừa gọn cạnh trang viết hơn.
+              - Chuyển nút thu gọn (`—`) và nút đóng (`✕`) sang sát lề phải thanh tiêu đề, phóng to kích thước nút bấm dễ chạm.
+              - Phóng to rõ nét toàn bộ ký tự 4 hàng phím số (`+ − × ÷`, `EXE`, `S⇔D`, `AC`, `×10ˣ`), kéo cao các hàng phím hàm trên và phóng to cả chữ trắng lẫn chữ vàng `SHIFT`.
+              - Bỏ nhãn `a b/c` phía trên nút phân số `□/□`.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true
