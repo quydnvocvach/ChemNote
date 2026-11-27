@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/providers/app_state.dart';
+import '../../core/theme/app_theme.dart';
 import '../canvas/note_editor_screen.dart';
 
 class SearchScreen extends StatefulWidget {
@@ -132,14 +133,43 @@ class _SearchScreenState extends State<SearchScreen> {
                         onTap: () {
                           final appState = context.read<AppState>();
                           appState.openTab(item.notebook.id);
-                          unawaited(appState.markNotebookOpened(item.notebook.id));
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => NoteEditorScreen(
-                                notebookId: item.notebook.id,
-                              ),
+                          final route = AppTheme.buildEditorRoute<void>(
+                            (_) => NoteEditorScreen(
+                              notebookId: item.notebook.id,
                             ),
                           );
+                          Navigator.of(context).push(route);
+
+                          bool marked = false;
+                          void markOnce() {
+                            if (marked) return;
+                            marked = true;
+                            unawaited(
+                              appState.markNotebookOpened(
+                                item.notebook.id,
+                                deferredSave: true,
+                              ),
+                            );
+                          }
+
+                          final anim = route.animation;
+                          if (anim != null) {
+                            if (anim.status == AnimationStatus.completed) {
+                              WidgetsBinding.instance.addPostFrameCallback(
+                                (_) => markOnce(),
+                              );
+                            } else {
+                              void listener(AnimationStatus status) {
+                                if (status == AnimationStatus.completed) {
+                                  anim.removeStatusListener(listener);
+                                  markOnce();
+                                }
+                              }
+
+                              anim.addStatusListener(listener);
+                            }
+                          }
+                          unawaited(route.completed.then((_) => markOnce()));
                         },
                       ),
                     );

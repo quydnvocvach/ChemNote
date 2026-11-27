@@ -213,22 +213,25 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   const SizedBox(width: 8),
                 ],
               ),
-        body: Row(
-          children: [
-            if (isWide) ...[
-              SizedBox(
-                width: 268,
-                child: Container(
-                  color: isDark ? AppTheme.obsidianSurface : AppTheme.lightSurface,
-                  child: sidebar,
+        body: RepaintBoundary(
+          child: Row(
+            children: [
+              if (isWide) ...[
+                SizedBox(
+                  width: 268,
+                  child: Container(
+                    color:
+                        isDark ? AppTheme.obsidianSurface : AppTheme.lightSurface,
+                    child: sidebar,
+                  ),
                 ),
+                const VerticalDivider(width: 1),
+              ],
+              Expanded(
+                child: _buildMainContent(context, appState),
               ),
-              const VerticalDivider(width: 1),
             ],
-            Expanded(
-              child: _buildMainContent(context, appState),
-            ),
-          ],
+          ),
         ),
         bottomNavigationBar: _isSelectionMode
             ? _buildSelectionBottomBar(context, appState, visibleNotebooks)
@@ -1031,6 +1034,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final nb = notebooks[showAddTile ? itemIndex - 1 : itemIndex];
     final bool isSelected = _selectedNotebookIds.contains(nb.id);
     return NotebookCoverWidget(
+      key: ValueKey(nb.id),
       notebook: nb,
       selectionMode: _isSelectionMode,
       isSelected: isSelected,
@@ -1407,14 +1411,34 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     final appState = context.read<AppState>();
     appState.openTab(notebook.id);
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => NoteEditorScreen(notebookId: notebook.id),
-      ),
+    final route = AppTheme.buildEditorRoute<void>(
+      (_) => NoteEditorScreen(notebookId: notebook.id),
     );
-    Future<void>.delayed(const Duration(milliseconds: 320), () {
-      unawaited(appState.markNotebookOpened(notebook.id));
-    });
+    Navigator.of(context).push(route);
+
+    bool marked = false;
+    void markOnce() {
+      if (marked) return;
+      marked = true;
+      unawaited(appState.markNotebookOpened(notebook.id, deferredSave: true));
+    }
+
+    final anim = route.animation;
+    if (anim != null) {
+      if (anim.status == AnimationStatus.completed) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => markOnce());
+      } else {
+        void listener(AnimationStatus status) {
+          if (status == AnimationStatus.completed) {
+            anim.removeStatusListener(listener);
+            markOnce();
+          }
+        }
+
+        anim.addStatusListener(listener);
+      }
+    }
+    unawaited(route.completed.then((_) => markOnce()));
   }
 
   Future<bool> _promptPinVerification(

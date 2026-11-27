@@ -160,24 +160,22 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.8.4 with APK
+      - name: Publish Release v3.8.5 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.8.4
-          name: ChemNote Pro v3.8.4 (Tối ưu toàn app mượt mà với tần số quét thích ứng, mở sổ/cài đặt tức thì & chống xung đột dữ liệu)
+          tag_name: v3.8.5
+          name: ChemNote Pro v3.8.5 (Zoom ảnh giữ tâm kiểu Huawei, nút cắt/zoom nhạy 0ms, dán ảnh nhấn giữ & mở/đóng ghi chú mượt)
           body: |
-            ### ChemNote Pro v3.8.4
-            - **Tối ưu mượt mà khi mở sổ tay, mở cài đặt ghi chú & vuốt cuộn ở chế độ Tần số quét thích ứng (Dynamic Refresh Rate):**
-              - Chuyển sang gợi ý `preferredRefreshRate` thay vì khóa cứng `preferredDisplayModeId` để HarmonyOS điều phối tần số quét thích ứng mượt mà theo tác vụ, không bị khựng khi chuyển tầng.
-              - Thay hiệu ứng chuyển trang nặng GPU bằng `CupertinoPageTransitionsBuilder`, cache tĩnh `ThemeData` + `Selector<AppState, ThemeMode>` thay cho `Consumer<AppState>` ở gốc ứng dụng.
-              - Trì hoãn lưu mốc `markNotebookOpened` & prefetch các trang PDF lân cận sau khi mở trang xong để hiệu ứng mở ghi chú vào khung hình đầu tiên tức thì.
-              - Bọc `RepaintBoundary` cách ly thân trình soạn thảo + `Drawer` cài đặt, và tách trượt thanh **Tốc độ lướt trang** sang state cục bộ để mở/kéo bảng cài đặt mượt không giật khung.
-            - **Tăng tốc viết/lướt Canvas & sửa rò rỉ bộ nhớ:**
-              - Tách riêng **Layer 0** (giấy nền & PDF nền) khỏi Layer nét vẽ, cô lập repaint theo từng trang (`_pageRepaintVersions`), loại bỏ rebuild thừa khi khoanh Lasso hoặc chạy vòng `ui.Image`/`ui.Codec`.
-              - Thu hẹp cửa sổ render trang dọc (`liveRadius = 4`), khắc phục nhịp trễ khung đầu khi thả tay lướt quán tính, và loại bỏ các lệnh kiểm tra tệp đồng bộ `existsSync()` trong `build()`.
-            - **An toàn dữ liệu & chống xung đột đồng bộ Google Drive:**
-              - Ghi tệp ghi chú nguyên tử (temp + rename) kèm hàng đợi tuần tự gộp phiên bản mới nhất (`saveNotebook`), tránh hỏng JSON hay mất nét khi ghi chồng.
-              - Tạm hoãn đồng bộ nền khi bút M-Pencil đang viết, bảo vệ sửa đổi cục bộ mới hơn khi tải bản Drive về hoặc khi người dùng vừa viết vừa upload.
+            ### ChemNote Pro v3.8.5
+            - **Zoom ảnh giữ tâm cố định & nút kéo siêu nhạy kiểu Huawei Notes:**
+              - Kéo 4 nút góc ảnh phóng to/thu nhỏ đồng tâm đều ra 4 phía, giữ nguyên vị trí tâm ảnh theo đúng tỷ lệ góc nhìn 1:1.
+              - Thu gọn kích thước nút vuông cắt/resize xuống `10×10px` tinh tế nhưng giữ vùng chạm tàng hình `56–60px` và chuyển sang `Listener` trực tiếp (**0px delay, không qua `GestureDetector` slop**), loại bỏ `setState` toàn màn hình khi kéo.
+            - **Sao chép & nhấn giữ để dán ảnh:**
+              - Nhấn **Sao chép** (hoặc **Cắt**) lưu ảnh vào clipboard thay vì nhân bản ngay lên ảnh gốc.
+              - Nhấn giữ trên trang bằng bút hoặc ngón tay để bật thanh nổi **Dán** ngay tại vị trí vừa chạm, dán bản sao với hỗ trợ Undo/Redo đầy đủ.
+              - Căn giữa thanh điều khiển cắt **Xong | Đặt lại | Hủy** và thanh tác vụ ảnh thẳng hàng theo tâm ảnh.
+            - **Khử khựng triệt để khi mở & đóng ghi chú:**
+              - Dùng chuyển cảnh mở/đóng trình soạn thảo nhẹ (`AppTheme.buildEditorRoute`), đồng bộ giải phóng trang lân cận sau khi kết thúc animation, không ép flush/sync đĩa với sổ chưa chỉnh sửa khi đóng, và vẽ giấy chấm bi / Bảng vô cực qua `drawRawPoints` + clip-culling GPU.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

@@ -1,4 +1,6 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import '../../core/models/drawing_elements.dart';
 
@@ -241,6 +243,27 @@ class PaperTemplatePainter extends CustomPainter {
     PaperPalette palette, {
     double lineBoost = 1.0,
   }) {
+    final Rect clip = canvas.getLocalClipBounds();
+    final bool hasSubClip = !clip.isEmpty &&
+        clip.left.isFinite &&
+        clip.top.isFinite &&
+        clip.right.isFinite &&
+        clip.bottom.isFinite &&
+        (clip.width < size.width - 1.0 || clip.height < size.height - 1.0) &&
+        clip.right > 0 &&
+        clip.bottom > 0 &&
+        clip.left < size.width &&
+        clip.top < size.height;
+    final double visLeft =
+        hasSubClip ? clip.left.clamp(0.0, size.width).toDouble() : 0.0;
+    final double visTop =
+        hasSubClip ? clip.top.clamp(0.0, size.height).toDouble() : 0.0;
+    final double visRight =
+        hasSubClip ? clip.right.clamp(0.0, size.width).toDouble() : size.width;
+    final double visBottom = hasSubClip
+        ? clip.bottom.clamp(0.0, size.height).toDouble()
+        : size.height;
+
     switch (templateType) {
       case PaperTemplateType.blank:
         break;
@@ -253,23 +276,31 @@ class PaperTemplatePainter extends CustomPainter {
         final majorPaint = Paint()
           ..color = palette.majorLine
           ..strokeWidth = 1.2 * lineBoost;
-        int col = 0;
-        for (double x = 0; x <= size.width; x += step) {
+        final int startCol = math.max(0, (visLeft / step).floor());
+        final int endCol = math.min(
+          (size.width / step).floor(),
+          (visRight / step).ceil(),
+        );
+        for (int col = startCol; col <= endCol; col++) {
+          final double x = col * step;
           canvas.drawLine(
-            Offset(x, 0),
-            Offset(x, size.height),
+            Offset(x, visTop),
+            Offset(x, visBottom),
             col % 5 == 0 ? majorPaint : minorPaint,
           );
-          col++;
         }
-        int row = 0;
-        for (double y = 0; y <= size.height; y += step) {
+        final int startRow = math.max(0, (visTop / step).floor());
+        final int endRow = math.min(
+          (size.height / step).floor(),
+          (visBottom / step).ceil(),
+        );
+        for (int row = startRow; row <= endRow; row++) {
+          final double y = row * step;
           canvas.drawLine(
-            Offset(0, y),
-            Offset(size.width, y),
+            Offset(visLeft, y),
+            Offset(visRight, y),
             row % 5 == 0 ? majorPaint : minorPaint,
           );
-          row++;
         }
         break;
       case PaperTemplateType.hexagonal:
@@ -280,11 +311,26 @@ class PaperTemplatePainter extends CustomPainter {
         const double radius = 26.0;
         final double hexWidth = math.sqrt(3) * radius;
         const double verticalStep = radius * 1.5;
+        final int startRow =
+            math.max(0, ((visTop - radius) / verticalStep).floor());
+        final int endRow = math.min(
+          ((size.height + radius) / verticalStep).floor(),
+          ((visBottom + radius) / verticalStep).ceil(),
+        );
         final Path path = Path();
-        int row = 0;
-        for (double cy = 0; cy <= size.height + radius; cy += verticalStep) {
+        for (int row = startRow; row <= endRow; row++) {
+          final double cy = row * verticalStep;
           final double xOffset = row.isOdd ? hexWidth * 0.5 : 0.0;
-          for (double cx = xOffset; cx <= size.width + hexWidth; cx += hexWidth) {
+          final int startCol = math.max(
+            0,
+            ((visLeft - xOffset - hexWidth) / hexWidth).floor(),
+          );
+          final int endCol = math.min(
+            ((size.width + hexWidth - xOffset) / hexWidth).floor(),
+            ((visRight - xOffset + hexWidth) / hexWidth).ceil(),
+          );
+          for (int col = startCol; col <= endCol; col++) {
+            final double cx = xOffset + col * hexWidth;
             for (int i = 0; i < 6; i++) {
               final double angle = (math.pi / 180.0) * (60 * i - 30);
               final double vx = cx + radius * math.cos(angle);
@@ -297,7 +343,6 @@ class PaperTemplatePainter extends CustomPainter {
             }
             path.close();
           }
-          row++;
         }
         canvas.drawPath(path, hexPaint);
         break;
@@ -309,19 +354,44 @@ class PaperTemplatePainter extends CustomPainter {
         final linePaint = Paint()
           ..color = palette.line
           ..strokeWidth = 1.0 * lineBoost;
-        for (double y = 36.0; y < size.height; y += 36.0) {
-          canvas.drawLine(Offset(0, y), Offset(size.width, y), linePaint);
+        final int startLine = math.max(1, (visTop / 36.0).floor());
+        final int endLine = math.min(
+          ((size.height - 0.001) / 36.0).floor(),
+          (visBottom / 36.0).ceil(),
+        );
+        for (int i = startLine; i <= endLine; i++) {
+          final double y = i * 36.0;
+          canvas.drawLine(Offset(visLeft, y), Offset(visRight, y), linePaint);
         }
         break;
       case PaperTemplateType.dotted:
-        final dotPaint = Paint()
-          ..color = palette.majorLine
-          ..style = PaintingStyle.fill;
         const double step = 32.0;
-        for (double y = step; y < size.height; y += step) {
-          for (double x = step; x < size.width; x += step) {
-            canvas.drawCircle(Offset(x, y), 1.45 * lineBoost, dotPaint);
+        final int minRow = math.max(1, (visTop / step).floor());
+        final int maxRow = math.min(
+          ((size.height - 0.001) / step).floor(),
+          (visBottom / step).ceil(),
+        );
+        final int minCol = math.max(1, (visLeft / step).floor());
+        final int maxCol = math.min(
+          ((size.width - 0.001) / step).floor(),
+          (visRight / step).ceil(),
+        );
+        if (maxRow >= minRow && maxCol >= minCol) {
+          final int count = (maxRow - minRow + 1) * (maxCol - minCol + 1);
+          final Float32List coords = Float32List(count * 2);
+          int idx = 0;
+          for (int r = minRow; r <= maxRow; r++) {
+            final double y = r * step;
+            for (int c = minCol; c <= maxCol; c++) {
+              coords[idx++] = c * step;
+              coords[idx++] = y;
+            }
           }
+          final dotPaint = Paint()
+            ..color = palette.majorLine
+            ..strokeWidth = 2.9 * lineBoost
+            ..strokeCap = StrokeCap.round;
+          canvas.drawRawPoints(ui.PointMode.points, coords, dotPaint);
         }
         break;
     }
@@ -743,19 +813,31 @@ class PaperTemplatePainter extends CustomPainter {
     PaperPalette palette, {
     double lineBoost = 1.0,
   }) {
-    final dotPaint = Paint()
-      ..color = palette.majorLine
-      ..style = PaintingStyle.fill;
-
     const double step = 24.0;
     const double margin = 28.0;
-    final double radius = 1.35 * lineBoost;
+    final double diameter = 2.7 * lineBoost;
+    final int cols = size.width >= margin * 2
+        ? ((size.width - margin * 2 + 1e-6) / step).floor() + 1
+        : 0;
+    final int rows = size.height >= margin * 2
+        ? ((size.height - margin * 2 + 1e-6) / step).floor() + 1
+        : 0;
+    if (cols <= 0 || rows <= 0) return;
 
-    for (double y = margin; y <= size.height - margin; y += step) {
-      for (double x = margin; x <= size.width - margin; x += step) {
-        canvas.drawCircle(Offset(x, y), radius, dotPaint);
+    final Float32List coords = Float32List(cols * rows * 2);
+    int idx = 0;
+    for (int r = 0; r < rows; r++) {
+      final double y = margin + r * step;
+      for (int c = 0; c < cols; c++) {
+        coords[idx++] = margin + c * step;
+        coords[idx++] = y;
       }
     }
+    final dotPaint = Paint()
+      ..color = palette.majorLine
+      ..strokeWidth = diameter
+      ..strokeCap = StrokeCap.round;
+    canvas.drawRawPoints(ui.PointMode.points, coords, dotPaint);
   }
 
   void _paintCornell(

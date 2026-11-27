@@ -13,6 +13,33 @@ class AppTheme {
     },
   );
 
+  /// Lightweight transition for opening/closing NoteEditorScreen with zero
+  /// secondary-route parallax or Cupertino shadow layer stalls.
+  static PageRoute<T> buildEditorRoute<T>(WidgetBuilder builder) {
+    return PageRouteBuilder<T>(
+      transitionDuration: const Duration(milliseconds: 220),
+      reverseTransitionDuration: const Duration(milliseconds: 180),
+      pageBuilder: (context, _, __) => builder(context),
+      transitionsBuilder: (_, animation, __, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeInCubic,
+        );
+        return FadeTransition(
+          opacity: curved,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0.06, 0.0),
+              end: Offset.zero,
+            ).animate(curved),
+            child: child,
+          ),
+        );
+      },
+    );
+  }
+
   // Bảng màu Obsidian Dark theo phong cách Huawei Notes × GoodNotes 6
   static const Color obsidianBg = Color(0xFF0B0C10);
   static const Color obsidianSurface = Color(0xFF16181D);

@@ -118,9 +118,12 @@ class AppState extends ChangeNotifier {
   // Debounce lưu đĩa cho các thay đổi trang liên tiếp (tránh nghẽn luồng UI / ANR khi viết nhanh)
   final Map<String, Timer> _pendingSaveTimers = {};
   final Map<String, Notebook> _pendingSaveNotebooks = {};
+  final Set<String> _pendingSaveTriggerSync = {};
   int _libraryUiRevision = 0;
 
   int get libraryUiRevision => _libraryUiRevision;
+  bool get hasPendingSaves => _pendingSaveNotebooks.isNotEmpty;
+  bool get hasPendingEditedSaves => _pendingSaveTriggerSync.isNotEmpty;
   void _bumpLibraryRevision() {
     _libraryUiRevision++;
   }
@@ -931,15 +934,30 @@ class AppState extends ChangeNotifier {
 
   /// Cập nhật mốc thời gian mở gần nhất của sổ tay để đưa lên đầu màn hình chính
   /// (chỉ lưu cục bộ, không làm thay đổi `updatedAt` hay đánh dấu cần đồng bộ Drive).
-  Future<void> markNotebookOpened(String notebookId) async {
+  Future<void> markNotebookOpened(
+    String notebookId, {
+    bool deferredSave = false,
+  }) async {
     final notebook = getNotebookById(notebookId);
     if (notebook == null) return;
+    final bool orderChanged =
+        _notebooks.isNotEmpty && _notebooks.first.id != notebookId;
     final updated = notebook.copyWith(lastOpenedAt: DateTime.now());
     _notebooks =
         _notebooks.map((n) => n.id == notebookId ? updated : n).toList();
     _notebooks.sort(_compareByLastOpened);
-    _bumpLibraryRevision();
-    notifyListeners();
+    if (orderChanged) {
+      _bumpLibraryRevision();
+      notifyListeners();
+    }
+    if (deferredSave) {
+      _scheduleDebouncedNotebookSave(
+        updated,
+        delay: const Duration(milliseconds: 1200),
+        triggerSync: false,
+      );
+      return;
+    }
     await _storage.saveNotebook(updated);
   }
 
@@ -951,6 +969,7 @@ class AppState extends ChangeNotifier {
     _openNotebookIds.remove(notebookId);
     _pendingSaveTimers.remove(notebookId)?.cancel();
     _pendingSaveNotebooks.remove(notebookId);
+    _pendingSaveTriggerSync.remove(notebookId);
     _notebooks = _notebooks.where((n) => n.id != notebookId).toList();
     await _storage.deleteNotebookFile(notebookId);
     _bumpLibraryRevision();
@@ -1244,6 +1263,7 @@ class AppState extends ChangeNotifier {
     }
     _pendingSaveTimers.remove(remoteNotebook.id)?.cancel();
     _pendingSaveNotebooks.remove(remoteNotebook.id);
+    _pendingSaveTriggerSync.remove(remoteNotebook.id);
 
     final existing = getNotebookById(remoteNotebook.id);
     final synced = remoteNotebook.copyWith(
@@ -1372,38 +1392,80 @@ class AppState extends ChangeNotifier {
     _scheduleDebouncedNotebookSave(updated);
   }
 
-  void _scheduleDebouncedNotebookSave(Notebook notebook) {
+  void _scheduleDebouncedNotebookSave(
+    Notebook notebook, {
+    Duration delay = const Duration(milliseconds: 1500),
+    bool triggerSync = true,
+  }) {
     _pendingSaveNotebooks[notebook.id] = notebook;
+    if (triggerSync) {
+      _pendingSaveTriggerSync.add(notebook.id);
+    }
     _pendingSaveTimers[notebook.id]?.cancel();
     _pendingSaveTimers[notebook.id] = Timer(
-      const Duration(milliseconds: 1500),
+      delay,
       () {
         if (_isStylusDrawingActive) {
           final latest = _pendingSaveNotebooks[notebook.id];
           if (latest != null) {
-            _scheduleDebouncedNotebookSave(latest);
+            _scheduleDebouncedNotebookSave(
+              latest,
+              delay: delay,
+              triggerSync: _pendingSaveTriggerSync.contains(notebook.id),
+            );
           }
           return;
         }
         _pendingSaveTimers.remove(notebook.id);
         final pending = _pendingSaveNotebooks.remove(notebook.id);
+        final shouldSync = _pendingSaveTriggerSync.remove(notebook.id);
         if (pending != null) {
           unawaited(_storage.saveNotebook(pending));
-          onNotebookChangedForSync?.call(pending);
+          if (shouldSync) {
+            onNotebookChangedForSync?.call(pending);
+          }
         }
       },
     );
   }
 
   /// Ghi ngay toàn bộ các sổ tay đang chờ debounce xuống đĩa (gọi khi thoát trình ghi chú / tạm dừng app).
-  Future<void> flushPendingSaves() async {
-    for (final timer in _pendingSaveTimers.values) {
-      timer.cancel();
+  Future<void> flushPendingSaves({bool onlyEdited = false}) async {
+    if (!onlyEdited) {
+      for (final timer in _pendingSaveTimers.values) {
+        timer.cancel();
+      }
+      _pendingSaveTimers.clear();
+      if (_pendingSaveNotebooks.isEmpty) {
+        _pendingSaveTriggerSync.clear();
+        return;
+      }
+      final batch = List<Notebook>.from(_pendingSaveNotebooks.values);
+      _pendingSaveNotebooks.clear();
+      final syncIds = Set<String>.from(_pendingSaveTriggerSync);
+      _pendingSaveTriggerSync.clear();
+      for (final nb in batch) {
+        await _storage.saveNotebook(nb);
+        if (syncIds.contains(nb.id)) {
+          onNotebookChangedForSync?.call(nb);
+        }
+      }
+      return;
     }
-    _pendingSaveTimers.clear();
-    if (_pendingSaveNotebooks.isEmpty) return;
-    final batch = List<Notebook>.from(_pendingSaveNotebooks.values);
-    _pendingSaveNotebooks.clear();
+
+    if (_pendingSaveTriggerSync.isEmpty || _pendingSaveNotebooks.isEmpty) {
+      return;
+    }
+    final editedIds = Set<String>.from(_pendingSaveTriggerSync);
+    final batch = <Notebook>[];
+    for (final id in editedIds) {
+      _pendingSaveTimers.remove(id)?.cancel();
+      _pendingSaveTriggerSync.remove(id);
+      final pending = _pendingSaveNotebooks.remove(id);
+      if (pending != null) {
+        batch.add(pending);
+      }
+    }
     for (final nb in batch) {
       await _storage.saveNotebook(nb);
       onNotebookChangedForSync?.call(nb);
@@ -1416,6 +1478,8 @@ class AppState extends ChangeNotifier {
       timer.cancel();
     }
     _pendingSaveTimers.clear();
+    _pendingSaveNotebooks.clear();
+    _pendingSaveTriggerSync.clear();
     super.dispose();
   }
 

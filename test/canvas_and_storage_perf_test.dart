@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:chemnote/core/models/drawing_elements.dart';
@@ -8,6 +9,7 @@ import 'package:chemnote/core/models/notebook.dart';
 import 'package:chemnote/core/providers/app_state.dart';
 import 'package:chemnote/core/storage/local_storage_service.dart';
 import 'package:chemnote/features/canvas/canvas_painter.dart';
+import 'package:chemnote/features/canvas/image_transform_utils.dart';
 import 'package:chemnote/features/canvas/lasso_controller.dart';
 import 'package:chemnote/features/canvas/paper_templates.dart';
 import 'package:chemnote/features/canvas/stroke_engine.dart';
@@ -937,6 +939,190 @@ void main() {
       final current = appState.getNotebookById(nb.id)!;
       expect(current.syncStatus, SyncStatus.pendingUpload);
       expect(manager.pendingUploadIds, contains(nb.id));
+    });
+  });
+
+  group('Image corner scaling, whiteboard culling & deferred saves (v3.8.5)', () {
+    test('computeCenterAnchoredCornerScale keeps image center fixed and tracks all 4 corners + rotation', () {
+      const double startX = 100.0;
+      const double startY = 200.0;
+      const double startW = 160.0;
+      const double startH = 120.0;
+      const double cx = startX + startW * 0.5;
+      const double cy = startY + startH * 0.5;
+
+      // Drag bottom-right corner outward along 4:3 diagonal (+40, +30)
+      final br = computeCenterAnchoredCornerScale(
+        startX: startX,
+        startY: startY,
+        startW: startW,
+        startH: startH,
+        pageDx: 40.0,
+        pageDy: 30.0,
+        signX: 1,
+        signY: 1,
+      );
+      expect(br.x + br.width * 0.5, closeTo(cx, 1e-6));
+      expect(br.y + br.height * 0.5, closeTo(cy, 1e-6));
+      expect(br.width, closeTo(240.0, 1e-6));
+      expect(br.height, closeTo(180.0, 1e-6));
+      // Bottom-right corner tracks (+40, +30) from (260, 320) -> (300, 350)
+      expect(br.x + br.width, closeTo(300.0, 1e-6));
+      expect(br.y + br.height, closeTo(350.0, 1e-6));
+
+      // Top-left (-40, -30), top-right (+40, -30), bottom-left (-40, +30)
+      for (final tuple in const [
+        (dx: -40.0, dy: -30.0, sx: -1.0, sy: -1.0),
+        (dx: 40.0, dy: -30.0, sx: 1.0, sy: -1.0),
+        (dx: -40.0, dy: 30.0, sx: -1.0, sy: 1.0),
+      ]) {
+        final res = computeCenterAnchoredCornerScale(
+          startX: startX,
+          startY: startY,
+          startW: startW,
+          startH: startH,
+          pageDx: tuple.dx,
+          pageDy: tuple.dy,
+          signX: tuple.sx,
+          signY: tuple.sy,
+        );
+        expect(res.x + res.width * 0.5, closeTo(cx, 1e-6));
+        expect(res.y + res.height * 0.5, closeTo(cy, 1e-6));
+        expect(res.width / res.height, closeTo(startW / startH, 1e-6));
+        expect(res.width, closeTo(240.0, 1e-6));
+      }
+
+      // Non-zero rotation still keeps exact center & aspect ratio
+      final rotated = computeCenterAnchoredCornerScale(
+        startX: startX,
+        startY: startY,
+        startW: startW,
+        startH: startH,
+        pageDx: 35.0,
+        pageDy: 25.0,
+        signX: 1,
+        signY: 1,
+        rotation: math.pi / 4,
+      );
+      expect(rotated.x + rotated.width * 0.5, closeTo(cx, 1e-6));
+      expect(rotated.y + rotated.height * 0.5, closeTo(cy, 1e-6));
+      expect(rotated.width / rotated.height, closeTo(startW / startH, 1e-6));
+
+      // Shrinking far inward clamps cleanly to minSize=32 while keeping center fixed
+      final shrunk = computeCenterAnchoredCornerScale(
+        startX: startX,
+        startY: startY,
+        startW: startW,
+        startH: startH,
+        pageDx: -500.0,
+        pageDy: -500.0,
+        signX: 1,
+        signY: 1,
+      );
+      expect(shrunk.x + shrunk.width * 0.5, closeTo(cx, 1e-6));
+      expect(shrunk.y + shrunk.height * 0.5, closeTo(cy, 1e-6));
+      expect(math.min(shrunk.width, shrunk.height), greaterThanOrEqualTo(32.0 - 1e-6));
+    });
+
+    test('PaperTemplatePainter dotted & infinite whiteboard templates render unclipped and sub-clipped cleanly', () {
+      for (final tpl in const [
+        PaperTemplateType.dotted,
+        PaperTemplateType.grid,
+        PaperTemplateType.hexagonal,
+      ]) {
+        final recorder = ui.PictureRecorder();
+        final canvas = Canvas(recorder);
+        PaperTemplatePainter(
+          templateType: tpl,
+          paperColor: PaperColorType.white,
+          isInfiniteWhiteboard: true,
+        ).paint(canvas, const Size(6000, 6000));
+        recorder.endRecording().dispose();
+
+        final clippedRecorder = ui.PictureRecorder();
+        final clippedCanvas = Canvas(clippedRecorder);
+        clippedCanvas.clipRect(const Rect.fromLTWH(2500, 2500, 900, 700));
+        PaperTemplatePainter(
+          templateType: tpl,
+          paperColor: PaperColorType.dark,
+          isInfiniteWhiteboard: true,
+        ).paint(clippedCanvas, const Size(6000, 6000));
+        clippedRecorder.endRecording().dispose();
+      }
+
+      final a4Dotted = ui.PictureRecorder();
+      PaperTemplatePainter(
+        templateType: PaperTemplateType.dotted,
+        paperColor: PaperColorType.cream,
+      ).paint(Canvas(a4Dotted), const Size(794, 1123));
+      a4Dotted.endRecording().dispose();
+    });
+
+    test('AppState.markNotebookOpened(deferredSave: true) avoids redundant rebuilds & onlyEdited flush skips clean metadata', () async {
+      final tempDir = Directory.systemTemp.createTempSync('chemnote_deferred_open_');
+      addTearDown(() {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final storage = LocalStorageService(baseDirectory: tempDir);
+      final tOld = DateTime.utc(2026, 11, 20, 8, 0);
+      final tNew = DateTime.utc(2026, 11, 27, 9, 0);
+      final nbFirst = Notebook(
+        id: 'nb-first',
+        title: 'Đã ở đầu',
+        createdAt: tNew,
+        updatedAt: tNew,
+        lastOpenedAt: tNew,
+      );
+      final nbSecond = Notebook(
+        id: 'nb-second',
+        title: 'Sổ cũ',
+        createdAt: tOld,
+        updatedAt: tOld,
+        lastOpenedAt: tOld,
+      );
+      await storage.saveNotebooks([nbFirst, nbSecond]);
+
+      final appState = AppState(storage: storage);
+      addTearDown(appState.dispose);
+      int syncCalls = 0;
+      appState.onNotebookChangedForSync = (_) async {
+        syncCalls++;
+      };
+      await appState.loadAll();
+
+      final revBefore = appState.libraryUiRevision;
+      await appState.markNotebookOpened('nb-first', deferredSave: true);
+      expect(appState.libraryUiRevision, revBefore);
+      expect(appState.hasPendingSaves, isTrue);
+      expect(appState.hasPendingEditedSaves, isFalse);
+      expect(syncCalls, 0);
+
+      // Closing editor without edits skips synchronous flush/sync
+      await appState.flushPendingSaves(onlyEdited: true);
+      expect(appState.hasPendingSaves, isTrue);
+      expect(syncCalls, 0);
+
+      // Actual edit marks notebook for edited flush & sync
+      await appState.updatePage(
+        'nb-first',
+        appState.getNotebookById('nb-first')!.pages.first.copyWith(
+          strokes: const [
+            Stroke(
+              id: 's-deferred',
+              toolType: ToolType.fountainPen,
+              colorValue: 0xFF1D4ED8,
+              width: 2.0,
+              points: [StrokePoint(x: 10, y: 10, pressure: 0.5)],
+            ),
+          ],
+        ),
+      );
+      expect(appState.hasPendingEditedSaves, isTrue);
+      await appState.flushPendingSaves(onlyEdited: true);
+      expect(appState.hasPendingEditedSaves, isFalse);
+      expect(appState.hasPendingSaves, isFalse);
+      expect(syncCalls, 1);
     });
   });
 }
