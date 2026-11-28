@@ -44,6 +44,10 @@ class Notebook {
   final bool isWhiteboard;
   final String? customCoverImagePath;
   final bool useFirstPageAsCover;
+  final int lastPageIndex;
+  final double? lastScrollOffsetX;
+  final double? lastScrollOffsetY;
+  final double? lastZoomScale;
 
   const Notebook({
     required this.id,
@@ -69,6 +73,10 @@ class Notebook {
     this.isWhiteboard = false,
     this.customCoverImagePath,
     this.useFirstPageAsCover = false,
+    this.lastPageIndex = 0,
+    this.lastScrollOffsetX,
+    this.lastScrollOffsetY,
+    this.lastZoomScale,
   });
 
   DateTime get effectiveOpenedAt => lastOpenedAt ?? updatedAt;
@@ -104,6 +112,11 @@ class Notebook {
     String? customCoverImagePath,
     bool clearCustomCoverImagePath = false,
     bool? useFirstPageAsCover,
+    int? lastPageIndex,
+    double? lastScrollOffsetX,
+    double? lastScrollOffsetY,
+    double? lastZoomScale,
+    bool clearViewportState = false,
   }) {
     return Notebook(
       id: id ?? this.id,
@@ -135,6 +148,16 @@ class Notebook {
           ? null
           : (customCoverImagePath ?? this.customCoverImagePath),
       useFirstPageAsCover: useFirstPageAsCover ?? this.useFirstPageAsCover,
+      lastPageIndex:
+          clearViewportState ? 0 : (lastPageIndex ?? this.lastPageIndex),
+      lastScrollOffsetX: clearViewportState
+          ? null
+          : (lastScrollOffsetX ?? this.lastScrollOffsetX),
+      lastScrollOffsetY: clearViewportState
+          ? null
+          : (lastScrollOffsetY ?? this.lastScrollOffsetY),
+      lastZoomScale:
+          clearViewportState ? null : (lastZoomScale ?? this.lastZoomScale),
     );
   }
 
@@ -163,6 +186,10 @@ class Notebook {
       'isWhiteboard': isWhiteboard,
       'customCoverImagePath': customCoverImagePath,
       'useFirstPageAsCover': useFirstPageAsCover,
+      'lastPageIndex': lastPageIndex,
+      'lastScrollOffsetX': lastScrollOffsetX,
+      'lastScrollOffsetY': lastScrollOffsetY,
+      'lastZoomScale': lastZoomScale,
     };
   }
 
@@ -204,6 +231,10 @@ class Notebook {
       isWhiteboard: json['isWhiteboard'] as bool? ?? false,
       customCoverImagePath: json['customCoverImagePath'] as String?,
       useFirstPageAsCover: json['useFirstPageAsCover'] as bool? ?? false,
+      lastPageIndex: (json['lastPageIndex'] as num?)?.toInt() ?? 0,
+      lastScrollOffsetX: (json['lastScrollOffsetX'] as num?)?.toDouble(),
+      lastScrollOffsetY: (json['lastScrollOffsetY'] as num?)?.toDouble(),
+      lastZoomScale: (json['lastZoomScale'] as num?)?.toDouble(),
     );
   }
 }

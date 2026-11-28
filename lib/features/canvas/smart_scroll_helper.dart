@@ -24,6 +24,7 @@ class SmartScrollTracker {
   int _lastSampleTimeUs = 0;
   double _lastVx = 0.0;
   double _lastVy = 0.0;
+  double _smoothedSpeedY = 0.0;
   final List<_MoveSample> _samples = <_MoveSample>[];
 
   SmartScrollAxis get axisLock => _axisLock;
@@ -38,6 +39,7 @@ class SmartScrollTracker {
     _lastSampleTimeUs = 0;
     _lastVx = 0.0;
     _lastVy = 0.0;
+    _smoothedSpeedY = 0.0;
     _samples.clear();
   }
 
@@ -126,9 +128,15 @@ class SmartScrollTracker {
     _lastVx = lockHorizontal ? 0.0 : vel.vx;
     _lastVy = vel.vy;
 
-    final double speedY = _lastVy.abs();
-    final double t = ((speedY - 360.0) / 2400.0).clamp(0.0, 1.0).toDouble();
-    final double accelBoost = 1.0 + (t * t) * 2.6;
+    // Low-pass filter speedY from window velocity so uneven 60-144Hz packet dt
+    // never causes drag acceleration judder while fast swipes ramp smoothly.
+    final double rawWindowSpeedY = vel.windowVy.abs();
+    _smoothedSpeedY = _smoothedSpeedY <= 0.0
+        ? rawWindowSpeedY
+        : (_smoothedSpeedY * 0.80 + rawWindowSpeedY * 0.20);
+    final double t =
+        ((_smoothedSpeedY - 380.0) / 2400.0).clamp(0.0, 1.0).toDouble();
+    final double accelBoost = 1.0 + (t * t) * 2.2;
     final double outDy = effectiveDelta.dy * scrollMult * accelBoost;
 
     return (
@@ -221,7 +229,7 @@ class SmartScrollTracker {
     );
   }
 
-  static ({double vx, double vy}) _estimateVelocity({
+  static ({double vx, double vy, double windowVy}) _estimateVelocity({
     required List<_MoveSample> samples,
     required int anchorTimeUs,
     required int prevTimeUs,
@@ -255,6 +263,7 @@ class SmartScrollTracker {
     return (
       vx: windowVx * 0.65 + instVx * 0.35,
       vy: windowVy * 0.65 + instVy * 0.35,
+      windowVy: windowVy,
     );
   }
 }

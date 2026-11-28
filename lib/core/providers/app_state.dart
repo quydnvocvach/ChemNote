@@ -1044,6 +1044,52 @@ class AppState extends ChangeNotifier {
     await _storage.saveNotebook(updated);
   }
 
+  /// Lưu lại đúng vị trí trang & cuộn/zoom cuối cùng của sổ tay (chỉ lưu cục bộ,
+  /// không làm thay đổi `updatedAt`, không gọi `notifyListeners()` và không kích hoạt Drive sync).
+  Future<void> saveNotebookViewportState(
+    String notebookId, {
+    required int lastPageIndex,
+    double? lastScrollOffsetX,
+    double? lastScrollOffsetY,
+    double? lastZoomScale,
+    bool flushImmediately = false,
+  }) async {
+    final notebook = getNotebookById(notebookId);
+    if (notebook == null) return;
+    final int clampedIdx = notebook.pages.isEmpty
+        ? 0
+        : lastPageIndex.clamp(0, notebook.pages.length - 1);
+    final updated = notebook.copyWith(
+      lastPageIndex: clampedIdx,
+      lastScrollOffsetX: lastScrollOffsetX,
+      lastScrollOffsetY: lastScrollOffsetY,
+      lastZoomScale: lastZoomScale,
+    );
+    _notebooks =
+        _notebooks.map((n) => n.id == notebookId ? updated : n).toList();
+    if (_pendingSaveNotebooks.containsKey(notebookId)) {
+      _pendingSaveNotebooks[notebookId] = _pendingSaveNotebooks[notebookId]!
+          .copyWith(
+        lastPageIndex: clampedIdx,
+        lastScrollOffsetX: lastScrollOffsetX,
+        lastScrollOffsetY: lastScrollOffsetY,
+        lastZoomScale: lastZoomScale,
+      );
+    }
+    if (flushImmediately) {
+      if (!_pendingSaveTimers.containsKey(notebookId)) {
+        await _storage.saveNotebook(updated);
+      }
+      return;
+    }
+    final bool hasEditSync = _pendingSaveTriggerSync.contains(notebookId);
+    _scheduleDebouncedNotebookSave(
+      _pendingSaveNotebooks[notebookId] ?? updated,
+      delay: const Duration(milliseconds: 900),
+      triggerSync: hasEditSync,
+    );
+  }
+
   Future<void> deleteNotebook(
     String notebookId, {
     bool cleanupOrphans = true,
@@ -1352,6 +1398,12 @@ class AppState extends ChangeNotifier {
     final synced = remoteNotebook.copyWith(
       syncStatus: SyncStatus.synced,
       lastOpenedAt: existing?.lastOpenedAt ?? remoteNotebook.lastOpenedAt,
+      lastPageIndex: existing?.lastPageIndex ?? remoteNotebook.lastPageIndex,
+      lastScrollOffsetX:
+          existing?.lastScrollOffsetX ?? remoteNotebook.lastScrollOffsetX,
+      lastScrollOffsetY:
+          existing?.lastScrollOffsetY ?? remoteNotebook.lastScrollOffsetY,
+      lastZoomScale: existing?.lastZoomScale ?? remoteNotebook.lastZoomScale,
     );
     final exists = existing != null;
     if (exists) {

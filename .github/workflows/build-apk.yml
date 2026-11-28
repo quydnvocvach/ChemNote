@@ -160,26 +160,23 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.8.8 with APK
+      - name: Publish Release v3.8.9 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.8.8
-          name: ChemNote Pro v3.8.8 (Tối ưu triệt để độ mượt 144Hz, bút M-Pencil 3, cuộn thông minh & 2/3 ngón Undo/Redo)
+          tag_name: v3.8.9
+          name: ChemNote Pro v3.8.9 (Mượt 144Hz khi cuộn/hiển thị, chống mất nét do tỳ tay & nhớ đúng vị trí đọc)
           body: |
-            ### ChemNote Pro v3.8.8
-            - **Khắc phục triệt để độ trễ / sót nét bút M-Pencil 3 & khóa cảm ứng ngón tay (Native + Flutter):**
-              - Sửa lỗi trạng thái `isNativeStylusDown` bị kẹt `true` khi nhấc bút trong lúc ngón/lòng bàn tay còn chạm (`ACTION_POINTER_UP`) và tự đồng bộ lại khi hover hoặc quá thời gian.
-              - Loại bỏ cooldown giả khi đưa bút rời vùng hover (`ACTION_HOVER_EXIT`), rút ngắn cooldown bảo vệ xuống mức tối ưu để chạm/lướt/2-3 ngón ngay sau khi viết không bị nuốt.
-              - Tách riêng lớp vẽ nét trực tiếp theo từng trang qua `ValueNotifier` để nét đầu tiên trên trang mới hiển thị tức thì và bổ sung `_handlePointerCancel` hoàn chỉnh.
-              - Tự động dọn các pointer bị kẹt do cử chỉ hệ thống/đóng bảng nổi/đổi vòng đời app.
-            - **Tối ưu Cuộn dọc thông minh (`dy >= 1.2 dx`), Gia tốc & Lướt quán tính:**
-              - Thay EMA khởi đầu từ 0 bằng bộ ước lượng vận tốc cửa sổ trượt chống nuốt lực trên các cú hất nhanh ít điểm mẫu và bỏ qua rung vi điểm cuối khi nhấc ngón.
-              - Khóa trục dọc dứt khoát từ khung hình kích hoạt đầu tiên và đồng bộ lại trạng thái `InteractiveViewer` ngay khi nhấc tay khỏi thao tác zoom 2 ngón.
-            - **Tối ưu Tẩy xóa 144Hz, chống nắn nhầm nét chữ & hiện nét tức thì khi sang trang mới:**
-              - Tách `_pageErasingNotifiers` riêng từng trang và kiểm tra va chạm đoạn quét (`hitTestStrokeSegment` / `precisionEraseStrokeAlongSegment`) trong 1 vòng lặp, triệt tiêu giật lag khi tẩy xóa.
-              - Siết ngưỡng nhận diện hình tự động cho bút viết thường (`minDiag/minLine >= 48px`, trễ giữ `720ms`, ngưỡng đứng yên `2.8px`) để không nắn nhầm chữ viết nhỏ dù đang giảm làm mượt về 0%.
-              - Làm ấm trước `ActiveStrokePainter` ngay khi cuộn/chuyển/thêm trang mới để nét đầu tiên hiện ra tức thì.
-            - **Tăng độ nhạy thao tác 2 ngón Undo / 3 ngón Redo & giảm cấp phát bộ nhớ khi tô nét 144Hz.**
+            ### ChemNote Pro v3.8.9
+            - **Khắc phục triệt để lỗi vừa viết xong bị mất nét do nhận nhầm lòng bàn tay:**
+              - Theo dõi chặt chẽ quyền sở hữu `_activeDrawingPointerId` để ngón tay hoặc lòng bàn tay (`PointerCancelEvent` / chạm đồng thời) không bao giờ hủy hay ghi đè nét M-Pencil 3.
+              - Tách `_maxSimultaneousPointers >= 2` khỏi luồng nhấc bút stylus và sử dụng dữ liệu trang mới nhất (`_latestPage`) khi lưu nét liên tiếp.
+              - Chống kích hoạt nhầm 2 ngón Undo ngay sau khi viết hoặc khi có chạm lòng bàn tay (`isLikelyPalmTouch` + khoảng nghỉ `320ms` sau nét bút).
+            - **Tối ưu độ mượt vuốt, lướt & hiển thị 144Hz:**
+              - Cô lập thanh công cụ tĩnh và khu vực trang viết bằng `RepaintBoundary` riêng biệt, bỏ `RepaintBoundary` dư thừa bao ngoài mỗi trang, giảm tải bộ nhớ GPU.
+              - Lọc thông thấp tốc độ vuốt (`_smoothedSpeedY`) giúp gia tốc kéo mượt đều trên 144Hz không khựng giật.
+              - Chuyển cửa sổ trang (`_renderedWindowCenterNotifier`) và cập nhật ảnh/PDF từng trang (`_pageMediaNotifiers`) bằng `ValueNotifier` + `KeyedSubtree`, xóa `setState` khi tải/loại bỏ PDF/ảnh và dùng `FilterQuality.medium` cho nền PDF.
+            - **Lưu & khôi phục chính xác vị trí dừng trước đó của từng sổ tay:**
+              - Lưu cục bộ `lastPageIndex`, tọa độ cuộn (`lastScrollOffsetX`, `lastScrollOffsetY`), và mức zoom (`lastZoomScale`) khi thoát sổ, chuyển tab, hoặc ẩn app (không làm nhảy `updatedAt` hay đồng bộ thừa).
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

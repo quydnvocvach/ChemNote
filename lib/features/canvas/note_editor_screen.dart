@@ -41,12 +41,12 @@ import 'stroke_engine.dart';
 /// Huawei MatePad 11.5"S (144Hz PaperMatte) + M-Pencil 3 (NearLink).
 class NoteEditorScreen extends StatefulWidget {
   final String notebookId;
-  final int initialPageIndex;
+  final int? initialPageIndex;
 
   const NoteEditorScreen({
     super.key,
     required this.notebookId,
-    this.initialPageIndex = 0,
+    this.initialPageIndex,
   });
 
   @override
@@ -96,6 +96,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   final ValueNotifier<Offset> _lassoDragOffsetNotifier = ValueNotifier(Offset.zero);
   final Map<String, ValueNotifier<({String pageId, List<Stroke> strokes})?>>
       _pageErasingNotifiers = {};
+  final Map<String, ValueNotifier<int>> _pageMediaNotifiers = {};
   String? _workingErasePageId;
   List<Stroke>? _workingEraseStrokes;
   Offset? _lastEraserPoint;
@@ -105,6 +106,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     return _pageErasingNotifiers.putIfAbsent(
       pageId,
       () => ValueNotifier<({String pageId, List<Stroke> strokes})?>(null),
+    );
+  }
+
+  ValueNotifier<int> _mediaNotifierForPage(String pageId) {
+    return _pageMediaNotifiers.putIfAbsent(
+      pageId,
+      () => ValueNotifier<int>(0),
     );
   }
 
@@ -147,9 +155,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   final ValueNotifier<int> _currentPageIndexNotifier = ValueNotifier<int>(0);
   final ValueNotifier<double?> _favoritesDockTopNotifier =
       ValueNotifier<double?>(null);
-  int _renderedWindowCenter = 0;
+  final ValueNotifier<int> _renderedWindowCenterNotifier = ValueNotifier<int>(0);
   bool _isScrubbingPages = false;
   Timer? _scrubPrefetchTimer;
+  Timer? _viewportSaveDebounceTimer;
+  bool _useExplicitInitialPage = false;
+  bool _viewportDirty = false;
+  int? _activeDrawingPointerId;
   final ValueNotifier<String?> _activeDrawingPageIdNotifier =
       ValueNotifier<String?>(null);
   final List<StrokePoint> _liveStrokePoints = <StrokePoint>[];
@@ -225,6 +237,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   Matrix4? _whiteboardMatrixBeforeTouchGesture;
   DateTime? _touchGestureStartedAt;
   DateTime? _touchGestureEndedAt;
+  DateTime? _lastStylusStrokeEndedAt;
+  bool _tapContaminatedByPalm = false;
   bool _gestureUsedMultiTouch = false;
   bool? _lastNativePalmShieldEnabled;
   bool? _lastNativePalmShieldStylusPan;
@@ -444,6 +458,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _whiteboardMatrixBeforeTouchGesture = null;
     _touchGestureStartedAt = null;
     _touchGestureEndedAt = null;
+    _activeDrawingPointerId = null;
+    _maxSimultaneousPointers = 0;
+    _multiFingerMovedTooMuch = false;
+    _tapContaminatedByPalm = false;
     _isStylusDown = false;
     _isStylusHovering = false;
     _isStylusInCooldown = false;
@@ -681,7 +699,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       _tapTouchStartTime = null;
       _tapMaxTouchCount = 0;
       _tapMovedTooFar = false;
-      _cancelActiveGesture();
+      if (!_isStylusDown && _activeDrawingPointerId == null) {
+        _cancelActiveGesture();
+      }
     }
     _lockedMatrixDuringStylus = _transformController.value.clone();
     _lockedWhiteboardMatrixDuringStylus =
@@ -767,6 +787,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       return;
     }
 
+    _viewportDirty = true;
+
     final double curScale =
         controller.value.getMaxScaleOnAxis().clamp(minScale, 4.0);
     if (_isZoomLocked && _lockedZoomScale != null) {
@@ -839,14 +861,22 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _activeNotebookId = widget.notebookId;
-    _syncCurrentPageIndex(widget.initialPageIndex);
-    _renderedWindowCenter = _currentPageIndex;
+    final appState = context.read<AppState>();
+    _appStateRef = appState;
+    final initialNb = appState.getNotebookById(_activeNotebookId);
+    final int pageCount = initialNb?.pages.length ?? 1;
+    _useExplicitInitialPage = widget.initialPageIndex != null;
+    final int startPage = (widget.initialPageIndex ?? initialNb?.lastPageIndex ?? 0)
+        .clamp(0, math.max(0, pageCount - 1));
+    _syncCurrentPageIndex(startPage);
+    _renderedWindowCenterNotifier.value = startPage;
+    if (initialNb != null && initialNb.pages.isNotEmpty) {
+      _activeDrawingPageIdNotifier.value = initialNb.pages[startPage].id;
+    }
     _horizontalPageController = PageController(initialPage: _currentPageIndex);
     _lassoController.addListener(_onLassoChanged);
 
     // Restore user's last-used writing tool, color, size, opacity, smoothing & eraser size
-    final appState = context.read<AppState>();
-    _appStateRef = appState;
     _lastPenTool = _editorToolFromStrokeTool(appState.lastPenTool);
     _activeTool = _lastPenTool;
     _penColor = Color(appState.lastPenColorValue);
@@ -930,6 +960,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden ||
         state == AppLifecycleState.detached) {
+      _saveCurrentViewportState(flushImmediately: true);
       _clearTransientPointerState();
     }
   }
@@ -937,6 +968,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _viewportSaveDebounceTimer?.cancel();
+    _saveCurrentViewportState(flushImmediately: true);
     _observedRouteAnimation?.removeStatusListener(_onRouteAnimationStatus);
     _observedRouteAnimation = null;
     unawaited(
@@ -973,6 +1006,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _verticalScrollController.dispose();
     _horizontalPageController.dispose();
     _currentPageIndexNotifier.dispose();
+    _renderedWindowCenterNotifier.dispose();
     _activeDrawingPageIdNotifier.dispose();
     _favoritesDockTopNotifier.dispose();
     _activeStrokeNotifier.dispose();
@@ -992,6 +1026,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       n.dispose();
     }
     _pageErasingNotifiers.clear();
+    for (final n in _pageMediaNotifiers.values) {
+      n.dispose();
+    }
+    _pageMediaNotifiers.clear();
     _cropDraftNotifier.dispose();
     _pullAddProgressNotifier.dispose();
     _recordingElapsedMsNotifier.dispose();
@@ -1068,10 +1106,75 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _redoStackFor(notebook.id).clear();
   }
 
+  NotePage _latestPage(NotePage fallback) {
+    final nb = _appStateRef.getNotebookById(_activeNotebookId);
+    if (nb == null) return fallback;
+    for (final p in nb.pages) {
+      if (p.id == fallback.id) return p;
+    }
+    return fallback;
+  }
+
+  void _scheduleSaveViewportState() {
+    _viewportDirty = true;
+    _viewportSaveDebounceTimer?.cancel();
+    _viewportSaveDebounceTimer = Timer(const Duration(milliseconds: 600), () {
+      if (!mounted) return;
+      _saveCurrentViewportState(flushImmediately: false);
+    });
+  }
+
+  void _saveCurrentViewportState({bool flushImmediately = false}) {
+    _viewportSaveDebounceTimer?.cancel();
+    if (!_viewportDirty) return;
+    final nb = _appStateRef.getNotebookById(_activeNotebookId);
+    if (nb == null || nb.pages.isEmpty) {
+      _viewportDirty = false;
+      return;
+    }
+    final int safePageIdx = _currentPageIndex.clamp(0, nb.pages.length - 1);
+    final NotePage curPage = nb.pages[safePageIdx];
+    final bool isWb = curPage.isInfiniteWhiteboard || nb.isWhiteboard;
+
+    final double? offsetX;
+    final double? offsetY;
+    final double? zoomScale;
+    if (isWb) {
+      final Matrix4 m = _whiteboardTransformController.value;
+      final double scale = m.getMaxScaleOnAxis().clamp(0.25, 4.0).toDouble();
+      offsetX = m.getTranslation().x;
+      offsetY = m.getTranslation().y;
+      zoomScale = scale;
+    } else if (_appStateRef.verticalContinuousScroll) {
+      final Matrix4 m = _transformController.value;
+      final double scale = m.getMaxScaleOnAxis().clamp(0.35, 4.0).toDouble();
+      offsetX = m.getTranslation().x;
+      offsetY = math.max(0.0, -m.getTranslation().y / scale);
+      zoomScale = scale;
+    } else {
+      offsetX = null;
+      offsetY = null;
+      zoomScale = null;
+    }
+
+    _viewportDirty = false;
+    unawaited(
+      _appStateRef.saveNotebookViewportState(
+        nb.id,
+        lastPageIndex: safePageIdx,
+        lastScrollOffsetX: offsetX,
+        lastScrollOffsetY: offsetY,
+        lastZoomScale: zoomScale,
+        flushImmediately: flushImmediately,
+      ),
+    );
+  }
+
   Future<void> _commitPage(
     NotePage updatedPage, {
     NotePage? undoSnapshot,
   }) async {
+    _viewportDirty = true;
     if (undoSnapshot != null) _pushUndo(undoSnapshot);
     _bumpPageRepaint(updatedPage.id);
     await context.read<AppState>().updatePage(_activeNotebookId, updatedPage);
@@ -1180,6 +1283,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
 
   Future<void> _switchNotebookTab(String notebookId) async {
     if (notebookId == _activeNotebookId) return;
+    _saveCurrentViewportState(flushImmediately: false);
     _stopScrollFling();
     _commitActiveTextEdit();
     unawaited(context.read<AppState>().markNotebookOpened(notebookId));
@@ -1199,6 +1303,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _activeDrawingPageIdNotifier.value = null;
     _clearTransientPointerState();
     final targetNb = context.read<AppState>().getNotebookById(notebookId);
+    final int targetPageCount = targetNb?.pages.length ?? 1;
+    final int targetStartPage = (targetNb?.lastPageIndex ?? 0)
+        .clamp(0, math.max(0, targetPageCount - 1));
     final bool isWbTarget = targetNb?.isWhiteboard == true ||
         (targetNb?.pages.isNotEmpty == true &&
             targetNb!.pages.first.isInfiniteWhiteboard);
@@ -1209,8 +1316,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         : _transformController.value.getMaxScaleOnAxis().clamp(0.35, 4.0);
     setState(() {
       _activeNotebookId = notebookId;
-      _syncCurrentPageIndex(0);
-      _renderedWindowCenter = 0;
+      _verticalCenteredOnce = false;
+      _whiteboardCenteredOnce = false;
+      _useExplicitInitialPage = false;
+      _viewportDirty = false;
+      _syncCurrentPageIndex(targetStartPage);
+      _renderedWindowCenterNotifier.value = targetStartPage;
+      if (targetNb != null && targetNb.pages.isNotEmpty) {
+        _activeDrawingPageIdNotifier.value =
+            targetNb.pages[targetStartPage].id;
+      }
       _isScrubbingPages = false;
       _scrubPrefetchTimer?.cancel();
       _isZoomLocked = false;
@@ -1235,7 +1350,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       _repaintVersion++;
     });
     if (_horizontalPageController.hasClients) {
-      _horizontalPageController.jumpToPage(0);
+      _horizontalPageController.jumpToPage(targetStartPage);
     }
     if (_verticalScrollController.hasClients) {
       _verticalScrollController.jumpTo(0);
@@ -1362,13 +1477,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     final appState = context.read<AppState>();
     final notebook = _getNotebook(context, listen: false);
     if (notebook == null || notebook.pages.isEmpty) return;
-    final prevIdx = _currentPageIndex;
-    final clampedIdx = index.clamp(0, notebook.pages.length - 1);
-    setState(() {
-      _syncCurrentPageIndex(clampedIdx);
-      _renderedWindowCenter = clampedIdx;
-    });
+    final int prevIdx = _currentPageIndex;
+    final int clampedIdx = index.clamp(0, notebook.pages.length - 1);
+    _syncCurrentPageIndex(clampedIdx);
+    _renderedWindowCenterNotifier.value = clampedIdx;
     _prewarmActiveDrawingPage(notebook, clampedIdx);
+    _scheduleSaveViewportState();
     if (!appState.verticalContinuousScroll &&
         _horizontalPageController.hasClients) {
       if ((clampedIdx - prevIdx).abs() > 3) {
@@ -1476,7 +1590,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       // Wait 2 frames before native ui.Image.dispose() so active display lists stop referencing it.
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        setState(() => _repaintVersion++);
         WidgetsBinding.instance.addPostFrameCallback((_) {
           for (final img in evictedImages) {
             img.dispose();
@@ -1547,27 +1660,24 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         return;
       }
       final evictedImages = <ui.Image>[];
-      setState(() {
-        _pdfImageCache[path] = decodedImage;
-        if (_pdfImageCache.length > _maxCachedPdfPages + 4) {
-          final keys = _pdfImageCache.keys.toList();
-          for (final k in keys) {
-            if (_pdfImageCache.length <= _maxCachedPdfPages + 4) break;
-            if (k == path || keepPaths.contains(k)) continue;
-            final removed = _pdfImageCache.remove(k);
-            if (removed != null) evictedImages.add(removed);
+      _pdfImageCache[path] = decodedImage;
+      if (_pdfImageCache.length > _maxCachedPdfPages + 4) {
+        final keys = _pdfImageCache.keys.toList();
+        for (final k in keys) {
+          if (_pdfImageCache.length <= _maxCachedPdfPages + 4) break;
+          if (k == path || keepPaths.contains(k)) continue;
+          final removed = _pdfImageCache.remove(k);
+          if (removed != null) evictedImages.add(removed);
+        }
+      }
+      if (notebook != null) {
+        for (final p in notebook.pages) {
+          if (p.pdfBackgroundPath == path) {
+            final n = _mediaNotifierForPage(p.id);
+            n.value = n.value + 1;
           }
         }
-        if (notebook != null) {
-          for (final p in notebook.pages) {
-            if (p.pdfBackgroundPath == path) {
-              _bumpPageRepaint(p.id);
-            }
-          }
-        } else {
-          _repaintVersion++;
-        }
-      });
+      }
       if (evictedImages.isNotEmpty) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           for (final img in evictedImages) {
@@ -1621,27 +1731,24 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
               ? _nearbyElementImageKeepPaths(notebook)
               : const <String>{};
       final evictedImages = <ui.Image>[];
-      setState(() {
-        _elementImageCache[path] = decodedImage;
-        if (_elementImageCache.length > _maxCachedElementImages) {
-          final keys = _elementImageCache.keys.toList();
-          for (final k in keys) {
-            if (_elementImageCache.length <= _maxCachedElementImages) break;
-            if (k == path || keepPaths.contains(k)) continue;
-            final removed = _elementImageCache.remove(k);
-            if (removed != null) evictedImages.add(removed);
+      _elementImageCache[path] = decodedImage;
+      if (_elementImageCache.length > _maxCachedElementImages) {
+        final keys = _elementImageCache.keys.toList();
+        for (final k in keys) {
+          if (_elementImageCache.length <= _maxCachedElementImages) break;
+          if (k == path || keepPaths.contains(k)) continue;
+          final removed = _elementImageCache.remove(k);
+          if (removed != null) evictedImages.add(removed);
+        }
+      }
+      if (notebook != null) {
+        for (final p in notebook.pages) {
+          if (p.imageElements.any((e) => e.filePath == path)) {
+            final n = _mediaNotifierForPage(p.id);
+            n.value = n.value + 1;
           }
         }
-        if (notebook != null) {
-          for (final p in notebook.pages) {
-            if (p.imageElements.any((e) => e.filePath == path)) {
-              _bumpPageRepaint(p.id);
-            }
-          }
-        } else {
-          _repaintVersion++;
-        }
-      });
+      }
       if (evictedImages.isNotEmpty) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           for (final img in evictedImages) {
@@ -1704,8 +1811,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       }
     }
 
-    // Track multi-finger gestures (touch only — NEVER let resting touch block a real stylus!)
+    // Track multi-finger gestures (touch only — NEVER let resting palm/touch block or cancel a real stylus!)
     if (!isStylusEvent) {
+      if (PalmRejectionFilter.isLikelyPalmTouch(event)) {
+        _palmRejectedPointers.add(event.pointer);
+        return;
+      }
       _pointerDownPositions[event.pointer] = event.position;
       if (_pointerDownPositions.length == 1) {
         _multiFingerDownTime = DateTime.now();
@@ -1715,9 +1826,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         if (_pointerDownPositions.length > _maxSimultaneousPointers) {
           _maxSimultaneousPointers = _pointerDownPositions.length;
         }
-        _cancelActiveGesture();
+        if (!_isStylusDown) {
+          _cancelActiveGesture();
+        }
         return;
       }
+    } else if (!_stylusPanMode &&
+        _activeDrawingPointerId != null &&
+        _activeDrawingPointerId != event.pointer) {
+      // If an earlier non-stylus pointer somehow held drawing ownership, clear it
+      // so the real M-Pencil 3 owns the stroke cleanly.
+      _cancelActiveGesture();
     }
 
     final appState = _appStateRef;
@@ -1829,6 +1948,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         _syncStylusDrawingState();
         _bumpViewportGate();
       }
+      _activeDrawingPointerId = event.pointer;
       _tapeDragStart = rawPos;
       _tapeDraftNotifier.value = Rect.fromPoints(rawPos, rawPos);
       return;
@@ -1843,6 +1963,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         _syncStylusDrawingState();
         _bumpViewportGate();
       }
+      _activeDrawingPointerId = event.pointer;
       _laserController.beginStroke(rawPos, pageId: page.id);
       return;
     }
@@ -1877,6 +1998,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       }
       return;
     }
+
+    if (!isStylusEvent && _isStylusDown) {
+      return;
+    }
+    _activeDrawingPointerId = event.pointer;
 
     if (!_isDrawingPointerDown) {
       _isDrawingPointerDown = true;
@@ -1980,6 +2106,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         _multiFingerMovedTooMuch = true;
       }
       if (_pointerDownPositions.length >= 2) return;
+    }
+    if (_activeDrawingPointerId != null &&
+        event.pointer != _activeDrawingPointerId) {
+      return;
     }
 
     if (_appStateRef.readOnlyMode ||
@@ -2104,6 +2234,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _shapeHoldTimer?.cancel();
     if (isStylusEvent) {
       if (!_stylusPanMode) {
+        _lastStylusStrokeEndedAt = DateTime.now();
         _markStylusActivityCooldown();
       }
       if (_isStylusDown || _isDrawingPointerDown) {
@@ -2118,12 +2249,21 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       _bumpViewportGate();
     }
 
-    // Multi-finger tap Undo/Redo is handled by the top-level viewport Listener
-    // so InteractiveViewer never swallows it and it never triggers twice.
-    if (_pointerDownPositions.isEmpty && _maxSimultaneousPointers >= 2) {
+    // Only suppress touch gestures when multi-finger touch was active — NEVER drop a lifted stylus stroke!
+    if (!isStylusEvent &&
+        _pointerDownPositions.isEmpty &&
+        _maxSimultaneousPointers >= 2) {
       _maxSimultaneousPointers = 0;
       return;
     }
+
+    if (_activeDrawingPointerId != null &&
+        event.pointer != _activeDrawingPointerId) {
+      return;
+    }
+    _activeDrawingPointerId = null;
+
+    final NotePage latestPage = _latestPage(page);
 
     if (_activeTool == EditorTool.studyTape && _tapeDragStart != null) {
       final rect = _tapeDraftNotifier.value;
@@ -2140,8 +2280,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
           isRevealed: false,
         );
         _commitPage(
-          page.copyWith(tapeElements: [...page.tapeElements, newTape]),
-          undoSnapshot: page,
+          latestPage.copyWith(tapeElements: [...latestPage.tapeElements, newTape]),
+          undoSnapshot: latestPage,
         );
       }
       return;
@@ -2159,15 +2299,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         _isDraggingLassoSelection = false;
         _lastLassoDragPos = null;
         if (totalDelta != Offset.zero) {
-          final movedPage = _lassoController.moveSelection(page, totalDelta);
+          final movedPage =
+              _lassoController.moveSelection(latestPage, totalDelta);
           _commitPage(
             movedPage,
-            undoSnapshot: _pageBeforeGesture ?? page,
+            undoSnapshot: _pageBeforeGesture ?? latestPage,
           );
         }
         _pageBeforeGesture = null;
       } else if (_lassoController.isDrawingLasso) {
-        final sel = _lassoController.finishLasso(page);
+        final sel = _lassoController.finishLasso(latestPage);
         if (sel.isNotEmpty && _lassoLongPressMenuVisible) {
           setState(() {
             _lassoLongPressMenuVisible = false;
@@ -2188,8 +2329,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       _clearWorkingEraseNotifier();
       if (_eraserChangedPage && finalStrokes != null) {
         _commitPage(
-          page.copyWith(strokes: finalStrokes, updatedAt: DateTime.now()),
-          undoSnapshot: _pageBeforeGesture ?? page,
+          latestPage.copyWith(strokes: finalStrokes, updatedAt: DateTime.now()),
+          undoSnapshot: _pageBeforeGesture ?? latestPage,
         );
       }
       _pageBeforeGesture = null;
@@ -2209,15 +2350,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
           live.shapeType == ShapeType.none &&
           StrokeEngine.isScribbleGesture(live.points)) {
         final hitIds = StrokeEngine.findStrokesIntersectedByScribble(
-          page.strokes,
+          latestPage.strokes,
           live.points,
         );
         if (hitIds.isNotEmpty) {
           final remaining =
-              page.strokes.where((s) => !hitIds.contains(s.id)).toList();
+              latestPage.strokes.where((s) => !hitIds.contains(s.id)).toList();
           _commitPage(
-            page.copyWith(strokes: remaining),
-            undoSnapshot: page,
+            latestPage.copyWith(strokes: remaining),
+            undoSnapshot: latestPage,
           );
           return;
         }
@@ -2261,8 +2402,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       _liveStrokePoints.clear();
 
       _commitPage(
-        page.copyWith(strokes: [...page.strokes, finalized]),
-        undoSnapshot: page,
+        latestPage.copyWith(strokes: [...latestPage.strokes, finalized]),
+        undoSnapshot: latestPage,
       );
     } else {
       _liveStrokePoints.clear();
@@ -2277,13 +2418,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       _cancelImageLongPressTimer();
     }
     _pointerDownPositions.remove(event.pointer);
-    _shapeHoldTimer?.cancel();
-    _shapeSnappedLive = false;
+    if (_pointerDownPositions.isEmpty) {
+      _maxSimultaneousPointers = 0;
+    }
 
     final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus;
     if (isStylusEvent) {
       if (!_stylusPanMode) {
+        _lastStylusStrokeEndedAt = DateTime.now();
         _markStylusActivityCooldown();
       }
       if (_isStylusDown || _isDrawingPointerDown) {
@@ -2292,11 +2435,24 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         _syncStylusDrawingState();
         _bumpViewportGate();
       }
-    } else if (_pointerDownPositions.isEmpty && _isDrawingPointerDown) {
+    } else if (_pointerDownPositions.isEmpty &&
+        !_isStylusDown &&
+        _isDrawingPointerDown) {
       _isDrawingPointerDown = false;
       _syncStylusDrawingState();
       _bumpViewportGate();
     }
+
+    // Never let a cancelled resting palm/finger abort an in-progress M-Pencil 3 stroke!
+    if (_activeDrawingPointerId != null &&
+        event.pointer != _activeDrawingPointerId) {
+      return;
+    }
+    _activeDrawingPointerId = null;
+    _shapeHoldTimer?.cancel();
+    _shapeSnappedLive = false;
+
+    final NotePage latestPage = _latestPage(page);
 
     final List<Stroke>? cancelledEraseStrokes = _workingEraseStrokes;
     final bool commitCancelledErase = _activeTool == EditorTool.eraser &&
@@ -2316,11 +2472,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     if (commitCancelledErase) {
       _pageBeforeGesture = null;
       _commitPage(
-        page.copyWith(
+        latestPage.copyWith(
           strokes: cancelledEraseStrokes,
           updatedAt: DateTime.now(),
         ),
-        undoSnapshot: eraseSnapshot ?? page,
+        undoSnapshot: eraseSnapshot ?? latestPage,
       );
     }
 
@@ -2350,8 +2506,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         );
         _liveStrokePoints.clear();
         _commitPage(
-          page.copyWith(strokes: [...page.strokes, finalized]),
-          undoSnapshot: page,
+          latestPage.copyWith(strokes: [...latestPage.strokes, finalized]),
+          undoSnapshot: latestPage,
         );
       } else {
         _liveStrokePoints.clear();
@@ -2507,6 +2663,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _cancelImageLongPressTimer();
     _shapeHoldTimer?.cancel();
     _shapeSnappedLive = false;
+    _activeDrawingPointerId = null;
     _activeStrokeNotifier.value = null;
     _liveStrokePoints.clear();
     _eraserCursorNotifier.value = null;
@@ -4369,6 +4526,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     final double nextTy = rawNextTy.clamp(minTy, maxTy).toDouble();
     final bool hitY = (nextTy - rawNextTy).abs() > 0.01;
 
+    _viewportDirty = true;
     _transformController.value = m.clone()
       ..setTranslationRaw(nextTx, nextTy, 0.0);
     _updatePullToAddProgress(
@@ -4434,15 +4592,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       isFling: true,
     );
 
-    final double decay = math.exp(-2.9 * dt);
+    final double decay = math.exp(-2.65 * dt);
     _flingVx = hit.hitX ? 0.0 : _flingVx * decay;
     _flingVy = hit.hitY ? 0.0 : _flingVy * decay;
 
-    if (_flingVx.abs() < 28.0 && _flingVy.abs() < 28.0) {
+    if (_flingVx.abs() < 18.0 && _flingVy.abs() < 18.0) {
       _stopScrollFling();
-      if (_renderedWindowCenter != _currentPageIndex && mounted) {
-        setState(() => _renderedWindowCenter = _currentPageIndex);
+      if (_renderedWindowCenterNotifier.value != _currentPageIndex) {
+        _renderedWindowCenterNotifier.value = _currentPageIndex;
       }
+      _scheduleSaveViewportState();
     }
   }
 
@@ -4477,9 +4636,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     if (visibleIdx != _currentPageIndex) {
       _syncCurrentPageIndex(visibleIdx);
       final int windowThreshold =
-          (_scrollFlingTicker?.isActive ?? false) ? 4 : 3;
-      if ((visibleIdx - _renderedWindowCenter).abs() >= windowThreshold) {
-        setState(() => _renderedWindowCenter = visibleIdx);
+          (_scrollFlingTicker?.isActive ?? false) ? 3 : 2;
+      if ((visibleIdx - _renderedWindowCenterNotifier.value).abs() >=
+          windowThreshold) {
+        _renderedWindowCenterNotifier.value = visibleIdx;
       }
       _prewarmActiveDrawingPage(notebook, visibleIdx);
       _prefetchNearbyPdfPages(notebook);
@@ -4521,10 +4681,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
           _pullOverscroll = 0.0;
           _syncCurrentPageIndex(newIdx);
         });
+        _renderedWindowCenterNotifier.value = newIdx;
         final updatedNb = _getNotebook(context, listen: false);
         if (updatedNb != null) {
           _prewarmActiveDrawingPage(updatedNb, newIdx);
         }
+        _scheduleSaveViewportState();
       }
     } finally {
       _isAddingPullPage = false;
@@ -5411,9 +5573,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                             liveNotebook.pages.length - 2,
                                           ),
                                         );
-                                        _renderedWindowCenter =
-                                            _currentPageIndex;
                                       });
+                                      _renderedWindowCenterNotifier.value =
+                                          _currentPageIndex;
+                                      _scheduleSaveViewportState();
                                     }
                                   },
                                   child: const Icon(
@@ -5549,8 +5712,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                   if (mounted) {
                                     setState(() {
                                       _syncCurrentPageIndex(insertPos);
-                                      _renderedWindowCenter = insertPos;
                                     });
+                                    _renderedWindowCenterNotifier.value =
+                                        insertPos;
+                                    _scheduleSaveViewportState();
                                     ScaffoldMessenger.of(context).showSnackBar(
                                       SnackBar(
                                         content: Text(
@@ -5731,8 +5896,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                         liveNotebook.pages.length - 1,
                                       ),
                                     );
-                                    _renderedWindowCenter = _currentPageIndex;
                                   });
+                                  _renderedWindowCenterNotifier.value =
+                                      _currentPageIndex;
+                                  _scheduleSaveViewportState();
                                   if (!appState.verticalContinuousScroll &&
                                       _horizontalPageController.hasClients) {
                                     _horizontalPageController
@@ -5918,9 +6085,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                             ),
                                           ),
                                         );
-                                        _renderedWindowCenter =
-                                            _currentPageIndex;
                                       });
+                                      _renderedWindowCenterNotifier.value =
+                                          _currentPageIndex;
+                                      _scheduleSaveViewportState();
                                     }
                                   },
                             style: TextButton.styleFrom(
@@ -6093,17 +6261,21 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
           });
         },
       ),
-      body: RepaintBoundary(
-        child: Column(
-          children: [
-          // Row 1: Multi-Notebook Tab Bar + Top-Right 5-Item Insert `+` Menu
-          EditorTabBar(
-            openNotebooks: openTabs,
-            activeNotebookId: notebook.id,
-            onBack: () {
-              _commitActiveTextEdit();
-              Navigator.of(context).maybePop();
-            },
+      body: Column(
+        children: [
+          RepaintBoundary(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Row 1: Multi-Notebook Tab Bar + Top-Right 5-Item Insert `+` Menu
+                EditorTabBar(
+                  openNotebooks: openTabs,
+                  activeNotebookId: notebook.id,
+                  onBack: () {
+                    _commitActiveTextEdit();
+                    _saveCurrentViewportState(flushImmediately: true);
+                    Navigator.of(context).maybePop();
+                  },
             onSelectTab: _switchNotebookTab,
             onCloseTab: _closeNotebookTab,
             onOpenTabPicker: () => _openTabPickerModal(appState),
@@ -6331,6 +6503,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
               },
             ),
           ),
+              ],
+            ),
+          ),
 
           // Live Audio Recording Bar OR On-Demand Multi-Recording Audio Replay Bar
           if (_isRecordingAudio)
@@ -6394,7 +6569,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
 
           // Main Canvas Area (Infinite Whiteboard, Unified Vertical InteractiveViewer, or Horizontal Flip)
           Expanded(
-            child: LayoutBuilder(
+            child: RepaintBoundary(
+              child: LayoutBuilder(
               builder: (ctx, viewportConstraints) {
                 final vpSize = Size(
                   viewportConstraints.maxWidth,
@@ -6407,17 +6583,79 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     appState.verticalContinuousScroll &&
                     vpSize.width > 0) {
                   _verticalCenteredOnce = true;
-                  final pageW =
-                      PaperMetrics.pageSize(isLandscape: currentPage.isLandscape)
-                          .width +
-                      48.0;
+                  final maxPageW = _maxVerticalPageWidth(notebook);
+                  final pageW = maxPageW + 48.0;
                   final initScale = (vpSize.width / pageW).clamp(0.55, 1.0);
-                  final tx = (vpSize.width - pageW * initScale) * 0.5;
-                  _transformController.value = Matrix4.identity()
-                    ..translate(tx, 0.0)
-                    ..scale(initScale, initScale);
-                  _lastObservedZoomScale = initScale;
-                  _zoomScaleNotifier.value = initScale;
+                  final defaultTx = (vpSize.width - pageW * initScale) * 0.5;
+
+                  if (!_useExplicitInitialPage &&
+                      notebook.lastScrollOffsetY != null) {
+                    final double restoredScale =
+                        (notebook.lastZoomScale ?? initScale)
+                            .clamp(0.35, 4.0)
+                            .toDouble();
+                    final double contentH =
+                        _totalVerticalContentHeight(notebook);
+                    final double scaledH = contentH * restoredScale;
+                    final double scaledW = pageW * restoredScale;
+                    final double minTx = appState.freePaperMovement
+                        ? math.min(0.0, vpSize.width - scaledW) - 800.0
+                        : (scaledW <= vpSize.width
+                            ? (vpSize.width - scaledW) * 0.5
+                            : vpSize.width - scaledW);
+                    final double maxTx = appState.freePaperMovement
+                        ? 800.0
+                        : (scaledW <= vpSize.width
+                            ? (vpSize.width - scaledW) * 0.5
+                            : 0.0);
+                    final double minBaseTy =
+                        math.min(0.0, vpSize.height - scaledH);
+                    final double minTy = appState.freePaperMovement
+                        ? minBaseTy - 800.0
+                        : minBaseTy - 120.0;
+                    final double maxTy =
+                        appState.freePaperMovement ? 800.0 : 120.0;
+                    final double restoredTx = (notebook.lastScrollOffsetX ??
+                            (vpSize.width - scaledW) * 0.5)
+                        .clamp(math.min(minTx, maxTx), math.max(minTx, maxTx))
+                        .toDouble();
+                    final double restoredTy =
+                        (-(notebook.lastScrollOffsetY! * restoredScale))
+                            .clamp(
+                                math.min(minTy, maxTy), math.max(minTy, maxTy))
+                            .toDouble();
+                    _transformController.value = Matrix4.identity()
+                      ..translate(restoredTx, restoredTy)
+                      ..scale(restoredScale, restoredScale);
+                    _lastObservedZoomScale = restoredScale;
+                    _zoomScaleNotifier.value = restoredScale;
+                  } else if (_currentPageIndex > 0) {
+                    final double contentH =
+                        _totalVerticalContentHeight(notebook);
+                    final double scaledH = contentH * initScale;
+                    final double pageTopY =
+                        _pageTopOffsetY(notebook, _currentPageIndex);
+                    final double minTy = appState.freePaperMovement
+                        ? math.min(0.0, vpSize.height - scaledH) - 800.0
+                        : math.min(0.0, vpSize.height - scaledH) - 120.0;
+                    final double maxTy =
+                        appState.freePaperMovement ? 800.0 : 24.0;
+                    final double targetTy = (-(pageTopY * initScale))
+                        .clamp(math.min(minTy, maxTy), math.max(minTy, maxTy))
+                        .toDouble();
+                    _transformController.value = Matrix4.identity()
+                      ..translate(defaultTx, targetTy)
+                      ..scale(initScale, initScale);
+                    _lastObservedZoomScale = initScale;
+                    _zoomScaleNotifier.value = initScale;
+                  } else {
+                    _transformController.value = Matrix4.identity()
+                      ..translate(defaultTx, 0.0)
+                      ..scale(initScale, initScale);
+                    _lastObservedZoomScale = initScale;
+                    _zoomScaleNotifier.value = initScale;
+                  }
+                  _useExplicitInitialPage = false;
                 }
 
                 final double scrollMult =
@@ -6459,6 +6697,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     }
                     if (e.kind == PointerDeviceKind.touch) {
                       _reconcileStalePointers(incomingPointer: e.pointer);
+                      if (PalmRejectionFilter.isLikelyPalmTouch(e)) {
+                        _palmRejectedPointers.add(e.pointer);
+                        _tapContaminatedByPalm = true;
+                        return;
+                      }
                       final bool blocked = _stylusBlocksViewport;
                       if (blocked) {
                         _palmRejectedPointers.add(e.pointer);
@@ -6574,6 +6817,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       _activeTouchPositions[e.pointer] = e.position;
                       _touchPointerLastSeenMs[e.pointer] =
                           DateTime.now().millisecondsSinceEpoch;
+                      if (PalmRejectionFilter.isLikelyPalmTouch(e)) {
+                        _tapContaminatedByPalm = true;
+                      }
                       if (_isZoomLocked &&
                           _activeTouchPointers.length >= 2) {
                         final it = _activeTouchPositions.values.iterator;
@@ -6751,7 +6997,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         );
                         if (fling.shouldFling) {
                           _startScrollFling(fling.vx, fling.vy);
+                        } else if (_viewportDirty) {
+                          _scheduleSaveViewportState();
                         }
+                      } else if (_viewportDirty) {
+                        _scheduleSaveViewportState();
                       }
                       _finishPullToAddIfReady(notebook);
                       _resetPanTracking();
@@ -6770,11 +7020,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                           .inMilliseconds;
                       final maxFingers = _tapMaxTouchCount;
                       final moved = _tapMovedTooFar;
+                      final palmDirty = _tapContaminatedByPalm;
+                      final recentStylus = _lastStylusStrokeEndedAt != null &&
+                          DateTime.now()
+                                  .difference(_lastStylusStrokeEndedAt!)
+                                  .inMilliseconds <
+                              320;
                       _tapTouchStartTime = null;
                       _tapMaxTouchCount = 0;
                       _tapMovedTooFar = false;
+                      _tapContaminatedByPalm = false;
                       if (appState.quickGesturesEnabled &&
                           !moved &&
+                          !palmDirty &&
+                          !recentStylus &&
                           elapsed < 440 &&
                           maxFingers >= 2) {
                         // Roll back tiny accidental wobble introduced while 2/3 fingers touched down
@@ -6807,6 +7066,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       _tapTouchStartTime = null;
                       _tapMaxTouchCount = 0;
                       _tapMovedTooFar = false;
+                      _tapContaminatedByPalm = false;
                     }
                   },
                   onPointerCancel: (e) {
@@ -6882,6 +7142,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       _tapTouchStartTime = null;
                       _tapMaxTouchCount = 0;
                       _tapMovedTooFar = false;
+                      _tapContaminatedByPalm = false;
                     }
                   },
                   child: Stack(
@@ -6947,8 +7208,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                               }
                               _updatePullToAddProgress(notebook, vpSize);
                             },
-                            onInteractionEnd: (_) =>
-                                _finishPullToAddIfReady(notebook),
+                            onInteractionEnd: (_) {
+                              _finishPullToAddIfReady(notebook);
+                              _scheduleSaveViewportState();
+                            },
                             child: cachedPages!,
                           );
                         },
@@ -7543,8 +7806,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                           ..scale(scale, scale);
                         if (_currentPageIndex != targetPage) {
                           _syncCurrentPageIndex(targetPage);
-                          if ((targetPage - _renderedWindowCenter).abs() >= 2) {
-                            setState(() => _renderedWindowCenter = targetPage);
+                          if ((targetPage - _renderedWindowCenterNotifier.value)
+                                  .abs() >=
+                              2) {
+                            _renderedWindowCenterNotifier.value = targetPage;
                           }
                         }
                         _scrubPrefetchTimer?.cancel();
@@ -7596,10 +7861,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                             onVerticalDragEnd: (_) {
                               _scrubPrefetchTimer?.cancel();
                               _setOverlayDragging(false);
+                              _renderedWindowCenterNotifier.value =
+                                  _currentPageIndex;
                               setState(() {
                                 _isScrubbingPages = false;
-                                _renderedWindowCenter = _currentPageIndex;
                               });
+                              _scheduleSaveViewportState();
                               final curNb =
                                   _getNotebook(context, listen: false);
                               if (curNb != null) {
@@ -7609,10 +7876,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                             onVerticalDragCancel: () {
                               _scrubPrefetchTimer?.cancel();
                               _setOverlayDragging(false);
+                              _renderedWindowCenterNotifier.value =
+                                  _currentPageIndex;
                               setState(() {
                                 _isScrubbingPages = false;
-                                _renderedWindowCenter = _currentPageIndex;
                               });
+                              _scheduleSaveViewportState();
                               final curNb =
                                   _getNotebook(context, listen: false);
                               if (curNb != null) {
@@ -8089,6 +8358,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                 );
               },
             ),
+            ),
           ),
 
           // Docked Zoom Window Panel (when Zoom Window tool is toggled ON)
@@ -8120,7 +8390,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
             ),
         ],
       ),
-    ),
     );
   }
 
@@ -8150,7 +8419,22 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
             viewportSize.width > 0 &&
             viewportSize.height > 0) {
           _whiteboardCenteredOnce = true;
-          _centerWhiteboard(viewportSize);
+          if (notebook.lastScrollOffsetX != null &&
+              notebook.lastScrollOffsetY != null) {
+            final double scale =
+                (notebook.lastZoomScale ?? 1.0).clamp(0.25, 4.0).toDouble();
+            _whiteboardTransformController.value = Matrix4.identity()
+              ..translate(
+                notebook.lastScrollOffsetX!,
+                notebook.lastScrollOffsetY!,
+              )
+              ..scale(scale, scale);
+            _whiteboardZoomNotifier.value = scale;
+            _lastObservedZoomScale = scale;
+            _zoomScaleNotifier.value = scale;
+          } else {
+            _centerWhiteboard(viewportSize);
+          }
         }
 
         return Stack(
@@ -8203,6 +8487,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       isWhiteboard: true,
                     );
                   },
+                  onInteractionEnd: (_) => _scheduleSaveViewportState(),
                   child: cachedCanvas!,
                 );
               },
@@ -8291,70 +8576,77 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   Widget _buildVerticalContinuousPages(Notebook notebook) {
     // No nested SingleChildScrollView fighting InteractiveViewer!
     // One unified InteractiveViewer handles 144fps 1-finger scroll & 2-finger pinch-zoom cleanly.
-    final int liveRadius = _initialTransitionSettled ? 4 : 1;
+    final int liveRadius = _initialTransitionSettled ? 3 : 1;
     final bool useWindowing =
         !_initialTransitionSettled || notebook.pages.length > 8;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 24),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (int i = 0; i < notebook.pages.length; i++) ...[
-            if (!useWindowing ||
-                (i - _renderedWindowCenter).abs() <= liveRadius)
-              _buildSinglePageCanvas(notebook, notebook.pages[i], i)
-            else
-              () {
-                final phSize = PaperMetrics.pageSize(
-                  isLandscape: notebook.pages[i].isLandscape,
-                  isInfiniteWhiteboard: notebook.pages[i].isInfiniteWhiteboard,
-                );
-                return SizedBox(
-                  width: phSize.width,
-                  height: phSize.height,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: PaperPalette.of(notebook.pages[i].paperColor)
-                          .background,
-                    ),
-                  ),
-                );
-              }(),
-            if (i < notebook.pages.length - 1) const SizedBox(height: 14),
-          ],
-          const SizedBox(height: 18),
-          GestureDetector(
-            onTap: () => _handlePullAddPage(notebook, notebook.pages.last),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-              decoration: BoxDecoration(
-                color: EditorColors.obsidianSurface.withAlpha(200),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.white12),
+    return ValueListenableBuilder<int>(
+      valueListenable: _renderedWindowCenterNotifier,
+      builder: (_, windowCenter, __) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (int i = 0; i < notebook.pages.length; i++) ...[
+              KeyedSubtree(
+                key: ValueKey('page_${notebook.pages[i].id}'),
+                child: (!useWindowing || (i - windowCenter).abs() <= liveRadius)
+                    ? _buildSinglePageCanvas(notebook, notebook.pages[i], i)
+                    : () {
+                        final phSize = PaperMetrics.pageSize(
+                          isLandscape: notebook.pages[i].isLandscape,
+                          isInfiniteWhiteboard:
+                              notebook.pages[i].isInfiniteWhiteboard,
+                        );
+                        return SizedBox(
+                          width: phSize.width,
+                          height: phSize.height,
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              color: PaperPalette.of(
+                                notebook.pages[i].paperColor,
+                              ).background,
+                            ),
+                          ),
+                        );
+                      }(),
               ),
-              child: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.add_circle_outline_rounded,
-                    size: 16,
-                    color: EditorColors.activeBlue,
-                  ),
-                  SizedBox(width: 8),
-                  Text(
-                    'Chạm để thêm trang mới',
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white70,
+              if (i < notebook.pages.length - 1) const SizedBox(height: 14),
+            ],
+            const SizedBox(height: 18),
+            GestureDetector(
+              onTap: () => _handlePullAddPage(notebook, notebook.pages.last),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                decoration: BoxDecoration(
+                  color: EditorColors.obsidianSurface.withAlpha(200),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.add_circle_outline_rounded,
+                      size: 16,
+                      color: EditorColors.activeBlue,
                     ),
-                  ),
-                ],
+                    SizedBox(width: 8),
+                    Text(
+                      'Chạm để thêm trang mới',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white70,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-          const SizedBox(height: 36),
-        ],
+            const SizedBox(height: 36),
+          ],
+        ),
       ),
     );
   }
@@ -8373,10 +8665,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       onPageChanged: (i) {
         setState(() {
           _syncCurrentPageIndex(i);
-          _renderedWindowCenter = i;
         });
+        _renderedWindowCenterNotifier.value = i;
         _prewarmActiveDrawingPage(notebook, i);
         _prefetchNearbyPdfPages(notebook);
+        _scheduleSaveViewportState();
       },
       itemBuilder: (ctx, i) {
         return Center(
@@ -8415,85 +8708,95 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     final bool isLassoOwner = _lassoController.activePageId == page.id;
     final int effectiveRepaintVersion =
         _repaintVersion + (_pageRepaintVersions[page.id] ?? 0);
-    final ui.Image? pdfBgImg = page.pdfBackgroundPath != null
-        ? _pdfImageCache[page.pdfBackgroundPath!]
-        : null;
+    final mediaListenable = _mediaNotifierForPage(page.id);
 
-    return RepaintBoundary(
-      child: Container(
-        width: pageSize.width,
-        height: pageSize.height,
-        decoration: page.isInfiniteWhiteboard
-            ? null
-            : BoxDecoration(
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withAlpha(55),
-                    blurRadius: 10,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
+    return Container(
+      width: pageSize.width,
+      height: pageSize.height,
+      decoration: page.isInfiniteWhiteboard
+          ? null
+          : BoxDecoration(
+              border: Border.all(
+                color: Colors.black.withAlpha(24),
+                width: 0.5,
               ),
-        child: ClipRect(
-          child: Stack(
-            children: [
-              // Layer 0 (Static Cached RepaintBoundary): Paper template & immutable PDF slide background.
-              // Isolated from strokes/annotations so drawing never re-rasterizes paper or PDF backgrounds!
-              Positioned.fill(
-                child: IgnorePointer(
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withAlpha(42),
+                  blurRadius: 4,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+      child: ClipRect(
+        child: Stack(
+          children: [
+            // Layer 0 (Static Cached RepaintBoundary): Paper template & immutable PDF slide background.
+            // Isolated from strokes/annotations and scoped to this page's media notifier!
+            Positioned.fill(
+              child: IgnorePointer(
+                child: ValueListenableBuilder<int>(
+                  valueListenable: mediaListenable,
+                  builder: (_, __, ___) {
+                    final ui.Image? pdfBgImg = page.pdfBackgroundPath != null
+                        ? _pdfImageCache[page.pdfBackgroundPath!]
+                        : null;
+                    return RepaintBoundary(
+                      child: CustomPaint(
+                        size: pageSize,
+                        painter: _PageBackgroundPainter(
+                          templateType: page.templateType,
+                          paperColor: page.paperColor,
+                          isLandscape: page.isLandscape,
+                          isInfiniteWhiteboard: page.isInfiniteWhiteboard,
+                          pdfBackgroundImage: pdfBgImg,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+
+            // Layer 1 (Cached RepaintBoundary): Chronological Z-Index Images/Ink/Stencils
+            // When Sticky Notes exist, base layer paints everything <= first sticky note's zIndex,
+            // and upper slices paint newer images/strokes cleanly ON TOP OF earlier Sticky Notes!
+            ...() {
+              final sortedStickies = List<StickyNoteElement>.from(page.stickyNotes)
+                ..sort((a, b) => a.zIndex.compareTo(b.zIndex));
+              final bool hasStickies = sortedStickies.isNotEmpty;
+              final int? baseMaxZ =
+                  hasStickies ? sortedStickies.first.zIndex : null;
+              final bool readOnly = context.read<AppState>().readOnlyMode;
+
+              bool hasCanvasItemInRange(int minExcl, int? maxIncl) {
+                bool match(int z) =>
+                    z > minExcl && (maxIncl == null || z <= maxIncl);
+                return page.strokes.any((s) => match(s.zIndex)) ||
+                    page.imageElements.any((e) => match(e.zIndex)) ||
+                    page.stencilElements.any((e) => match(e.zIndex));
+              }
+
+              return <Widget>[
+                Positioned.fill(
                   child: RepaintBoundary(
                     child: CustomPaint(
                       size: pageSize,
-                      painter: _PageBackgroundPainter(
-                        templateType: page.templateType,
-                        paperColor: page.paperColor,
-                        isLandscape: page.isLandscape,
-                        isInfiniteWhiteboard: page.isInfiniteWhiteboard,
-                        pdfBackgroundImage: pdfBgImg,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-
-              // Layer 1 (Cached RepaintBoundary): Chronological Z-Index Images/Ink/Stencils
-              // When Sticky Notes exist, base layer paints everything <= first sticky note's zIndex,
-              // and upper slices paint newer images/strokes cleanly ON TOP OF earlier Sticky Notes!
-              ...() {
-                final sortedStickies = List<StickyNoteElement>.from(page.stickyNotes)
-                  ..sort((a, b) => a.zIndex.compareTo(b.zIndex));
-                final bool hasStickies = sortedStickies.isNotEmpty;
-                final int? baseMaxZ =
-                    hasStickies ? sortedStickies.first.zIndex : null;
-                final bool readOnly = context.read<AppState>().readOnlyMode;
-
-                bool hasCanvasItemInRange(int minExcl, int? maxIncl) {
-                  bool match(int z) =>
-                      z > minExcl && (maxIncl == null || z <= maxIncl);
-                  return page.strokes.any((s) => match(s.zIndex)) ||
-                      page.imageElements.any((e) => match(e.zIndex)) ||
-                      page.stencilElements.any((e) => match(e.zIndex));
-                }
-
-                return <Widget>[
-                  Positioned.fill(
-                    child: RepaintBoundary(
-                      child: CustomPaint(
-                        size: pageSize,
-                        painter: CanvasPainter(
-                          page: page,
-                          elementImageCache: _elementImageCache,
-                          lassoSelection: isLassoOwner
-                              ? _lassoController.selection
-                              : const LassoSelection(),
-                          lassoSelectionBounds: isLassoOwner
-                              ? _lassoController.selectionBounds
-                              : null,
-                          lassoDragOffset:
-                              isLassoOwner ? _lassoDragOffsetNotifier : null,
-                          erasingStrokesNotifier:
-                              _erasingNotifierForPage(page.id),
-                          hiddenImageId: _selectedImageId,
+                      painter: CanvasPainter(
+                        page: page,
+                        elementImageCache: _elementImageCache,
+                        lassoSelection: isLassoOwner
+                            ? _lassoController.selection
+                            : const LassoSelection(),
+                        lassoSelectionBounds: isLassoOwner
+                            ? _lassoController.selectionBounds
+                            : null,
+                        lassoDragOffset:
+                            isLassoOwner ? _lassoDragOffsetNotifier : null,
+                        erasingStrokesNotifier:
+                            _erasingNotifierForPage(page.id),
+                        mediaRepaintListenable: mediaListenable,
+                        hiddenImageId: _selectedImageId,
                           playingAudioId: _playingAudioId,
                           playingAudioTimeMsNotifier: (_playingAudioId != null &&
                                   page.strokes.any((s) => s.audioId == _playingAudioId))
@@ -8591,6 +8894,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                   : null,
                               erasingStrokesNotifier:
                               _erasingNotifierForPage(page.id),
+                              mediaRepaintListenable: mediaListenable,
                               hiddenImageId: _selectedImageId,
                               playingAudioId: _playingAudioId,
                               playingAudioTimeMsNotifier: (_playingAudioId != null &&
@@ -8891,7 +9195,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
               ),
           ],
         ),
-      ),
       ),
     );
   }
@@ -11654,7 +11957,7 @@ class _PageBackgroundPainter extends CustomPainter {
         src,
         dst,
         Paint()
-          ..filterQuality = FilterQuality.high
+          ..filterQuality = FilterQuality.medium
           ..isAntiAlias = true,
       );
     }

@@ -82,6 +82,7 @@ class CanvasPainter extends CustomPainter {
   final ValueListenable<Offset>? lassoDragOffset;
   final ValueListenable<({String pageId, List<Stroke> strokes})?>?
       erasingStrokesNotifier;
+  final Listenable? mediaRepaintListenable;
   final String? hiddenImageId;
   final String? playingAudioId;
   final int? playingAudioTimeMs;
@@ -101,6 +102,7 @@ class CanvasPainter extends CustomPainter {
     this.lassoSelectionBounds,
     this.lassoDragOffset,
     this.erasingStrokesNotifier,
+    this.mediaRepaintListenable,
     this.hiddenImageId,
     this.playingAudioId,
     this.playingAudioTimeMs,
@@ -115,6 +117,7 @@ class CanvasPainter extends CustomPainter {
           repaint: Listenable.merge([
             if (lassoDragOffset != null) lassoDragOffset,
             if (erasingStrokesNotifier != null) erasingStrokesNotifier,
+            if (mediaRepaintListenable != null) mediaRepaintListenable,
             if (playingAudioTimeMsNotifier != null) playingAudioTimeMsNotifier,
           ]),
         );
@@ -282,7 +285,7 @@ class CanvasPainter extends CustomPainter {
       src,
       dst,
       Paint()
-        ..filterQuality = FilterQuality.high
+        ..filterQuality = FilterQuality.medium
         ..isAntiAlias = true,
     );
   }
@@ -335,7 +338,7 @@ class CanvasPainter extends CustomPainter {
       src,
       dst,
       Paint()
-        ..filterQuality = FilterQuality.high
+        ..filterQuality = FilterQuality.medium
         ..isAntiAlias = true,
     );
 
@@ -953,6 +956,7 @@ class CanvasPainter extends CustomPainter {
         oldDelegate.lassoSelection != lassoSelection ||
         oldDelegate.lassoSelectionBounds != lassoSelectionBounds ||
         oldDelegate.lassoDragOffset != lassoDragOffset ||
+        oldDelegate.mediaRepaintListenable != mediaRepaintListenable ||
         oldDelegate.hiddenImageId != hiddenImageId ||
         oldDelegate.playingAudioId != playingAudioId ||
         oldDelegate.playingAudioTimeMs != playingAudioTimeMs ||

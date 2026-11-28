@@ -1511,6 +1511,113 @@ void main() {
       expect(circleRes.shapeType, ShapeType.circle);
     });
   });
+
+  group('v3.8.9 Notebook Viewport Persistence & Low-Pass Drag Acceleration', () {
+    test('Notebook JSON roundtrip preserves viewport state and defaults cleanly for legacy JSON', () {
+      final now = DateTime.utc(2026, 11, 28);
+      final nb = Notebook(
+        id: 'nb-vp',
+        title: 'Hóa Vô Cơ',
+        createdAt: now,
+        updatedAt: now,
+        lastPageIndex: 7,
+        lastScrollOffsetX: -120.5,
+        lastScrollOffsetY: 5420.25,
+        lastZoomScale: 1.35,
+      );
+      final decoded = Notebook.fromJson(nb.toJson());
+      expect(decoded.lastPageIndex, 7);
+      expect(decoded.lastScrollOffsetX, closeTo(-120.5, 1e-6));
+      expect(decoded.lastScrollOffsetY, closeTo(5420.25, 1e-6));
+      expect(decoded.lastZoomScale, closeTo(1.35, 1e-6));
+
+      final legacyJson = nb.toJson()
+        ..remove('lastPageIndex')
+        ..remove('lastScrollOffsetX')
+        ..remove('lastScrollOffsetY')
+        ..remove('lastZoomScale');
+      final legacy = Notebook.fromJson(legacyJson);
+      expect(legacy.lastPageIndex, 0);
+      expect(legacy.lastScrollOffsetX, isNull);
+      expect(legacy.lastScrollOffsetY, isNull);
+      expect(legacy.lastZoomScale, isNull);
+    });
+
+    test('AppState.saveNotebookViewportState persists locally without mutating updatedAt or syncStatus', () async {
+      final tempDir = Directory.systemTemp.createTempSync('chemnote_vp_');
+      addTearDown(() {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final storage = LocalStorageService(baseDirectory: tempDir);
+      final appState = AppState(storage: storage);
+      addTearDown(appState.dispose);
+      await appState.loadAll();
+
+      final nb = await appState.createNotebook(
+        title: 'Position Notebook',
+        initialPages: [
+          for (int i = 0; i < 4; i++)
+            NotePage(
+              id: 'p_$i',
+              index: i,
+              updatedAt: DateTime.utc(2026, 11, 28),
+            ),
+        ],
+      );
+      final initialUpdatedAt = appState.getNotebookById(nb.id)!.updatedAt;
+      final initialSyncStatus = appState.getNotebookById(nb.id)!.syncStatus;
+
+      await appState.saveNotebookViewportState(
+        nb.id,
+        lastPageIndex: 3,
+        lastScrollOffsetX: 12.0,
+        lastScrollOffsetY: 3180.0,
+        lastZoomScale: 1.12,
+        flushImmediately: true,
+      );
+
+      final afterSave = appState.getNotebookById(nb.id)!;
+      expect(afterSave.updatedAt, initialUpdatedAt);
+      expect(afterSave.syncStatus, initialSyncStatus);
+      expect(afterSave.lastPageIndex, 3);
+      expect(afterSave.lastScrollOffsetY, closeTo(3180.0, 1e-6));
+
+      final reloaded = AppState(storage: storage);
+      addTearDown(reloaded.dispose);
+      await reloaded.loadAll();
+      final restored = reloaded.getNotebookById(nb.id)!;
+      expect(restored.lastPageIndex, 3);
+      expect(restored.lastScrollOffsetX, closeTo(12.0, 1e-6));
+      expect(restored.lastScrollOffsetY, closeTo(3180.0, 1e-6));
+      expect(restored.lastZoomScale, closeTo(1.12, 1e-6));
+    });
+
+    test('SmartScrollTracker low-pass filters accelBoost across uneven 144Hz packet dt', () {
+      final tracker = SmartScrollTracker();
+      tracker.start(1000000);
+      final boosts = <double>[];
+      int tUs = 1000000;
+      for (int i = 0; i < 6; i++) {
+        // Alternate 5ms and 11ms intervals with matching displacement (steady ~2000 px/s)
+        final int dtUs = i.isEven ? 5000 : 11000;
+        tUs += dtUs;
+        final double dy = -(dtUs / 1e6) * 2000.0;
+        final step = tracker.addMove(
+          delta: Offset(0.0, dy),
+          timeUs: tUs,
+          scrollMult: 1.0,
+          canPanHorizontal: true,
+          requireActivationThreshold: false,
+        );
+        boosts.add(step.accelBoost);
+      }
+      // Smooth low-pass speed avoids wild step-to-step acceleration swings
+      for (int i = 1; i < boosts.length; i++) {
+        expect((boosts[i] - boosts[i - 1]).abs(), lessThan(0.35));
+      }
+    });
+  });
 }
 
 class _MidUploadEditDriveService extends GoogleDriveService {

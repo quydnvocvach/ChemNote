@@ -136,6 +136,7 @@ class _SearchScreenState extends State<SearchScreen> {
                           final route = AppTheme.buildEditorRoute<void>(
                             (_) => NoteEditorScreen(
                               notebookId: item.notebook.id,
+                              initialPageIndex: item.page?.index,
                             ),
                           );
                           Navigator.of(context).push(route);
