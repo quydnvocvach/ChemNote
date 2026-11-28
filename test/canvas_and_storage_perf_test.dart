@@ -1733,7 +1733,12 @@ void main() {
           StrokePoint(x: 104.0, y: 146.0, pressure: 0.5, timestamp: 26),
         ],
       );
-      final page = NotePage(id: 'p_arc', index: 0, strokes: const [arcStroke]);
+      final page = NotePage(
+        id: 'p_arc',
+        index: 0,
+        strokes: const [arcStroke],
+        updatedAt: DateTime.utc(2026, 11, 28),
+      );
       final recorder = ui.PictureRecorder();
       final canvas = Canvas(recorder);
       CanvasPainter(page: page).paint(canvas, const Size(400, 400));
@@ -1743,14 +1748,22 @@ void main() {
       // Verify ActiveStrokePainter pageId gating skips non-active pages safely
       final activeStroke = ValueNotifier<Stroke?>(arcStroke);
       final activePageId = ValueNotifier<String?>('page-2');
-      addTearDown(activeStroke.dispose);
-      addTearDown(activePageId.dispose);
+      final eraserCursor = ValueNotifier<Offset?>(null);
+      final lassoPath = ValueNotifier<List<Offset>>(const []);
+      final tapeDraftRect = ValueNotifier<Rect?>(null);
+      addTearDown(() {
+        activeStroke.dispose();
+        activePageId.dispose();
+        eraserCursor.dispose();
+        lassoPath.dispose();
+        tapeDraftRect.dispose();
+      });
 
       final inactivePainter = ActiveStrokePainter(
         activeStroke: activeStroke,
-        eraserCursor: ValueNotifier<Offset?>(null),
-        lassoPath: ValueNotifier<List<Offset>>(const []),
-        tapeDraftRect: ValueNotifier<Rect?>(null),
+        eraserCursor: eraserCursor,
+        lassoPath: lassoPath,
+        tapeDraftRect: tapeDraftRect,
         isDarkPaper: false,
         pageId: 'page-1',
         activePageId: activePageId,
