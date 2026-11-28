@@ -26,6 +26,7 @@ import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
@@ -845,6 +846,20 @@ class MainActivity : FlutterActivity() {
     private fun enableUnbufferedStylusInput() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.decorView.requestUnbufferedDispatch(InputDevice.SOURCE_STYLUS)
+            requestUnbufferedRecursive(window.decorView)
+        }
+    }
+
+    private fun requestUnbufferedRecursive(view: View) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        if (view is io.flutter.embedding.android.FlutterView) {
+            view.requestUnbufferedDispatch(InputDevice.SOURCE_STYLUS)
+            return
+        }
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                requestUnbufferedRecursive(view.getChildAt(i))
+            }
         }
     }
 

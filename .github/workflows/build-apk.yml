@@ -160,23 +160,25 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.8.9 with APK
+      - name: Publish Release v3.8.10 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.8.9
-          name: ChemNote Pro v3.8.9 (Mượt 144Hz khi cuộn/hiển thị, chống mất nét do tỳ tay & nhớ đúng vị trí đọc)
+          tag_name: v3.8.10
+          name: ChemNote Pro v3.8.10 (Viết nhanh chuẩn nét, không trễ trang mới, giữ vẽ thẳng ngắn & nhớ Gạch xoá nhanh)
           body: |
-            ### ChemNote Pro v3.8.9
-            - **Khắc phục triệt để lỗi vừa viết xong bị mất nét do nhận nhầm lòng bàn tay:**
-              - Theo dõi chặt chẽ quyền sở hữu `_activeDrawingPointerId` để ngón tay hoặc lòng bàn tay (`PointerCancelEvent` / chạm đồng thời) không bao giờ hủy hay ghi đè nét M-Pencil 3.
-              - Tách `_maxSimultaneousPointers >= 2` khỏi luồng nhấc bút stylus và sử dụng dữ liệu trang mới nhất (`_latestPage`) khi lưu nét liên tiếp.
-              - Chống kích hoạt nhầm 2 ngón Undo ngay sau khi viết hoặc khi có chạm lòng bàn tay (`isLikelyPalmTouch` + khoảng nghỉ `320ms` sau nét bút).
-            - **Tối ưu độ mượt vuốt, lướt & hiển thị 144Hz:**
-              - Cô lập thanh công cụ tĩnh và khu vực trang viết bằng `RepaintBoundary` riêng biệt, bỏ `RepaintBoundary` dư thừa bao ngoài mỗi trang, giảm tải bộ nhớ GPU.
-              - Lọc thông thấp tốc độ vuốt (`_smoothedSpeedY`) giúp gia tốc kéo mượt đều trên 144Hz không khựng giật.
-              - Chuyển cửa sổ trang (`_renderedWindowCenterNotifier`) và cập nhật ảnh/PDF từng trang (`_pageMediaNotifiers`) bằng `ValueNotifier` + `KeyedSubtree`, xóa `setState` khi tải/loại bỏ PDF/ảnh và dùng `FilterQuality.medium` cho nền PDF.
-            - **Lưu & khôi phục chính xác vị trí dừng trước đó của từng sổ tay:**
-              - Lưu cục bộ `lastPageIndex`, tọa độ cuộn (`lastScrollOffsetX`, `lastScrollOffsetY`), và mức zoom (`lastZoomScale`) khi thoát sổ, chuyển tab, hoặc ẩn app (không làm nhảy `updatedAt` hay đồng bộ thừa).
+            ### ChemNote Pro v3.8.10
+            - **Khắc phục biến dạng nét khi viết nhanh & tối ưu độ trễ viết:**
+              - Áp dụng **Fast Ink Commit** (`_pageStrokeVersionNotifiers` + `notify: false` khi chỉ thay đổi nét bút/tẩy) giúp nhấc bút không còn rebuild toàn bộ `NoteEditorScreen`, triệt tiêu khựng đầu nét tiếp theo.
+              - Khử rebuild `InteractiveViewer` trùng lặp trong `_bumpViewportGate` (so sánh bitmask trạng thái thay đổi thực tế).
+              - Bật làm mượt đầu bút **thích ứng theo vận tốc** (`filterLivePoint`) giúp bút nhanh bám sát đầu ngòi M-Pencil 3 và uốn cong mượt các nét cong nhanh thưa điểm (`_isSmoothOpenThreePointArc`) thay vì gãy khúc thẳng.
+              - Gia cố `requestUnbufferedDispatch(InputDevice.SOURCE_STYLUS)` trực tiếp lên `FlutterView` trên Android 11+.
+            - **Xoá độ trễ khi viết sang trang mới:**
+              - Pre-warm lớp vẽ trực tiếp (`ActiveStrokePainter`) có chọn lọc theo `pageId` cho trang hiện tại và 2 trang liền kề (±1), giúp đặt bút sang trang mới vẽ tức thì ngay từ frame 0.
+            - **Giữ vẽ hình học nhạy hơn & nhận đoạn thẳng ngắn 1–2 cm:**
+              - Giảm thời gian chờ giữ vẽ hình từ `720ms` xuống **`400ms`** (bút) và **`320ms`** (highlight/hình).
+              - Tách ngưỡng độ dài đoạn thẳng (`minLineLength = 20px`) khỏi `minDiag` (`46px`), nhận chuẩn đoạn thẳng ngắn 1–2 cm mà không bắt nhầm chữ viết nhỏ (`o`, `0`, `a`, `c`).
+            - **Nhớ cài đặt Gạch xoá nhanh & các tuỳ chọn viết:**
+              - Lưu bền vững `scribbleToErase`, `holdToSnapShape`, `palmRejectionEnabled`, `verticalContinuousScroll` và các tuỳ chọn trình ghi chú qua `penPrefs` khi khởi động lại app.
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

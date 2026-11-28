@@ -631,6 +631,20 @@ class CanvasPainter extends CustomPainter {
     }
   }
 
+  static bool _isSmoothOpenThreePointArc(List<StrokePoint> pts) {
+    if (pts.length != 3) return false;
+    final double dx1 = pts[1].x - pts[0].x;
+    final double dy1 = pts[1].y - pts[0].y;
+    final double dx2 = pts[2].x - pts[1].x;
+    final double dy2 = pts[2].y - pts[1].y;
+    final double len1Sq = dx1 * dx1 + dy1 * dy1;
+    final double len2Sq = dx2 * dx2 + dy2 * dy2;
+    if (len1Sq < 1e-6 || len2Sq < 1e-6) return false;
+    final double cosAngle =
+        (dx1 * dx2 + dy1 * dy2) / math.sqrt(len1Sq * len2Sq);
+    return cosAngle > 0.15;
+  }
+
   static List<_WidthPathRun> _buildWidthBatchedRuns(
     List<StrokePoint> pts,
     Stroke stroke,
@@ -642,6 +656,13 @@ class CanvasPainter extends CustomPainter {
         ..moveTo(pts[0].x, pts[0].y)
         ..lineTo(pts[1].x, pts[1].y);
       return [_WidthPathRun(w, p)];
+    }
+    if (_isSmoothOpenThreePointArc(pts)) {
+      final double w = (widths[0] + widths[1] + widths[2]) / 3.0;
+      final p = Path()
+        ..moveTo(pts[0].x, pts[0].y)
+        ..quadraticBezierTo(pts[1].x, pts[1].y, pts[2].x, pts[2].y);
+      return [_WidthPathRun((w * 10.0).roundToDouble() / 10.0, p)];
     }
 
     final runs = <_WidthPathRun>[];
@@ -712,6 +733,10 @@ class CanvasPainter extends CustomPainter {
     final path = Path()..moveTo(pts.first.x, pts.first.y);
     if (pts.length == 2) {
       path.lineTo(pts[1].x, pts[1].y);
+      return path;
+    }
+    if (_isSmoothOpenThreePointArc(pts)) {
+      path.quadraticBezierTo(pts[1].x, pts[1].y, pts[2].x, pts[2].y);
       return path;
     }
     for (int i = 1; i < pts.length - 1; i++) {
@@ -981,6 +1006,9 @@ class ActiveStrokePainter extends CustomPainter {
   final bool isDarkPaper;
   final double eraserRadius;
   final Color tapeColor;
+  final String? pageId;
+  final ValueListenable<String?>? activePageId;
+  final Listenable? repaintListenable;
 
   ActiveStrokePainter({
     required this.activeStroke,
@@ -990,17 +1018,26 @@ class ActiveStrokePainter extends CustomPainter {
     required this.isDarkPaper,
     this.eraserRadius = 18.0,
     this.tapeColor = const Color(0xFF6366F1),
+    this.pageId,
+    this.activePageId,
+    this.repaintListenable,
   }) : super(
-          repaint: Listenable.merge([
-            activeStroke,
-            eraserCursor,
-            lassoPath,
-            tapeDraftRect,
-          ]),
+          repaint: repaintListenable ??
+              Listenable.merge([
+                activeStroke,
+                eraserCursor,
+                lassoPath,
+                tapeDraftRect,
+              ]),
         );
 
   @override
   void paint(Canvas canvas, Size size) {
+    if (pageId != null &&
+        activePageId != null &&
+        activePageId!.value != pageId) {
+      return;
+    }
     // 1. Live in-progress stroke (exact same silky quadratic midpoint renderer as committed ink!)
     final stroke = activeStroke.value;
     if (stroke != null && stroke.points.isNotEmpty) {
@@ -1092,6 +1129,9 @@ class ActiveStrokePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant ActiveStrokePainter oldDelegate) {
     return oldDelegate.isDarkPaper != isDarkPaper ||
-        oldDelegate.eraserRadius != eraserRadius;
+        oldDelegate.eraserRadius != eraserRadius ||
+        oldDelegate.pageId != pageId ||
+        oldDelegate.activePageId != activePageId ||
+        oldDelegate.repaintListenable != repaintListenable;
   }
 }

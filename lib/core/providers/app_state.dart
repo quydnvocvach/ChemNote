@@ -347,6 +347,16 @@ class AppState extends ChangeNotifier {
         'wifiOnlySync': _wifiOnlySync,
         'autoExportPdfOnSync': _autoExportPdfOnSync,
         'randomCoverEnabled': _randomCoverEnabled,
+        'scribbleToErase': _scribbleToErase,
+        'holdToSnapShape': _holdToSnapShape,
+        'palmRejectionEnabled': _palmRejectionEnabled,
+        'verticalContinuousScroll': _verticalContinuousScroll,
+        'freePaperMovement': _freePaperMovement,
+        'zoomAdaptiveStroke': _zoomAdaptiveStroke,
+        'doubleTapToZoom': _doubleTapToZoom,
+        'quickGesturesEnabled': _quickGesturesEnabled,
+        'mPencilDoubleTapEraser': _mPencilDoubleTapEraser,
+        'keepScreenAwake': _keepScreenAwake,
       }),
     );
   }
@@ -355,11 +365,13 @@ class AppState extends ChangeNotifier {
     if (_palmRejectionEnabled == value) return;
     _palmRejectionEnabled = value;
     notifyListeners();
+    _persistPrefsMap();
   }
 
   void togglePalmRejection() {
     _palmRejectionEnabled = !_palmRejectionEnabled;
     notifyListeners();
+    _persistPrefsMap();
   }
 
   void setReadOnlyMode(bool value) {
@@ -478,42 +490,49 @@ class AppState extends ChangeNotifier {
     if (_verticalContinuousScroll == value) return;
     _verticalContinuousScroll = value;
     notifyListeners();
+    _persistPrefsMap();
   }
 
   void setFreePaperMovement(bool value) {
     if (_freePaperMovement == value) return;
     _freePaperMovement = value;
     notifyListeners();
+    _persistPrefsMap();
   }
 
   void setZoomAdaptiveStroke(bool value) {
     if (_zoomAdaptiveStroke == value) return;
     _zoomAdaptiveStroke = value;
     notifyListeners();
+    _persistPrefsMap();
   }
 
   void setDoubleTapToZoom(bool value) {
     if (_doubleTapToZoom == value) return;
     _doubleTapToZoom = value;
     notifyListeners();
+    _persistPrefsMap();
   }
 
   void setQuickGesturesEnabled(bool value) {
     if (_quickGesturesEnabled == value) return;
     _quickGesturesEnabled = value;
     notifyListeners();
+    _persistPrefsMap();
   }
 
   void setMPencilDoubleTapEraser(bool value) {
     if (_mPencilDoubleTapEraser == value) return;
     _mPencilDoubleTapEraser = value;
     notifyListeners();
+    _persistPrefsMap();
   }
 
   Future<void> setKeepScreenAwake(bool value) async {
     if (_keepScreenAwake == value) return;
     _keepScreenAwake = value;
     notifyListeners();
+    _persistPrefsMap();
     await HardwareService.instance.setKeepScreenOn(value);
   }
 
@@ -521,12 +540,14 @@ class AppState extends ChangeNotifier {
     if (_scribbleToErase == value) return;
     _scribbleToErase = value;
     notifyListeners();
+    _persistPrefsMap();
   }
 
   void setHoldToSnapShape(bool value) {
     if (_holdToSnapShape == value) return;
     _holdToSnapShape = value;
     notifyListeners();
+    _persistPrefsMap();
   }
 
   void openTab(String notebookId) {
@@ -760,6 +781,31 @@ class AppState extends ChangeNotifier {
             penPrefs['autoExportPdfOnSync'] as bool? ?? _autoExportPdfOnSync;
         _randomCoverEnabled =
             penPrefs['randomCoverEnabled'] as bool? ?? _randomCoverEnabled;
+        _scribbleToErase =
+            penPrefs['scribbleToErase'] as bool? ?? _scribbleToErase;
+        _holdToSnapShape =
+            penPrefs['holdToSnapShape'] as bool? ?? _holdToSnapShape;
+        _palmRejectionEnabled =
+            penPrefs['palmRejectionEnabled'] as bool? ?? _palmRejectionEnabled;
+        _verticalContinuousScroll =
+            penPrefs['verticalContinuousScroll'] as bool? ??
+                _verticalContinuousScroll;
+        _freePaperMovement =
+            penPrefs['freePaperMovement'] as bool? ?? _freePaperMovement;
+        _zoomAdaptiveStroke =
+            penPrefs['zoomAdaptiveStroke'] as bool? ?? _zoomAdaptiveStroke;
+        _doubleTapToZoom =
+            penPrefs['doubleTapToZoom'] as bool? ?? _doubleTapToZoom;
+        _quickGesturesEnabled =
+            penPrefs['quickGesturesEnabled'] as bool? ?? _quickGesturesEnabled;
+        _mPencilDoubleTapEraser =
+            penPrefs['mPencilDoubleTapEraser'] as bool? ??
+                _mPencilDoubleTapEraser;
+        _keepScreenAwake =
+            penPrefs['keepScreenAwake'] as bool? ?? _keepScreenAwake;
+        if (_keepScreenAwake) {
+          unawaited(HardwareService.instance.setKeepScreenOn(true));
+        }
       }
     } finally {
       _isLoading = false;

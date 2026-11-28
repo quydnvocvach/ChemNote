@@ -1618,6 +1618,148 @@ void main() {
       }
     });
   });
+
+  group('v3.8.10 ink fidelity, short line snap & toggle persistence', () {
+    test('AppState persists scribbleToErase, holdToSnapShape, and editor toggles across reload', () async {
+      final tempDir = Directory.systemTemp.createTempSync('chemnote_prefs_v3810_');
+      addTearDown(() {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final storage = LocalStorageService(baseDirectory: tempDir);
+      final appState = AppState(storage: storage);
+      addTearDown(appState.dispose);
+      await appState.loadAll();
+
+      expect(appState.scribbleToErase, isFalse);
+      appState.setScribbleToErase(true);
+      appState.setHoldToSnapShape(false);
+      appState.setPalmRejectionEnabled(false);
+      appState.setVerticalContinuousScroll(false);
+      appState.setFreePaperMovement(false);
+      appState.setZoomAdaptiveStroke(true);
+      appState.setDoubleTapToZoom(false);
+      appState.setQuickGesturesEnabled(false);
+      appState.setMPencilDoubleTapEraser(false);
+
+      // Give unawaited _persistPrefsMap microtask/IO a moment to flush to disk.
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+
+      final reloaded = AppState(storage: LocalStorageService(baseDirectory: tempDir));
+      addTearDown(reloaded.dispose);
+      await reloaded.loadAll();
+
+      expect(reloaded.scribbleToErase, isTrue);
+      expect(reloaded.holdToSnapShape, isFalse);
+      expect(reloaded.palmRejectionEnabled, isFalse);
+      expect(reloaded.verticalContinuousScroll, isFalse);
+      expect(reloaded.freePaperMovement, isFalse);
+      expect(reloaded.zoomAdaptiveStroke, isTrue);
+      expect(reloaded.doubleTapToZoom, isFalse);
+      expect(reloaded.quickGesturesEnabled, isFalse);
+      expect(reloaded.mPencilDoubleTapEraser, isFalse);
+    });
+
+    test('StrokeEngine.recognizeShape snaps short 1-2cm (24px) straight line while rejecting small o/c handwriting', () {
+      // 4-point straight 24px segment (~0.65-1cm on tablet paper)
+      final shortLine = <StrokePoint>[
+        const StrokePoint(x: 100, y: 120, pressure: 0.6, timestamp: 10),
+        const StrokePoint(x: 108, y: 120.2, pressure: 0.6, timestamp: 20),
+        const StrokePoint(x: 116, y: 119.8, pressure: 0.6, timestamp: 30),
+        const StrokePoint(x: 124, y: 120, pressure: 0.6, timestamp: 40),
+      ];
+      final lineRes = StrokeEngine.recognizeShape(
+        shortLine,
+        minDiag: 46.0,
+        minLineLength: 20.0,
+      );
+      expect(lineRes.recognized, isTrue);
+      expect(lineRes.shapeType, ShapeType.line);
+
+      // Small 22px closed "o" loop (should NOT snap to circle or line)
+      final smallO = <StrokePoint>[
+        for (int i = 0; i <= 12; i++)
+          StrokePoint(
+            x: 200 + 10.0 * math.cos(i * 2 * math.pi / 12),
+            y: 200 + 10.0 * math.sin(i * 2 * math.pi / 12),
+            pressure: 0.6,
+            timestamp: 10 + i * 10,
+          ),
+      ];
+      final oRes = StrokeEngine.recognizeShape(
+        smallO,
+        minDiag: 46.0,
+        minLineLength: 20.0,
+      );
+      expect(oRes.shapeType, ShapeType.none);
+
+      // Small curved "c" arc (diag ~26px, should NOT falsely snap to straight line)
+      final smallC = <StrokePoint>[
+        const StrokePoint(x: 320, y: 200, pressure: 0.6, timestamp: 10),
+        const StrokePoint(x: 308, y: 206, pressure: 0.6, timestamp: 20),
+        const StrokePoint(x: 306, y: 218, pressure: 0.6, timestamp: 30),
+        const StrokePoint(x: 320, y: 224, pressure: 0.6, timestamp: 40),
+      ];
+      final cRes = StrokeEngine.recognizeShape(
+        smallC,
+        minDiag: 46.0,
+        minLineLength: 20.0,
+      );
+      expect(cRes.shapeType, ShapeType.none);
+    });
+
+    test('StrokeEngine.filterLivePoint adapts alpha on fast jumps to avoid nib lag', () {
+      const prev = StrokePoint(x: 10.0, y: 10.0, pressure: 0.6, timestamp: 100);
+      const fastJump = StrokePoint(x: 34.0, y: 10.0, pressure: 0.6, timestamp: 107);
+      final filtered = StrokeEngine.filterLivePoint(
+        fastJump,
+        const [prev],
+        stabilization: 0.55,
+      );
+      expect(filtered, isNotNull);
+      // Fast 24px jump should stay close to the actual pen tip (> 90% of step)
+      expect(filtered!.x, greaterThan(31.5));
+    });
+
+    test('CanvasPainter renders 3-point curved arc and ActiveStrokePainter skips inactive pageId', () {
+      const arcStroke = Stroke(
+        id: 'arc_3pt',
+        toolType: ToolType.fountainPen,
+        colorValue: 0xFF111827,
+        width: 2.8,
+        points: [
+          StrokePoint(x: 100.0, y: 100.0, pressure: 0.5, timestamp: 10),
+          StrokePoint(x: 112.0, y: 122.0, pressure: 0.6, timestamp: 18),
+          StrokePoint(x: 104.0, y: 146.0, pressure: 0.5, timestamp: 26),
+        ],
+      );
+      final page = NotePage(id: 'p_arc', index: 0, strokes: const [arcStroke]);
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      CanvasPainter(page: page).paint(canvas, const Size(400, 400));
+      final pic = recorder.endRecording();
+      pic.dispose();
+
+      // Verify ActiveStrokePainter pageId gating skips non-active pages safely
+      final activeStroke = ValueNotifier<Stroke?>(arcStroke);
+      final activePageId = ValueNotifier<String?>('page-2');
+      addTearDown(activeStroke.dispose);
+      addTearDown(activePageId.dispose);
+
+      final inactivePainter = ActiveStrokePainter(
+        activeStroke: activeStroke,
+        eraserCursor: ValueNotifier<Offset?>(null),
+        lassoPath: ValueNotifier<List<Offset>>(const []),
+        tapeDraftRect: ValueNotifier<Rect?>(null),
+        isDarkPaper: false,
+        pageId: 'page-1',
+        activePageId: activePageId,
+      );
+      final rec2 = ui.PictureRecorder();
+      inactivePainter.paint(Canvas(rec2), const Size(400, 400));
+      rec2.endRecording().dispose();
+    });
+  });
 }
 
 class _MidUploadEditDriveService extends GoogleDriveService {

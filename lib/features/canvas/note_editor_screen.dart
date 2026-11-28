@@ -97,6 +97,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   final Map<String, ValueNotifier<({String pageId, List<Stroke> strokes})?>>
       _pageErasingNotifiers = {};
   final Map<String, ValueNotifier<int>> _pageMediaNotifiers = {};
+  final Map<String, ValueNotifier<int>> _pageStrokeVersionNotifiers = {};
+  final Map<String, ValueNotifier<int>> _pageLiveLayerTicks = {};
+  String? _lastTickedLivePageId;
   String? _workingErasePageId;
   List<Stroke>? _workingEraseStrokes;
   Offset? _lastEraserPoint;
@@ -114,6 +117,43 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       pageId,
       () => ValueNotifier<int>(0),
     );
+  }
+
+  ValueNotifier<int> _strokeVersionNotifierForPage(String pageId) {
+    return _pageStrokeVersionNotifiers.putIfAbsent(
+      pageId,
+      () => ValueNotifier<int>(0),
+    );
+  }
+
+  ValueNotifier<int> _liveLayerTickForPage(String pageId) {
+    return _pageLiveLayerTicks.putIfAbsent(
+      pageId,
+      () => ValueNotifier<int>(0),
+    );
+  }
+
+  void _tickLiveLayer(String? pageId) {
+    if (pageId == null) return;
+    final n = _pageLiveLayerTicks[pageId];
+    if (n != null) {
+      n.value = n.value + 1;
+    }
+  }
+
+  void _onLiveOverlayChanged() {
+    final String? pageId =
+        _activeDrawingPageIdNotifier.value ?? _lastTickedLivePageId;
+    _tickLiveLayer(pageId);
+  }
+
+  void _onActiveDrawingPageChanged() {
+    final String? next = _activeDrawingPageIdNotifier.value;
+    if (_lastTickedLivePageId != null && _lastTickedLivePageId != next) {
+      _tickLiveLayer(_lastTickedLivePageId);
+    }
+    _lastTickedLivePageId = next;
+    _tickLiveLayer(next);
   }
 
   void _clearWorkingEraseNotifier() {
@@ -219,6 +259,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   DateTime? _lastStylusHoverAt;
   DateTime? _lastStylusCooldownAt;
   final ValueNotifier<int> _viewportGateNotifier = ValueNotifier<int>(0);
+  int _lastViewportGateSignature = -1;
   Matrix4? _lockedMatrixDuringStylus;
   Matrix4? _lockedWhiteboardMatrixDuringStylus;
   bool _stylusPanMode = false;
@@ -375,7 +416,24 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         _activeTool == EditorTool.panZoom))));
   }
 
+  int _computeViewportGateSignature() {
+    int sig = 0;
+    if (_stylusBlocksViewport) sig |= 1 << 0;
+    if (_computeAllowZoomPan(_appStateRef)) sig |= 1 << 1;
+    if (_activeTouchPointers.length >= 2) sig |= 1 << 2;
+    if (_gestureUsedMultiTouch) sig |= 1 << 3;
+    if (_isZoomLocked) sig |= 1 << 4;
+    if (_isOverlayDragging) sig |= 1 << 5;
+    if (_overlayTouchPointers.isNotEmpty) sig |= 1 << 6;
+    if (_appStateRef.freePaperMovement) sig |= 1 << 7;
+    if (_appStateRef.verticalContinuousScroll) sig |= 1 << 8;
+    return sig;
+  }
+
   void _bumpViewportGate() {
+    final int sig = _computeViewportGateSignature();
+    if (sig == _lastViewportGateSignature) return;
+    _lastViewportGateSignature = sig;
     _viewportGateNotifier.value = _viewportGateNotifier.value + 1;
   }
 
@@ -875,6 +933,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     }
     _horizontalPageController = PageController(initialPage: _currentPageIndex);
     _lassoController.addListener(_onLassoChanged);
+    _activeStrokeNotifier.addListener(_onLiveOverlayChanged);
+    _eraserCursorNotifier.addListener(_onLiveOverlayChanged);
+    _lassoPathNotifier.addListener(_onLiveOverlayChanged);
+    _tapeDraftNotifier.addListener(_onLiveOverlayChanged);
+    _activeDrawingPageIdNotifier.addListener(_onActiveDrawingPageChanged);
+    _lastTickedLivePageId = _activeDrawingPageIdNotifier.value;
 
     // Restore user's last-used writing tool, color, size, opacity, smoothing & eraser size
     _lastPenTool = _editorToolFromStrokeTool(appState.lastPenTool);
@@ -1009,6 +1073,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _renderedWindowCenterNotifier.dispose();
     _activeDrawingPageIdNotifier.dispose();
     _favoritesDockTopNotifier.dispose();
+    _activeStrokeNotifier.removeListener(_onLiveOverlayChanged);
+    _eraserCursorNotifier.removeListener(_onLiveOverlayChanged);
+    _lassoPathNotifier.removeListener(_onLiveOverlayChanged);
+    _tapeDraftNotifier.removeListener(_onLiveOverlayChanged);
+    _activeDrawingPageIdNotifier.removeListener(_onActiveDrawingPageChanged);
     _activeStrokeNotifier.dispose();
     _eraserCursorNotifier.dispose();
     _lassoPathNotifier.dispose();
@@ -1030,6 +1099,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       n.dispose();
     }
     _pageMediaNotifiers.clear();
+    for (final n in _pageStrokeVersionNotifiers.values) {
+      n.dispose();
+    }
+    _pageStrokeVersionNotifiers.clear();
+    for (final n in _pageLiveLayerTicks.values) {
+      n.dispose();
+    }
+    _pageLiveLayerTicks.clear();
     _cropDraftNotifier.dispose();
     _pullAddProgressNotifier.dispose();
     _recordingElapsedMsNotifier.dispose();
@@ -1173,8 +1250,33 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   Future<void> _commitPage(
     NotePage updatedPage, {
     NotePage? undoSnapshot,
+    bool fastInkCommit = false,
   }) async {
     _viewportDirty = true;
+    final bool canFastCommit = fastInkCommit &&
+        updatedPage.stickyNotes.isEmpty &&
+        _playingAudioId == null &&
+        !_zoomWindowEnabled;
+    if (canFastCommit) {
+      final bool prevCanUndo = _undoStackFor(_activeNotebookId).isNotEmpty;
+      final bool prevCanRedo = _redoStackFor(_activeNotebookId).isNotEmpty;
+      if (undoSnapshot != null) _pushUndo(undoSnapshot);
+      _bumpPageRepaint(updatedPage.id);
+      await _appStateRef.updatePage(
+        _activeNotebookId,
+        updatedPage,
+        notify: false,
+      );
+      final n = _strokeVersionNotifierForPage(updatedPage.id);
+      n.value = n.value + 1;
+      final bool nextCanUndo = _undoStackFor(_activeNotebookId).isNotEmpty;
+      final bool nextCanRedo = _redoStackFor(_activeNotebookId).isNotEmpty;
+      if (mounted &&
+          (nextCanUndo != prevCanUndo || nextCanRedo != prevCanRedo)) {
+        setState(() {});
+      }
+      return;
+    }
     if (undoSnapshot != null) _pushUndo(undoSnapshot);
     _bumpPageRepaint(updatedPage.id);
     await context.read<AppState>().updatePage(_activeNotebookId, updatedPage);
@@ -1781,6 +1883,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     int pageIndex,
   ) {
     _syncCurrentPageIndex(pageIndex);
+    page = _latestPage(page);
     _activeDrawingPageIdNotifier.value = page.id;
 
     final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
@@ -2214,7 +2317,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       );
 
       if (_lastHoldCheckPos == null ||
-          (pos - _lastHoldCheckPos!).distance > 2.8) {
+          (pos - _lastHoldCheckPos!).distance > 3.6) {
         _lastHoldCheckPos = pos;
         _scheduleShapeHoldTimer();
       }
@@ -2331,6 +2434,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         _commitPage(
           latestPage.copyWith(strokes: finalStrokes, updatedAt: DateTime.now()),
           undoSnapshot: _pageBeforeGesture ?? latestPage,
+          fastInkCommit: true,
         );
       }
       _pageBeforeGesture = null;
@@ -2359,6 +2463,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
           _commitPage(
             latestPage.copyWith(strokes: remaining),
             undoSnapshot: latestPage,
+            fastInkCommit: true,
           );
           return;
         }
@@ -2404,6 +2509,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       _commitPage(
         latestPage.copyWith(strokes: [...latestPage.strokes, finalized]),
         undoSnapshot: latestPage,
+        fastInkCommit: true,
       );
     } else {
       _liveStrokePoints.clear();
@@ -2508,6 +2614,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         _commitPage(
           latestPage.copyWith(strokes: [...latestPage.strokes, finalized]),
           undoSnapshot: latestPage,
+          fastInkCommit: true,
         );
       } else {
         _liveStrokePoints.clear();
@@ -2685,11 +2792,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     if (!appState.holdToSnapShape && !isShapeTool) return;
 
     final int holdDelayMs =
-        (!isShapeTool && _activeTool != EditorTool.highlighter) ? 720 : 480;
+        (!isShapeTool && _activeTool != EditorTool.highlighter) ? 400 : 320;
 
     _shapeHoldTimer = Timer(Duration(milliseconds: holdDelayMs), () {
       final live = _activeStrokeNotifier.value;
-      if (!mounted || live == null || live.points.length < 4) return;
+      if (!mounted || live == null || live.points.length < 3) return;
 
       // Highlighter hold-to-snap: snap directly to dead-straight 2-point line
       // (auto-level to horizontal if within ±12°!)
@@ -2699,7 +2806,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         final dx = lastPt.x - startPt.x;
         final dy = lastPt.y - startPt.y;
         final dist = math.sqrt(dx * dx + dy * dy);
-        if (dist < 24.0) return;
+        if (dist < 16.0) return;
         final double snappedY =
             (dx.abs() > 8.0 && dy.abs() <= dx.abs() * 0.2126)
                 ? startPt.y
@@ -2721,13 +2828,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         return;
       }
 
-      if (live.points.length < (isShapeTool ? 6 : 8)) return;
       final res = isShapeTool
-          ? StrokeEngine.recognizeShape(live.points)
+          ? StrokeEngine.recognizeShape(
+              live.points,
+              minDiag: 18.0,
+              minLineLength: 16.0,
+            )
           : StrokeEngine.recognizeShape(
               live.points,
-              minDiag: 48.0,
-              minLineLength: 48.0,
+              minDiag: 46.0,
+              minLineLength: 20.0,
             );
       if (res.recognized) {
         _shapeSnappedLive = true;
@@ -2793,9 +2903,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   /// and fast AABB pre-filtering: skips non-overlapping strokes cleanly without
   /// repainting neighboring pages or sub-stepping repeatedly across every stroke.
   void _eraseAlongSegment(NotePage page, Offset from, Offset to) {
-    if (_workingEraseStrokes == null || _workingErasePageId != page.id) {
-      _workingErasePageId = page.id;
-      _workingEraseStrokes = List<Stroke>.from(page.strokes);
+    final NotePage livePage = _latestPage(page);
+    if (_workingEraseStrokes == null || _workingErasePageId != livePage.id) {
+      _workingErasePageId = livePage.id;
+      _workingEraseStrokes = List<Stroke>.from(livePage.strokes);
     }
     final working = _workingEraseStrokes!;
     final double eraserRadius = _eraserRadius.clamp(5.0, 35.0);
@@ -8780,37 +8891,45 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
               return <Widget>[
                 Positioned.fill(
                   child: RepaintBoundary(
-                    child: CustomPaint(
-                      size: pageSize,
-                      painter: CanvasPainter(
-                        page: page,
-                        elementImageCache: _elementImageCache,
-                        lassoSelection: isLassoOwner
-                            ? _lassoController.selection
-                            : const LassoSelection(),
-                        lassoSelectionBounds: isLassoOwner
-                            ? _lassoController.selectionBounds
-                            : null,
-                        lassoDragOffset:
-                            isLassoOwner ? _lassoDragOffsetNotifier : null,
-                        erasingStrokesNotifier:
-                            _erasingNotifierForPage(page.id),
-                        mediaRepaintListenable: mediaListenable,
-                        hiddenImageId: _selectedImageId,
-                          playingAudioId: _playingAudioId,
-                          playingAudioTimeMsNotifier: (_playingAudioId != null &&
-                                  page.strokes.any((s) => s.audioId == _playingAudioId))
-                              ? _audioPositionMsNotifier
-                              : null,
-                          repaintVersion: effectiveRepaintVersion,
-                          drawBackground: false,
-                          drawOverlays: !hasStickies,
-                          drawTapes: false,
-                          maxZInclusive: baseMaxZ,
-                        ),
-                      ),
+                    child: ValueListenableBuilder<int>(
+                      valueListenable: _strokeVersionNotifierForPage(page.id),
+                      builder: (_, strokeVer, __) {
+                        final NotePage livePage = _latestPage(page);
+                        return CustomPaint(
+                          size: pageSize,
+                          painter: CanvasPainter(
+                            page: livePage,
+                            elementImageCache: _elementImageCache,
+                            lassoSelection: isLassoOwner
+                                ? _lassoController.selection
+                                : const LassoSelection(),
+                            lassoSelectionBounds: isLassoOwner
+                                ? _lassoController.selectionBounds
+                                : null,
+                            lassoDragOffset:
+                                isLassoOwner ? _lassoDragOffsetNotifier : null,
+                            erasingStrokesNotifier:
+                                _erasingNotifierForPage(livePage.id),
+                            mediaRepaintListenable: mediaListenable,
+                            hiddenImageId: _selectedImageId,
+                            playingAudioId: _playingAudioId,
+                            playingAudioTimeMsNotifier:
+                                (_playingAudioId != null &&
+                                        livePage.strokes.any(
+                                            (s) => s.audioId == _playingAudioId))
+                                    ? _audioPositionMsNotifier
+                                    : null,
+                            repaintVersion: effectiveRepaintVersion + strokeVer,
+                            drawBackground: false,
+                            drawOverlays: !hasStickies,
+                            drawTapes: false,
+                            maxZInclusive: baseMaxZ,
+                          ),
+                        );
+                      },
                     ),
                   ),
+                ),
 
                 // Layer 2 (144Hz Live Ink Overlay in its own RepaintBoundary — Zero Widget Rebuilds)
                 Positioned.fill(
@@ -8821,12 +8940,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     onPointerMove: (e) => _handlePointerMove(e, page),
                     onPointerUp: (e) => _handlePointerUp(e, page),
                     onPointerCancel: (e) => _handlePointerCancel(e, page),
-                    child: ValueListenableBuilder<String?>(
-                      valueListenable: _activeDrawingPageIdNotifier,
-                      builder: (_, activeDrawingId, __) {
-                        final bool showLiveLayer =
-                            activeDrawingId == page.id ||
-                                (activeDrawingId == null && isActivePage);
+                    child: AnimatedBuilder(
+                      animation: Listenable.merge([
+                        _activeDrawingPageIdNotifier,
+                        _currentPageIndexNotifier,
+                      ]),
+                      builder: (_, __) {
+                        final int liveIdx = _currentPageIndexNotifier.value;
+                        final String? activeDrawingId =
+                            _activeDrawingPageIdNotifier.value;
+                        final bool showLiveLayer = activeDrawingId == page.id ||
+                            (pageIndex - liveIdx).abs() <= 1;
                         if (!showLiveLayer) return const SizedBox.expand();
                         return RepaintBoundary(
                           child: CustomPaint(
@@ -8839,6 +8963,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                               isDarkPaper:
                                   page.paperColor == PaperColorType.dark,
                               eraserRadius: _eraserRadius,
+                              pageId: page.id,
+                              activePageId: _activeDrawingPageIdNotifier,
+                              repaintListenable: _liveLayerTickForPage(page.id),
                             ),
                           ),
                         );

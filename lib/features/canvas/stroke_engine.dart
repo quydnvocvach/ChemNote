@@ -186,10 +186,12 @@ class StrokeEngine {
     final dy = incoming.y - prev.y;
     final dist = math.sqrt(dx * dx + dy * dy);
 
-    final minDistance = 1.1 + stabilization * 1.3;
+    final minDistance = 0.85 + stabilization * 0.9;
     if (dist < minDistance) return null;
 
-    final alpha = (1.0 - stabilization * 0.56).clamp(0.34, 1.0);
+    final double speedBoost = ((dist - 4.0) / 14.0).clamp(0.0, 1.0).toDouble();
+    final double baseAlpha = (1.0 - stabilization * 0.42).clamp(0.48, 1.0).toDouble();
+    final double alpha = (baseAlpha + (1.0 - baseAlpha) * speedBoost * 0.92).clamp(0.48, 1.0).toDouble();
     return StrokePoint(
       x: prev.x + dx * alpha,
       y: prev.y + dy * alpha,
@@ -709,7 +711,7 @@ class StrokeEngine {
     double minDiag = 18.0,
     double minLineLength = 24.0,
   }) {
-    if (rawPoints.length < 4) {
+    if (rawPoints.length < 3) {
       return ShapeRecognitionResult(
         shapeType: ShapeType.none,
         snappedPoints: rawPoints,
@@ -717,45 +719,44 @@ class StrokeEngine {
     }
 
     final double totalLength = _polylineLength(rawPoints);
-    if (totalLength < minLineLength) {
-      return ShapeRecognitionResult(
-        shapeType: ShapeType.none,
-        snappedPoints: rawPoints,
-      );
-    }
-
     final bounds = _boundingBox(rawPoints);
     final diag = math.sqrt(
       bounds.width * bounds.width + bounds.height * bounds.height,
     );
-    if (diag < minDiag) {
+    final start = rawPoints.first;
+    final end = rawPoints.last;
+    final startEndDist = _dist(start, end);
+
+    // 1. Straight Line FIRST (strict open-line check, independent of minDiag so short 1-2cm lines snap)
+    if (totalLength >= minLineLength && startEndDist >= minLineLength) {
+      final bool isShortLine = startEndDist < 42.0;
+      final double minStraightRatio = isShortLine ? 0.90 : 0.86;
+      final double maxAllowedDev = isShortLine
+          ? math.max(4.5, startEndDist * 0.12)
+          : math.max(12.0, startEndDist * 0.08);
+      if (startEndDist >= totalLength * minStraightRatio) {
+        double maxDev = 0.0;
+        for (final p in rawPoints) {
+          final d = _pointToLineDistance(p, start, end);
+          if (d > maxDev) maxDev = d;
+        }
+        if (maxDev <= maxAllowedDev) {
+          final snappedEnd = _snapLineEndpoint(start, end);
+          return ShapeRecognitionResult(
+            shapeType: ShapeType.line,
+            snappedPoints: _generateLinePoints(start, snappedEnd),
+          );
+        }
+      }
+    }
+
+    // 2. Closed Shapes ONLY if the stroke has enough points, meets minDiag, and actually closes
+    if (rawPoints.length < 6 || diag < minDiag) {
       return ShapeRecognitionResult(
         shapeType: ShapeType.none,
         snappedPoints: rawPoints,
       );
     }
-
-    final start = rawPoints.first;
-    final end = rawPoints.last;
-    final startEndDist = _dist(start, end);
-
-    // 1. Straight Line FIRST (strict open-line check)
-    if (startEndDist >= minLineLength && startEndDist >= totalLength * 0.86) {
-      double maxDev = 0.0;
-      for (final p in rawPoints) {
-        final d = _pointToLineDistance(p, start, end);
-        if (d > maxDev) maxDev = d;
-      }
-      if (maxDev <= math.max(12.0, startEndDist * 0.08)) {
-        final snappedEnd = _snapLineEndpoint(start, end);
-        return ShapeRecognitionResult(
-          shapeType: ShapeType.line,
-          snappedPoints: _generateLinePoints(start, snappedEnd),
-        );
-      }
-    }
-
-    // 2. Closed Shapes ONLY if the stroke actually closes
     final bool isClosed = startEndDist <= math.max(44.0, diag * 0.34);
     if (!isClosed) {
       return ShapeRecognitionResult(
