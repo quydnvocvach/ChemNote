@@ -13,6 +13,7 @@ import 'package:chemnote/features/canvas/canvas_painter.dart';
 import 'package:chemnote/features/canvas/image_transform_utils.dart';
 import 'package:chemnote/features/canvas/lasso_controller.dart';
 import 'package:chemnote/features/canvas/paper_templates.dart';
+import 'package:chemnote/features/canvas/smart_scroll_helper.dart';
 import 'package:chemnote/features/canvas/stroke_engine.dart';
 import 'package:chemnote/features/pdf/page_image_export_service.dart';
 import 'package:chemnote/features/pdf/pdf_export_service.dart';
@@ -1247,6 +1248,267 @@ void main() {
       reloaded.setRandomCoverEnabled(false);
       final disabledNb = await reloaded.createNotebook(title: 'No Random');
       expect(disabledNb.customCoverImagePath, isNull);
+    });
+  });
+
+  group('v3.8.8 SmartScrollTracker, StalePointerReconciler, Eraser & Shape Guard', () {
+    test('SmartScrollTracker enforces dy >= 1.2 * dx vertical lock even on activation frame', () {
+      final tracker = SmartScrollTracker();
+      tracker.start(100000);
+
+      // Tiny initial jitter below 2.5px threshold holds activation
+      final pre = tracker.addMove(
+        delta: const Offset(0.5, 1.5),
+        timeUs: 108000,
+        scrollMult: 1.0,
+        canPanHorizontal: true,
+        requireActivationThreshold: true,
+      );
+      expect(pre.active, isFalse);
+
+      // Activation frame exceeds 2.5px with dy >= 1.2 * dx -> horizontal strictly locked to 0.0
+      final activeMove = tracker.addMove(
+        delta: const Offset(1.5, 6.0),
+        timeUs: 116000,
+        scrollMult: 1.0,
+        canPanHorizontal: true,
+        requireActivationThreshold: true,
+      );
+      expect(activeMove.active, isTrue);
+      expect(activeMove.dx, 0.0);
+      expect(activeMove.dy.abs(), greaterThan(0.0));
+      expect(tracker.axisLock, SmartScrollAxis.vertical);
+    });
+
+    test('SmartScrollTracker unlocks free horizontal+vertical movement when dy < 1.2 * dx', () {
+      final tracker = SmartScrollTracker();
+      tracker.start(100000);
+
+      final move = tracker.addMove(
+        delta: const Offset(12.0, 5.0),
+        timeUs: 110000,
+        scrollMult: 1.0,
+        canPanHorizontal: true,
+        requireActivationThreshold: true,
+      );
+      expect(move.active, isTrue);
+      expect(tracker.axisLock, SmartScrollAxis.free);
+      expect(move.dx, closeTo(12.0, 1e-6));
+    });
+
+    test('SmartScrollTracker short 2-3 frame flick launches accelerated fling despite trailing micro-jitter', () {
+      final tracker = SmartScrollTracker();
+      tracker.start(1000000);
+
+      // Frame 1 & Frame 2: fast vertical downward flick (~50px in 20ms => ~2500 px/s)
+      final step1 = tracker.addMove(
+        delta: const Offset(2.0, -24.0),
+        timeUs: 1010000,
+        scrollMult: 1.5,
+        canPanHorizontal: true,
+        requireActivationThreshold: true,
+      );
+      expect(step1.active, isTrue);
+      expect(step1.dx, 0.0);
+      expect(step1.accelBoost, greaterThan(1.0));
+
+      final step2 = tracker.addMove(
+        delta: const Offset(1.0, -28.0),
+        timeUs: 1020000,
+        scrollMult: 1.5,
+        canPanHorizontal: true,
+        requireActivationThreshold: true,
+      );
+      expect(step2.dx, 0.0);
+      expect(step2.accelBoost, greaterThan(1.2));
+
+      // Trailing fingertip lift micro-jitter (< 0.5px within 10ms)
+      tracker.addMove(
+        delta: const Offset(0.0, -0.1),
+        timeUs: 1028000,
+        scrollMult: 1.5,
+        canPanHorizontal: true,
+        requireActivationThreshold: true,
+      );
+
+      final fling = tracker.computeFlingLaunch(
+        upTimeUs: 1035000,
+        scrollMult: 1.5,
+      );
+      expect(fling.shouldFling, isTrue);
+      expect(fling.vx, 0.0);
+      expect(fling.vy, lessThan(-2500.0));
+    });
+
+    test('SmartScrollTracker rejects fling on slow drag or long pause before lift', () {
+      final slowTracker = SmartScrollTracker();
+      slowTracker.start(1000000);
+      slowTracker.addMove(
+        delta: const Offset(0.0, -9.0),
+        timeUs: 1120000,
+        scrollMult: 1.0,
+        canPanHorizontal: true,
+        requireActivationThreshold: false,
+      );
+      final slowFling = slowTracker.computeFlingLaunch(
+        upTimeUs: 1130000,
+        scrollMult: 1.0,
+      );
+      expect(slowFling.shouldFling, isFalse);
+
+      final pausedTracker = SmartScrollTracker();
+      pausedTracker.start(1000000);
+      pausedTracker.addMove(
+        delta: const Offset(0.0, -40.0),
+        timeUs: 1016000,
+        scrollMult: 1.0,
+        canPanHorizontal: true,
+        requireActivationThreshold: false,
+      );
+      // Pause 200ms (> 150ms threshold) before lifting finger
+      final staleFling = pausedTracker.computeFlingLaunch(
+        upTimeUs: 1216000,
+        scrollMult: 1.0,
+      );
+      expect(staleFling.shouldFling, isFalse);
+    });
+
+    test('StalePointerReconciler prunes only zombie pointers beyond idle window', () {
+      final lastSeen = <int, int>{
+        1: 1000, // stale (6000ms ago)
+        2: 6500, // active (500ms ago)
+        3: 500, // stale, but excluded as incoming pointer
+      };
+      final stale = StalePointerReconciler.findStalePointers(
+        lastSeen,
+        7000,
+        maxIdleMs: 4500,
+        excludePointer: 3,
+      );
+      expect(stale, [1]);
+    });
+
+    test('hitTestStrokeSegment & precisionEraseStrokeAlongSegment handle fast sweeps, 2-pt lines, 1-pt dots, and misses', () {
+      const straightLine = Stroke(
+        id: 'line_1',
+        toolType: ToolType.fountainPen,
+        colorValue: 0xFF1E293B,
+        width: 3.0,
+        shapeType: ShapeType.line,
+        points: [
+          StrokePoint(x: 0.0, y: 100.0, pressure: 0.6, timestamp: 10),
+          StrokePoint(x: 200.0, y: 100.0, pressure: 0.6, timestamp: 20),
+        ],
+      );
+
+      // Swept eraser perpendicular across center splits 2-point line into 2 sub-strokes
+      expect(
+        StrokeEngine.hitTestStrokeSegment(
+          straightLine,
+          const Offset(100.0, 50.0),
+          const Offset(100.0, 150.0),
+          tolerance: 12.0,
+        ),
+        isTrue,
+      );
+
+      int nextId = 0;
+      final split = StrokeEngine.precisionEraseStrokeAlongSegment(
+        straightLine,
+        const Offset(100.0, 50.0),
+        const Offset(100.0, 150.0),
+        14.0,
+        idGenerator: () => 'seg_${nextId++}',
+      );
+      expect(split.length, 2);
+      expect(split[0].shapeType, ShapeType.none);
+      expect(split[0].points.last.x, lessThan(90.0));
+      expect(split[1].points.first.x, greaterThan(110.0));
+
+      // Non-intersecting segment returns exact identical Stroke instance (zero churn)
+      final untouched = StrokeEngine.precisionEraseStrokeAlongSegment(
+        straightLine,
+        const Offset(0.0, 10.0),
+        const Offset(200.0, 10.0),
+        14.0,
+        idGenerator: () => 'unused',
+      );
+      expect(untouched.length, 1);
+      expect(identical(untouched.first, straightLine), isTrue);
+
+      // 1-point dot is erased cleanly when hit
+      const dotStroke = Stroke(
+        id: 'dot_1',
+        toolType: ToolType.ballpointPen,
+        colorValue: 0xFF000000,
+        width: 2.0,
+        points: [
+          StrokePoint(x: 50.0, y: 50.0, pressure: 0.5, timestamp: 1),
+        ],
+      );
+      final dotErased = StrokeEngine.precisionEraseStrokeAlongSegment(
+        dotStroke,
+        const Offset(40.0, 50.0),
+        const Offset(60.0, 50.0),
+        12.0,
+        idGenerator: () => 'unused',
+      );
+      expect(dotErased, isEmpty);
+    });
+
+    test('recognizeShape with pen minDiag/minLineLength guard never snaps small handwritten letters/dashes', () {
+      // Small ~22px handwritten 'o' loop
+      final smallLoop = List<StrokePoint>.generate(16, (i) {
+        final theta = (i / 15.0) * 2 * math.pi;
+        return StrokePoint(
+          x: 100.0 + 11.0 * math.cos(theta),
+          y: 100.0 + 11.0 * math.sin(theta),
+          pressure: 0.6,
+          timestamp: i * 10,
+        );
+      });
+      final loopGuard = StrokeEngine.recognizeShape(
+        smallLoop,
+        minDiag: 48.0,
+        minLineLength: 48.0,
+      );
+      expect(loopGuard.recognized, isFalse);
+      expect(loopGuard.shapeType, ShapeType.none);
+
+      // Small ~28px horizontal dash '-'
+      final smallDash = List<StrokePoint>.generate(
+        8,
+        (i) => StrokePoint(
+          x: 50.0 + i * 4.0,
+          y: 80.0,
+          pressure: 0.5,
+          timestamp: i * 10,
+        ),
+      );
+      final dashGuard = StrokeEngine.recognizeShape(
+        smallDash,
+        minDiag: 48.0,
+        minLineLength: 48.0,
+      );
+      expect(dashGuard.recognized, isFalse);
+
+      // Large deliberate 100px circle still snaps cleanly
+      final largeCircle = List<StrokePoint>.generate(24, (i) {
+        final theta = (i / 23.0) * 2 * math.pi;
+        return StrokePoint(
+          x: 200.0 + 50.0 * math.cos(theta),
+          y: 200.0 + 50.0 * math.sin(theta),
+          pressure: 0.6,
+          timestamp: i * 12,
+        );
+      });
+      final circleRes = StrokeEngine.recognizeShape(
+        largeCircle,
+        minDiag: 48.0,
+        minLineLength: 48.0,
+      );
+      expect(circleRes.recognized, isTrue);
+      expect(circleRes.shapeType, ShapeType.circle);
     });
   });
 }

@@ -84,6 +84,8 @@ class _Casio880OverlayState extends State<Casio880Overlay>
   List<String> _polyCells = ['1', '-5', '6'];
   int _polyFocus = 0;
   PolySolveResult? _polyResult;
+  final Set<int> _heldPointers = <int>{};
+  bool _isDragging = false;
 
   @override
   void initState() {
@@ -96,8 +98,39 @@ class _Casio880OverlayState extends State<Casio880Overlay>
     _solvePoly();
   }
 
+  void _onPointerDownTracked(int pointer) {
+    _heldPointers.add(pointer);
+    widget.onPointerAcquired?.call(pointer);
+  }
+
+  void _onPointerReleasedTracked(int pointer) {
+    if (_heldPointers.remove(pointer)) {
+      widget.onPointerReleased?.call(pointer);
+    }
+  }
+
+  void _setDragging(bool dragging) {
+    if (_isDragging == dragging) return;
+    _isDragging = dragging;
+    if (dragging) {
+      widget.onDragStart?.call();
+    } else {
+      widget.onDragEnd?.call();
+    }
+  }
+
   @override
   void dispose() {
+    if (_heldPointers.isNotEmpty) {
+      for (final p in _heldPointers.toList()) {
+        widget.onPointerReleased?.call(p);
+      }
+      _heldPointers.clear();
+    }
+    if (_isDragging) {
+      _isDragging = false;
+      widget.onDragEnd?.call();
+    }
     _caretController.dispose();
     super.dispose();
   }
@@ -661,15 +694,14 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                 Positioned(
                   right: 16,
                   bottom: 16,
-                  child: Listener(
-                    behavior: HitTestBehavior.opaque,
-                    onPointerDown: (e) =>
-                        widget.onPointerAcquired?.call(e.pointer),
-                    onPointerUp: (e) =>
-                        widget.onPointerReleased?.call(e.pointer),
-                    onPointerCancel: (e) =>
-                        widget.onPointerReleased?.call(e.pointer),
-                    child: Material(
+                  child: RepaintBoundary(
+                    child: Listener(
+                      behavior: HitTestBehavior.opaque,
+                      onPointerDown: (e) => _onPointerDownTracked(e.pointer),
+                      onPointerUp: (e) => _onPointerReleasedTracked(e.pointer),
+                      onPointerCancel: (e) =>
+                          _onPointerReleasedTracked(e.pointer),
+                      child: Material(
                       color: const Color(0xFF1E2128),
                       elevation: 10,
                       borderRadius: BorderRadius.circular(24),
@@ -719,6 +751,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                       ),
                     ),
                   ),
+                  ),
                 ),
               ],
             );
@@ -739,14 +772,14 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                 top: pos.dy,
                 width: boxSize.width,
                 height: boxSize.height,
-                child: Listener(
-                  behavior: HitTestBehavior.opaque,
-                  onPointerDown: (e) =>
-                      widget.onPointerAcquired?.call(e.pointer),
-                  onPointerUp: (e) => widget.onPointerReleased?.call(e.pointer),
-                  onPointerCancel: (e) =>
-                      widget.onPointerReleased?.call(e.pointer),
-                  child: Container(
+                child: RepaintBoundary(
+                  child: Listener(
+                    behavior: HitTestBehavior.opaque,
+                    onPointerDown: (e) => _onPointerDownTracked(e.pointer),
+                    onPointerUp: (e) => _onPointerReleasedTracked(e.pointer),
+                    onPointerCancel: (e) =>
+                        _onPointerReleasedTracked(e.pointer),
+                    child: Container(
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(18),
                       gradient: const LinearGradient(
@@ -781,6 +814,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
                       ),
                     ),
                   ),
+                  ),
                 ),
               ),
             ],
@@ -793,7 +827,7 @@ class _Casio880OverlayState extends State<Casio880Overlay>
   Widget _buildDragHeader(Offset pos, Size boxSize, Size viewport) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onPanStart: (_) => widget.onDragStart?.call(),
+      onPanStart: (_) => _setDragging(true),
       onPanUpdate: (details) {
         setState(() {
           _position = _clampPosition(
@@ -803,8 +837,8 @@ class _Casio880OverlayState extends State<Casio880Overlay>
           );
         });
       },
-      onPanEnd: (_) => widget.onDragEnd?.call(),
-      onPanCancel: () => widget.onDragEnd?.call(),
+      onPanEnd: (_) => _setDragging(false),
+      onPanCancel: () => _setDragging(false),
       child: Container(
         height: 36,
         padding: const EdgeInsets.symmetric(horizontal: 8),

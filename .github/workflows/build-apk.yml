@@ -160,18 +160,26 @@ jobs:
           path: ChemNote-MatePad-11.5s-release.apk
           if-no-files-found: error
 
-      - name: Publish Release v3.8.7 with APK
+      - name: Publish Release v3.8.8 with APK
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.8.7
-          name: ChemNote Pro v3.8.7 (Phóng to phím Casio fx-880BTG, thu gọn ngang 10% & kéo dài cân đối)
+          tag_name: v3.8.8
+          name: ChemNote Pro v3.8.8 (Tối ưu triệt để độ mượt 144Hz, bút M-Pencil 3, cuộn thông minh & 2/3 ngón Undo/Redo)
           body: |
-            ### ChemNote Pro v3.8.7
-            - **Tinh chỉnh bố cục & kích thước Casio fx-880BTG trên MatePad:**
-              - Thu gọn bề ngang máy tính 10% và kéo dài chiều cao tổng thể để vừa gọn cạnh trang viết hơn.
-              - Chuyển nút thu gọn (`—`) và nút đóng (`✕`) sang sát lề phải thanh tiêu đề, phóng to kích thước nút bấm dễ chạm.
-              - Phóng to rõ nét toàn bộ ký tự 4 hàng phím số (`+ − × ÷`, `EXE`, `S⇔D`, `AC`, `×10ˣ`), kéo cao các hàng phím hàm trên và phóng to cả chữ trắng lẫn chữ vàng `SHIFT`.
-              - Bỏ nhãn `a b/c` phía trên nút phân số `□/□`.
+            ### ChemNote Pro v3.8.8
+            - **Khắc phục triệt để độ trễ / sót nét bút M-Pencil 3 & khóa cảm ứng ngón tay (Native + Flutter):**
+              - Sửa lỗi trạng thái `isNativeStylusDown` bị kẹt `true` khi nhấc bút trong lúc ngón/lòng bàn tay còn chạm (`ACTION_POINTER_UP`) và tự đồng bộ lại khi hover hoặc quá thời gian.
+              - Loại bỏ cooldown giả khi đưa bút rời vùng hover (`ACTION_HOVER_EXIT`), rút ngắn cooldown bảo vệ xuống mức tối ưu để chạm/lướt/2-3 ngón ngay sau khi viết không bị nuốt.
+              - Tách riêng lớp vẽ nét trực tiếp theo từng trang qua `ValueNotifier` để nét đầu tiên trên trang mới hiển thị tức thì và bổ sung `_handlePointerCancel` hoàn chỉnh.
+              - Tự động dọn các pointer bị kẹt do cử chỉ hệ thống/đóng bảng nổi/đổi vòng đời app.
+            - **Tối ưu Cuộn dọc thông minh (`dy >= 1.2 dx`), Gia tốc & Lướt quán tính:**
+              - Thay EMA khởi đầu từ 0 bằng bộ ước lượng vận tốc cửa sổ trượt chống nuốt lực trên các cú hất nhanh ít điểm mẫu và bỏ qua rung vi điểm cuối khi nhấc ngón.
+              - Khóa trục dọc dứt khoát từ khung hình kích hoạt đầu tiên và đồng bộ lại trạng thái `InteractiveViewer` ngay khi nhấc tay khỏi thao tác zoom 2 ngón.
+            - **Tối ưu Tẩy xóa 144Hz, chống nắn nhầm nét chữ & hiện nét tức thì khi sang trang mới:**
+              - Tách `_pageErasingNotifiers` riêng từng trang và kiểm tra va chạm đoạn quét (`hitTestStrokeSegment` / `precisionEraseStrokeAlongSegment`) trong 1 vòng lặp, triệt tiêu giật lag khi tẩy xóa.
+              - Siết ngưỡng nhận diện hình tự động cho bút viết thường (`minDiag/minLine >= 48px`, trễ giữ `720ms`, ngưỡng đứng yên `2.8px`) để không nắn nhầm chữ viết nhỏ dù đang giảm làm mượt về 0%.
+              - Làm ấm trước `ActiveStrokePainter` ngay khi cuộn/chuyển/thêm trang mới để nét đầu tiên hiện ra tức thì.
+            - **Tăng độ nhạy thao tác 2 ngón Undo / 3 ngón Redo & giảm cấp phát bộ nhớ khi tô nét 144Hz.**
           files: ChemNote-MatePad-11.5s-release.apk
           make_latest: true

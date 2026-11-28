@@ -786,13 +786,20 @@ class CanvasPainter extends CustomPainter {
     }
 
     // 2 passes of 3-point binomial smoothing: 0.25*r[i-1] + 0.5*r[i] + 0.25*r[i+1]
+    // Ping-pong between two buffers to eliminate per-frame allocations at 144Hz.
     var cur = raw;
-    for (int pass = 0; pass < 2; pass++) {
-      final next = List<double>.from(cur);
-      for (int i = 1; i < n - 1; i++) {
-        next[i] = 0.25 * cur[i - 1] + 0.50 * cur[i] + 0.25 * cur[i + 1];
+    if (n >= 3) {
+      var next = List<double>.filled(n, 0.0);
+      for (int pass = 0; pass < 2; pass++) {
+        next[0] = cur[0];
+        next[n - 1] = cur[n - 1];
+        for (int i = 1; i < n - 1; i++) {
+          next[i] = 0.25 * cur[i - 1] + 0.50 * cur[i] + 0.25 * cur[i + 1];
+        }
+        final tmp = cur;
+        cur = next;
+        next = tmp;
       }
-      cur = next;
     }
     return cur;
   }

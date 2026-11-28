@@ -34,6 +34,7 @@ import 'image_transform_utils.dart';
 import 'lasso_controller.dart';
 import 'paper_templates.dart';
 import 'pro_tools_overlay.dart';
+import 'smart_scroll_helper.dart';
 import 'stroke_engine.dart';
 
 /// Huawei Notes × GoodNotes 6 Pro Note Editor optimized for
@@ -52,10 +53,8 @@ class NoteEditorScreen extends StatefulWidget {
   State<NoteEditorScreen> createState() => _NoteEditorScreenState();
 }
 
-enum _ScrollAxisLock { none, vertical, free }
-
 class _NoteEditorScreenState extends State<NoteEditorScreen>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final Uuid _uuid = const Uuid();
   final TransformationController _transformController = TransformationController();
@@ -95,10 +94,27 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   final ValueNotifier<Stroke?> _activeStickyStrokeNotifier = ValueNotifier(null);
   String? _activeStickyStrokeNoteId;
   final ValueNotifier<Offset> _lassoDragOffsetNotifier = ValueNotifier(Offset.zero);
-  final ValueNotifier<({String pageId, List<Stroke> strokes})?>
-      _erasingStrokesNotifier = ValueNotifier(null);
+  final Map<String, ValueNotifier<({String pageId, List<Stroke> strokes})?>>
+      _pageErasingNotifiers = {};
+  String? _workingErasePageId;
   List<Stroke>? _workingEraseStrokes;
   Offset? _lastEraserPoint;
+
+  ValueNotifier<({String pageId, List<Stroke> strokes})?>
+      _erasingNotifierForPage(String pageId) {
+    return _pageErasingNotifiers.putIfAbsent(
+      pageId,
+      () => ValueNotifier<({String pageId, List<Stroke> strokes})?>(null),
+    );
+  }
+
+  void _clearWorkingEraseNotifier() {
+    final pid = _workingErasePageId;
+    if (pid != null) {
+      _pageErasingNotifiers[pid]?.value = null;
+    }
+    _workingErasePageId = null;
+  }
   final ValueNotifier<({String id, double left, double top, double right, double bottom})?>
       _cropDraftNotifier = ValueNotifier(null);
   String? _croppingImageId;
@@ -134,7 +150,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   int _renderedWindowCenter = 0;
   bool _isScrubbingPages = false;
   Timer? _scrubPrefetchTimer;
-  String? _activeDrawingPageId;
+  final ValueNotifier<String?> _activeDrawingPageIdNotifier =
+      ValueNotifier<String?>(null);
   final List<StrokePoint> _liveStrokePoints = <StrokePoint>[];
   String? _cachedLayoutNotebookId;
   List<NotePage>? _cachedLayoutPagesRef;
@@ -157,11 +174,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   }
 
   // Huawei Notes smart vertical axis-lock + ballistic fling state
-  _ScrollAxisLock _panAxisLock = _ScrollAxisLock.none;
-  Offset _panAccumDelta = Offset.zero;
-  double _panVelocityX = 0.0;
-  double _panVelocityY = 0.0;
-  int _lastPanEventUs = 0;
+  final SmartScrollTracker _smartScrollTracker = SmartScrollTracker();
   Ticker? _scrollFlingTicker;
   Duration _lastFlingElapsed = Duration.zero;
   bool _flingFirstTick = false;
@@ -205,14 +218,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   final Set<int> _overlayOwnedPointers = {};
   final Set<int> _palmRejectedPointers = {};
   final Map<int, Offset> _activeTouchPositions = {};
+  final Map<int, int> _touchPointerLastSeenMs = {};
+  final Map<int, int> _overlayPointerLastSeenMs = {};
   double? _twoFingerInitialSpan;
   Matrix4? _matrixBeforeTouchGesture;
   Matrix4? _whiteboardMatrixBeforeTouchGesture;
   DateTime? _touchGestureStartedAt;
   DateTime? _touchGestureEndedAt;
-  bool _touchPanActivated = false;
+  bool _gestureUsedMultiTouch = false;
   bool? _lastNativePalmShieldEnabled;
   bool? _lastNativePalmShieldStylusPan;
+  static const int _viewportStylusHoverTimeoutMs = 150;
+  static const int _viewportStylusCooldownMs = 120;
 
   // Huawei Notes-style floating bottom-center Zoom-Lock Pill state
   bool _isZoomLocked = false;
@@ -367,6 +384,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   void _acquireOverlayPointer(int pointer) {
     final bool wasEmpty = _overlayTouchPointers.isEmpty;
     _overlayTouchPointers.add(pointer);
+    _overlayPointerLastSeenMs[pointer] = DateTime.now().millisecondsSinceEpoch;
     if (wasEmpty && !_isOverlayDragging) {
       _lockedMatrixDuringOverlayDrag = _transformController.value.clone();
       _lockedWhiteboardMatrixDuringOverlayDrag =
@@ -379,6 +397,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
 
   void _releaseOverlayPointer(int pointer) {
     final bool removed = _overlayTouchPointers.remove(pointer);
+    _overlayPointerLastSeenMs.remove(pointer);
     if (removed && _overlayTouchPointers.isEmpty) {
       if (!_isOverlayDragging) {
         _lockedMatrixDuringOverlayDrag = null;
@@ -390,6 +409,121 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     }
   }
 
+  void _clearOverlayPointerLocks() {
+    final bool hadAny = _overlayTouchPointers.isNotEmpty ||
+        _overlayOwnedPointers.isNotEmpty ||
+        _isOverlayDragging;
+    _overlayTouchPointers.clear();
+    _overlayOwnedPointers.clear();
+    _overlayPointerLastSeenMs.clear();
+    _isOverlayDragging = false;
+    _lockedMatrixDuringOverlayDrag = null;
+    _lockedWhiteboardMatrixDuringOverlayDrag = null;
+    if (hadAny && mounted) {
+      _bumpViewportGate();
+    }
+  }
+
+  void _clearTransientPointerState() {
+    _stopScrollFling();
+    _resetPanTracking();
+    _stylusHoverTimer?.cancel();
+    _stylusCooldownTimer?.cancel();
+    _activeTouchPointers.clear();
+    _activeTouchPositions.clear();
+    _touchPointerLastSeenMs.clear();
+    _palmRejectedPointers.clear();
+    _pointerDownPositions.clear();
+    _tapTouchStarts.clear();
+    _tapTouchStartTime = null;
+    _tapMaxTouchCount = 0;
+    _tapMovedTooFar = false;
+    _twoFingerInitialSpan = null;
+    _gestureUsedMultiTouch = false;
+    _matrixBeforeTouchGesture = null;
+    _whiteboardMatrixBeforeTouchGesture = null;
+    _touchGestureStartedAt = null;
+    _touchGestureEndedAt = null;
+    _isStylusDown = false;
+    _isStylusHovering = false;
+    _isStylusInCooldown = false;
+    _lockedMatrixDuringStylus = null;
+    _lockedWhiteboardMatrixDuringStylus = null;
+    _clearOverlayPointerLocks();
+    _cancelActiveGesture();
+    _syncStylusDrawingState();
+    if (mounted) {
+      _bumpViewportGate();
+    }
+  }
+
+  void _reconcileStalePointers({int? incomingPointer}) {
+    final int nowMs = DateTime.now().millisecondsSinceEpoch;
+    bool gateDirty = false;
+
+    final staleTouch = StalePointerReconciler.findStalePointers(
+      _touchPointerLastSeenMs,
+      nowMs,
+      excludePointer: incomingPointer,
+    );
+    if (staleTouch.isNotEmpty) {
+      for (final p in staleTouch) {
+        _touchPointerLastSeenMs.remove(p);
+        _activeTouchPointers.remove(p);
+        _activeTouchPositions.remove(p);
+        _palmRejectedPointers.remove(p);
+        _pointerDownPositions.remove(p);
+        _tapTouchStarts.remove(p);
+      }
+      if (_activeTouchPointers.length < 2) {
+        _twoFingerInitialSpan = null;
+      }
+      if (_activeTouchPointers.isEmpty) {
+        _gestureUsedMultiTouch = false;
+        if (_tapTouchStarts.isEmpty) {
+          _tapTouchStartTime = null;
+          _tapMaxTouchCount = 0;
+          _tapMovedTooFar = false;
+        }
+      }
+      gateDirty = true;
+    }
+
+    final staleOverlay = StalePointerReconciler.findStalePointers(
+      _overlayPointerLastSeenMs,
+      nowMs,
+      excludePointer: incomingPointer,
+    );
+    if (staleOverlay.isNotEmpty) {
+      for (final p in staleOverlay) {
+        _overlayPointerLastSeenMs.remove(p);
+        _overlayTouchPointers.remove(p);
+        _overlayOwnedPointers.remove(p);
+      }
+      if (_overlayTouchPointers.isEmpty && !_isOverlayDragging) {
+        _lockedMatrixDuringOverlayDrag = null;
+        _lockedWhiteboardMatrixDuringOverlayDrag = null;
+      }
+      gateDirty = true;
+    }
+
+    if (_activeTouchPointers.isEmpty &&
+        !_isStylusDown &&
+        _isDrawingPointerDown &&
+        _activeStrokeNotifier.value == null &&
+        !_isDraggingLassoSelection &&
+        _tapeDragStart == null &&
+        _workingEraseStrokes == null) {
+      _isDrawingPointerDown = false;
+      _syncStylusDrawingState();
+      gateDirty = true;
+    }
+
+    if (gateDirty && mounted) {
+      _bumpViewportGate();
+    }
+  }
+
   void _markStylusHoverActive() {
     _lastStylusHoverAt = DateTime.now();
     if (!_isStylusHovering) {
@@ -397,7 +531,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       _bumpViewportGate();
     }
     if (!(_stylusHoverTimer?.isActive ?? false)) {
-      _scheduleStylusHoverCheck(320);
+      _scheduleStylusHoverCheck(_viewportStylusHoverTimeoutMs);
     }
   }
 
@@ -408,7 +542,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       final last = _lastStylusHoverAt;
       if (last != null) {
         final int elapsed = DateTime.now().difference(last).inMilliseconds;
-        final int remaining = 320 - elapsed;
+        final int remaining = _viewportStylusHoverTimeoutMs - elapsed;
         if (remaining > 16) {
           _scheduleStylusHoverCheck(remaining);
           return;
@@ -426,7 +560,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   }
 
   void _markStylusActivityCooldown({
-    int ms = PalmRejectionFilter.stylusCooldownMs,
+    int ms = _viewportStylusCooldownMs,
   }) {
     _palmFilter.notifyStylusActivity();
     _lastStylusCooldownAt = DateTime.now();
@@ -528,17 +662,21 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _touchGestureEndedAt = null;
   }
 
-  void _engageStylusViewportLock() {
+  void _engageStylusViewportLock({bool fromHover = false}) {
     _stopScrollFling();
     _resetPanTracking();
-    _rollbackRecentPalmShiftIfNeeded(
-      forceFromCancel: _activeTouchPointers.isNotEmpty,
-    );
+    if (!fromHover || _activeTouchPointers.isNotEmpty) {
+      _rollbackRecentPalmShiftIfNeeded(
+        forceFromCancel: _activeTouchPointers.isNotEmpty,
+      );
+    }
     if (_activeTouchPointers.isNotEmpty) {
       _palmRejectedPointers.addAll(_activeTouchPointers);
       _activeTouchPointers.clear();
       _activeTouchPositions.clear();
+      _touchPointerLastSeenMs.clear();
       _twoFingerInitialSpan = null;
+      _gestureUsedMultiTouch = false;
       _tapTouchStarts.clear();
       _tapTouchStartTime = null;
       _tapMaxTouchCount = 0;
@@ -699,6 +837,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _activeNotebookId = widget.notebookId;
     _syncCurrentPageIndex(widget.initialPageIndex);
     _renderedWindowCenter = _currentPageIndex;
@@ -786,7 +925,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached) {
+      _clearTransientPointerState();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _observedRouteAnimation?.removeStatusListener(_onRouteAnimationStatus);
     _observedRouteAnimation = null;
     unawaited(
@@ -823,6 +973,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _verticalScrollController.dispose();
     _horizontalPageController.dispose();
     _currentPageIndexNotifier.dispose();
+    _activeDrawingPageIdNotifier.dispose();
     _favoritesDockTopNotifier.dispose();
     _activeStrokeNotifier.dispose();
     _eraserCursorNotifier.dispose();
@@ -837,7 +988,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _stickyDragNotifier.dispose();
     _activeStickyStrokeNotifier.dispose();
     _lassoDragOffsetNotifier.dispose();
-    _erasingStrokesNotifier.dispose();
+    for (final n in _pageErasingNotifiers.values) {
+      n.dispose();
+    }
+    _pageErasingNotifiers.clear();
     _cropDraftNotifier.dispose();
     _pullAddProgressNotifier.dispose();
     _recordingElapsedMsNotifier.dispose();
@@ -1042,6 +1196,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _zoomLockPillVisibleNotifier.value = false;
     _cancelLassoLongPressTimer();
     _cancelImageLongPressTimer();
+    _activeDrawingPageIdNotifier.value = null;
+    _clearTransientPointerState();
     final targetNb = context.read<AppState>().getNotebookById(notebookId);
     final bool isWbTarget = targetNb?.isWhiteboard == true ||
         (targetNb?.pages.isNotEmpty == true &&
@@ -1187,6 +1343,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     );
   }
 
+  void _prewarmActiveDrawingPage(Notebook notebook, int pageIndex) {
+    if (notebook.pages.isEmpty) return;
+    if (_isStylusDown ||
+        _isDrawingPointerDown ||
+        _activeStrokeNotifier.value != null) {
+      return;
+    }
+    final int clamped = pageIndex.clamp(0, notebook.pages.length - 1);
+    final String nextId = notebook.pages[clamped].id;
+    if (_activeDrawingPageIdNotifier.value != nextId) {
+      _activeDrawingPageIdNotifier.value = nextId;
+    }
+  }
+
   void _jumpToPage(int index) {
     _stopScrollFling();
     final appState = context.read<AppState>();
@@ -1198,6 +1368,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       _syncCurrentPageIndex(clampedIdx);
       _renderedWindowCenter = clampedIdx;
     });
+    _prewarmActiveDrawingPage(notebook, clampedIdx);
     if (!appState.verticalContinuousScroll &&
         _horizontalPageController.hasClients) {
       if ((clampedIdx - prevIdx).abs() > 3) {
@@ -1493,7 +1664,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     if (event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus) {
       _palmFilter.notifyStylusActivity();
-      _activeDrawingPageId = page.id;
+      _activeDrawingPageIdNotifier.value = page.id;
     }
   }
 
@@ -1503,19 +1674,25 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     int pageIndex,
   ) {
     _syncCurrentPageIndex(pageIndex);
-    _activeDrawingPageId = page.id;
+    _activeDrawingPageIdNotifier.value = page.id;
 
     final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus;
+    bool gateChanged = false;
     if (isStylusEvent) {
       _palmFilter.notifyStylusActivity();
       if (!_isStylusDown) {
         _isStylusDown = true;
-        _syncStylusDrawingState();
-        _bumpViewportGate();
+        gateChanged = true;
       }
       // When Stylus-Pan Mode is ON, M-Pencil 3 ONLY scrolls/pans and never draws!
-      if (_stylusPanMode) return;
+      if (_stylusPanMode) {
+        if (gateChanged) {
+          _syncStylusDrawingState();
+          _bumpViewportGate();
+        }
+        return;
+      }
     } else if (event.kind == PointerDeviceKind.touch) {
       if (_palmRejectedPointers.contains(event.pointer)) {
         return;
@@ -1543,7 +1720,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       }
     }
 
-    final appState = context.read<AppState>();
+    final appState = _appStateRef;
     _palmFilter.stylusOnlyMode = appState.palmRejectionEnabled;
 
     final rawPos = event.localPosition;
@@ -1556,8 +1733,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       });
     }
 
-    if (appState.readOnlyMode) return;
+    if (appState.readOnlyMode) {
+      if (gateChanged) {
+        _syncStylusDrawingState();
+        _bumpViewportGate();
+      }
+      return;
+    }
     if (_activeTool == EditorTool.panZoom) {
+      if (gateChanged) {
+        _syncStylusDrawingState();
+        _bumpViewportGate();
+      }
       if (_copiedImageClipboard != null &&
           (isStylusEvent ||
               (_activeTouchPointers.length <= 1 &&
@@ -1695,6 +1882,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       _isDrawingPointerDown = true;
       _syncStylusDrawingState();
       _bumpViewportGate();
+    } else if (isStylusEvent) {
+      _syncStylusDrawingState();
     }
 
     // Clear overlay selections when starting a stroke on empty paper
@@ -1728,6 +1917,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     if (_activeTool == EditorTool.eraser) {
       _pageBeforeGesture = page;
       _eraserChangedPage = false;
+      _workingErasePageId = page.id;
       _workingEraseStrokes = List<Stroke>.from(page.strokes);
       _lastEraserPoint = rawPos;
       _eraserCursorNotifier.value = rawPos;
@@ -1786,13 +1976,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     }
     if (!isStylusEvent) {
       final startPos = _pointerDownPositions[event.pointer];
-      if (startPos != null && (event.position - startPos).distance > 16.0) {
+      if (startPos != null && (event.position - startPos).distance > 22.0) {
         _multiFingerMovedTooMuch = true;
       }
       if (_pointerDownPositions.length >= 2) return;
     }
 
-    if (context.read<AppState>().readOnlyMode ||
+    if (_appStateRef.readOnlyMode ||
         _activeTool == EditorTool.panZoom) {
       return;
     }
@@ -1894,7 +2084,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       );
 
       if (_lastHoldCheckPos == null ||
-          (pos - _lastHoldCheckPos!).distance > 6.0) {
+          (pos - _lastHoldCheckPos!).distance > 2.8) {
         _lastHoldCheckPos = pos;
         _scheduleShapeHoldTimer();
       }
@@ -1995,7 +2185,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       final finalStrokes = _workingEraseStrokes;
       _workingEraseStrokes = null;
       _lastEraserPoint = null;
-      _erasingStrokesNotifier.value = null;
+      _clearWorkingEraseNotifier();
       if (_eraserChangedPage && finalStrokes != null) {
         _commitPage(
           page.copyWith(strokes: finalStrokes, updatedAt: DateTime.now()),
@@ -2011,7 +2201,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _shapeSnappedLive = false;
     if (live != null) {
       _activeStrokeNotifier.value = null;
-      final appState = context.read<AppState>();
+      final appState = _appStateRef;
 
       // Check Scribble-to-Erase (rapid zig-zag over existing strokes)
       if (appState.scribbleToErase &&
@@ -2077,6 +2267,99 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     } else {
       _liveStrokePoints.clear();
     }
+  }
+
+  void _handlePointerCancel(PointerCancelEvent event, NotePage page) {
+    if (_lassoLongPressPointer == event.pointer) {
+      _cancelLassoLongPressTimer();
+    }
+    if (_imageLongPressPointer == event.pointer) {
+      _cancelImageLongPressTimer();
+    }
+    _pointerDownPositions.remove(event.pointer);
+    _shapeHoldTimer?.cancel();
+    _shapeSnappedLive = false;
+
+    final bool isStylusEvent = event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus;
+    if (isStylusEvent) {
+      if (!_stylusPanMode) {
+        _markStylusActivityCooldown();
+      }
+      if (_isStylusDown || _isDrawingPointerDown) {
+        _isStylusDown = false;
+        _isDrawingPointerDown = false;
+        _syncStylusDrawingState();
+        _bumpViewportGate();
+      }
+    } else if (_pointerDownPositions.isEmpty && _isDrawingPointerDown) {
+      _isDrawingPointerDown = false;
+      _syncStylusDrawingState();
+      _bumpViewportGate();
+    }
+
+    final List<Stroke>? cancelledEraseStrokes = _workingEraseStrokes;
+    final bool commitCancelledErase = _activeTool == EditorTool.eraser &&
+        isStylusEvent &&
+        _eraserChangedPage &&
+        cancelledEraseStrokes != null;
+    final NotePage? eraseSnapshot = _pageBeforeGesture;
+
+    _tapeDragStart = null;
+    _tapeDraftNotifier.value = null;
+    _eraserCursorNotifier.value = null;
+    _workingEraseStrokes = null;
+    _lastEraserPoint = null;
+    _clearWorkingEraseNotifier();
+    _eraserChangedPage = false;
+
+    if (commitCancelledErase) {
+      _pageBeforeGesture = null;
+      _commitPage(
+        page.copyWith(
+          strokes: cancelledEraseStrokes,
+          updatedAt: DateTime.now(),
+        ),
+        undoSnapshot: eraseSnapshot ?? page,
+      );
+    }
+
+    if (_activeTool == EditorTool.laserPointer) {
+      _laserController.endStroke();
+    }
+    if (_activeTool == EditorTool.lasso) {
+      if (_isDraggingLassoSelection) {
+        _isDraggingLassoSelection = false;
+        _lassoDragOffsetNotifier.value = Offset.zero;
+        _lastLassoDragPos = null;
+      } else if (_lassoController.isDrawingLasso) {
+        _lassoController.cancelDrawing();
+      }
+      _pageBeforeGesture = null;
+    }
+
+    final live = _activeStrokeNotifier.value;
+    if (live != null) {
+      _activeStrokeNotifier.value = null;
+      if (isStylusEvent &&
+          !_stylusPanMode &&
+          live.points.length >= 2 &&
+          _activeTool.isDrawingTool) {
+        final finalized = live.copyWith(
+          points: List<StrokePoint>.from(live.points),
+        );
+        _liveStrokePoints.clear();
+        _commitPage(
+          page.copyWith(strokes: [...page.strokes, finalized]),
+          undoSnapshot: page,
+        );
+      } else {
+        _liveStrokePoints.clear();
+      }
+    } else {
+      _liveStrokePoints.clear();
+    }
+    _pageBeforeGesture = null;
   }
 
   void _cancelLassoLongPressTimer() {
@@ -2240,10 +2523,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   void _scheduleShapeHoldTimer() {
     _shapeHoldTimer?.cancel();
     if (_shapeSnappedLive) return;
-    final appState = context.read<AppState>();
-    if (!appState.holdToSnapShape && _activeTool != EditorTool.shape) return;
+    final appState = _appStateRef;
+    final bool isShapeTool = _activeTool == EditorTool.shape;
+    if (!appState.holdToSnapShape && !isShapeTool) return;
 
-    _shapeHoldTimer = Timer(const Duration(milliseconds: 450), () {
+    final int holdDelayMs =
+        (!isShapeTool && _activeTool != EditorTool.highlighter) ? 720 : 480;
+
+    _shapeHoldTimer = Timer(Duration(milliseconds: holdDelayMs), () {
       final live = _activeStrokeNotifier.value;
       if (!mounted || live == null || live.points.length < 4) return;
 
@@ -2277,10 +2564,19 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         return;
       }
 
-      if (live.points.length < 6) return;
-      final res = StrokeEngine.recognizeShape(live.points);
+      if (live.points.length < (isShapeTool ? 6 : 8)) return;
+      final res = isShapeTool
+          ? StrokeEngine.recognizeShape(live.points)
+          : StrokeEngine.recognizeShape(
+              live.points,
+              minDiag: 48.0,
+              minLineLength: 48.0,
+            );
       if (res.recognized) {
         _shapeSnappedLive = true;
+        if (!isShapeTool && _smoothingStrength <= 0.01) {
+          HapticFeedback.selectionClick();
+        }
         final snappedPts = res.shapeType == ShapeType.line &&
                 res.snappedPoints.length >= 2
             ? [res.snappedPoints.first, res.snappedPoints.last]
@@ -2336,80 +2632,73 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     return !bounds.isEmpty && bounds.overlaps(box);
   }
 
-  /// Zero-lag 144fps swept-segment eraser with fast AABB pre-filtering:
-  /// skips non-overlapping strokes in nanoseconds and samples along [from -> to]
-  /// every `max(3.0, radius * 0.4)` px so fast swipes never miss spots.
+  /// Zero-lag single-pass O(K) swept-segment eraser with per-page notification
+  /// and fast AABB pre-filtering: skips non-overlapping strokes cleanly without
+  /// repainting neighboring pages or sub-stepping repeatedly across every stroke.
   void _eraseAlongSegment(NotePage page, Offset from, Offset to) {
-    final working = _workingEraseStrokes ?? List<Stroke>.from(page.strokes);
-    _workingEraseStrokes = working;
+    if (_workingEraseStrokes == null || _workingErasePageId != page.id) {
+      _workingErasePageId = page.id;
+      _workingEraseStrokes = List<Stroke>.from(page.strokes);
+    }
+    final working = _workingEraseStrokes!;
     final double eraserRadius = _eraserRadius.clamp(5.0, 35.0);
+    final double pad = eraserRadius + 20.0;
     final Rect sweepBox = Rect.fromLTRB(
-      math.min(from.dx, to.dx) - eraserRadius,
-      math.min(from.dy, to.dy) - eraserRadius,
-      math.max(from.dx, to.dx) + eraserRadius,
-      math.max(from.dy, to.dy) + eraserRadius,
+      math.min(from.dx, to.dx) - pad,
+      math.min(from.dy, to.dy) - pad,
+      math.max(from.dx, to.dx) + pad,
+      math.max(from.dy, to.dy) + pad,
     );
 
-    // Fast AABB pre-filter: if zero strokes overlap the swept box, return immediately!
-    bool anyCandidate = false;
-    for (final s in working) {
-      if (_strokeIntersectsBox(s, sweepBox)) {
-        anyCandidate = true;
-        break;
-      }
-    }
-    if (!anyCandidate) return;
-
-    final double segLen = (to - from).distance;
-    final double step = math.max(3.0, eraserRadius * 0.4);
-    final int steps = math.max(1, (segLen / step).ceil());
-
     bool changedAny = false;
-    List<Stroke> cur = working;
-    for (int sIdx = 0; sIdx <= steps; sIdx++) {
-      final double t = steps == 0 ? 1.0 : sIdx / steps;
-      final Offset pos = Offset(
-        from.dx + (to.dx - from.dx) * t,
-        from.dy + (to.dy - from.dy) * t,
-      );
-      final Rect ptBox = Rect.fromCircle(center: pos, radius: eraserRadius);
+    List<Stroke>? nextStrokes;
+    for (int i = 0; i < working.length; i++) {
+      final s = working[i];
+      if (!_strokeIntersectsBox(s, sweepBox)) {
+        nextStrokes?.add(s);
+        continue;
+      }
       if (_eraserMode == EraserMode.stroke) {
-        final beforeLen = cur.length;
-        cur = cur
-            .where((s) =>
-                !_strokeIntersectsBox(s, ptBox) ||
-                !StrokeEngine.hitTestStroke(s, pos, tolerance: eraserRadius))
-            .toList();
-        if (cur.length != beforeLen) changedAny = true;
-      } else {
-        final nextStrokes = <Stroke>[];
-        bool stepChanged = false;
-        for (final s in cur) {
-          if (!_strokeIntersectsBox(s, ptBox) ||
-              !StrokeEngine.hitTestStroke(s, pos, tolerance: eraserRadius)) {
-            nextStrokes.add(s);
-            continue;
+        if (StrokeEngine.hitTestStrokeSegment(
+          s,
+          from,
+          to,
+          tolerance: eraserRadius,
+        )) {
+          if (nextStrokes == null) {
+            nextStrokes = List<Stroke>.from(working.sublist(0, i));
           }
-          final split = StrokeEngine.precisionEraseStroke(
-            s,
-            pos,
-            eraserRadius,
-            idGenerator: _uuid.v4,
-          );
-          if (split.length != 1 || split.first.id != s.id) stepChanged = true;
-          nextStrokes.addAll(split);
-        }
-        if (stepChanged) {
-          cur = nextStrokes;
           changedAny = true;
+        } else {
+          nextStrokes?.add(s);
+        }
+      } else {
+        final split = StrokeEngine.precisionEraseStrokeAlongSegment(
+          s,
+          from,
+          to,
+          eraserRadius,
+          idGenerator: _uuid.v4,
+        );
+        if (split.length != 1 || !identical(split.first, s)) {
+          if (nextStrokes == null) {
+            nextStrokes = List<Stroke>.from(working.sublist(0, i));
+          }
+          changedAny = true;
+          nextStrokes.addAll(split);
+        } else {
+          nextStrokes?.add(s);
         }
       }
     }
 
-    if (changedAny) {
-      _workingEraseStrokes = cur;
+    if (changedAny && nextStrokes != null) {
+      _workingEraseStrokes = nextStrokes;
       _eraserChangedPage = true;
-      _erasingStrokesNotifier.value = (pageId: page.id, strokes: cur);
+      _erasingNotifierForPage(page.id).value = (
+        pageId: page.id,
+        strokes: nextStrokes,
+      );
     }
   }
 
@@ -4031,12 +4320,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   }
 
   void _resetPanTracking() {
-    _panAxisLock = _ScrollAxisLock.none;
-    _panAccumDelta = Offset.zero;
-    _panVelocityX = 0.0;
-    _panVelocityY = 0.0;
-    _lastPanEventUs = 0;
-    _touchPanActivated = false;
+    _smartScrollTracker.reset();
   }
 
   ({bool hitX, bool hitY}) _applySmartScrollDelta(
@@ -4135,7 +4419,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       return;
     }
 
-    final appState = context.read<AppState>();
+    final appState = _appStateRef;
     if (!appState.verticalContinuousScroll) {
       _stopScrollFling();
       return;
@@ -4150,7 +4434,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       isFling: true,
     );
 
-    final double decay = math.exp(-3.2 * dt);
+    final double decay = math.exp(-2.9 * dt);
     _flingVx = hit.hitX ? 0.0 : _flingVx * decay;
     _flingVy = hit.hitY ? 0.0 : _flingVy * decay;
 
@@ -4197,6 +4481,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       if ((visibleIdx - _renderedWindowCenter).abs() >= windowThreshold) {
         setState(() => _renderedWindowCenter = visibleIdx);
       }
+      _prewarmActiveDrawingPage(notebook, visibleIdx);
       _prefetchNearbyPdfPages(notebook);
     }
 
@@ -4231,10 +4516,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
             isLandscape: lastPage.isLandscape,
           );
       if (mounted) {
+        final int newIdx = notebook.pages.length;
         setState(() {
           _pullOverscroll = 0.0;
-          _syncCurrentPageIndex(notebook.pages.length);
+          _syncCurrentPageIndex(newIdx);
         });
+        final updatedNb = _getNotebook(context, listen: false);
+        if (updatedNb != null) {
+          _prewarmActiveDrawingPage(updatedNb, newIdx);
+        }
       }
     } finally {
       _isAddingPullPage = false;
@@ -6144,9 +6434,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                             e.kind == PointerDeviceKind.invertedStylus) &&
                         !_stylusPanMode) {
                       if (!_isStylusHovering && !_isStylusDown) {
-                        _engageStylusViewportLock();
+                        _engageStylusViewportLock(fromHover: true);
                       }
-                      _markStylusActivityCooldown();
                       _markStylusHoverActive();
                     }
                   },
@@ -6156,7 +6445,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         e.kind == PointerDeviceKind.invertedStylus;
                     if (isStylus) {
                       if (_stylusPanMode) {
-                        _resetPanTracking();
+                        _smartScrollTracker.start(e.timeStamp.inMicroseconds);
                       } else {
                         _engageStylusViewportLock();
                         _markStylusActivityCooldown();
@@ -6169,6 +6458,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       return;
                     }
                     if (e.kind == PointerDeviceKind.touch) {
+                      _reconcileStalePointers(incomingPointer: e.pointer);
                       final bool blocked = _stylusBlocksViewport;
                       if (blocked) {
                         _palmRejectedPointers.add(e.pointer);
@@ -6181,6 +6471,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       final int prevLen = _activeTouchPointers.length;
                       _activeTouchPointers.add(e.pointer);
                       _activeTouchPositions[e.pointer] = e.position;
+                      final int nowMs = DateTime.now().millisecondsSinceEpoch;
+                      _touchPointerLastSeenMs[e.pointer] = nowMs;
                       if (_activeTouchPointers.length == 1) {
                         final bool isWbTarget =
                             currentPage.isInfiniteWhiteboard ||
@@ -6197,11 +6489,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         _touchGestureStartedAt = DateTime.now();
                         _touchGestureEndedAt = null;
                         _twoFingerInitialSpan = null;
-                        _resetPanTracking();
+                        _gestureUsedMultiTouch = false;
+                        _smartScrollTracker.start(e.timeStamp.inMicroseconds);
                       }
                       if (_activeTouchPointers.length >= 2 &&
                           !_isStylusDown &&
                           !blocked) {
+                        _gestureUsedMultiTouch = true;
                         _cancelLassoLongPressTimer();
                         _cancelImageLongPressTimer();
                         _resetPanTracking();
@@ -6254,6 +6548,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     if (e.kind == PointerDeviceKind.touch &&
                         (_overlayOwnedPointers.contains(e.pointer) ||
                             _overlayTouchPointers.contains(e.pointer))) {
+                      _overlayPointerLastSeenMs[e.pointer] =
+                          DateTime.now().millisecondsSinceEpoch;
                       return;
                     }
                     if (e.kind == PointerDeviceKind.touch) {
@@ -6264,14 +6560,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         _palmRejectedPointers.add(e.pointer);
                         _activeTouchPointers.remove(e.pointer);
                         _activeTouchPositions.remove(e.pointer);
+                        _touchPointerLastSeenMs.remove(e.pointer);
                         _tapTouchStarts.remove(e.pointer);
                         _pointerDownPositions.remove(e.pointer);
                         if (_activeTouchPointers.length < 2) {
                           _twoFingerInitialSpan = null;
                         }
+                        if (_activeTouchPointers.isEmpty) {
+                          _gestureUsedMultiTouch = false;
+                        }
                         return;
                       }
                       _activeTouchPositions[e.pointer] = e.position;
+                      _touchPointerLastSeenMs[e.pointer] =
+                          DateTime.now().millisecondsSinceEpoch;
                       if (_isZoomLocked &&
                           _activeTouchPointers.length >= 2) {
                         final it = _activeTouchPositions.values.iterator;
@@ -6294,12 +6596,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     if (e.kind == PointerDeviceKind.touch &&
                         !_tapMovedTooFar) {
                       final start = _tapTouchStarts[e.pointer];
-                      if (start != null && (e.position - start).distance > 18.0) {
+                      if (start != null && (e.position - start).distance > 28.0) {
                         _tapMovedTooFar = true;
                       }
                     }
 
                     final bool isTouchPan = e.kind == PointerDeviceKind.touch &&
+                        !_gestureUsedMultiTouch &&
                         _activeTouchPointers.length == 1 &&
                         _activeTouchPointers.contains(e.pointer);
                     final bool isStylusPan = _stylusPanMode &&
@@ -6315,69 +6618,32 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                         !_isDrawingPointerDown &&
                         _croppingImageId == null &&
                         (isTouchPan || isStylusPan)) {
-                      _panAccumDelta += e.delta;
-                      bool justActivated = false;
-                      if (isTouchPan && !_stylusPanMode && !_touchPanActivated) {
-                        if (_panAccumDelta.distance < 2.5) {
-                          return;
-                        }
-                        _touchPanActivated = true;
-                        justActivated = true;
-                      }
-                      final Offset effectiveDelta =
-                          justActivated ? _panAccumDelta : e.delta;
-                      if (_panAxisLock == _ScrollAxisLock.none &&
-                          _panAccumDelta.distance >= 6.0) {
-                        _panAxisLock =
-                            _panAccumDelta.dy.abs() >= _panAccumDelta.dx.abs() * 1.2
-                                ? _ScrollAxisLock.vertical
-                                : _ScrollAxisLock.free;
-                      }
-
                       final m = _transformController.value;
                       final double scale =
                           m.getMaxScaleOnAxis().clamp(0.35, 4.0);
                       final double maxPageW = _maxVerticalPageWidth(notebook);
                       final double scaledW = (maxPageW + 48.0) * scale;
+                      final bool canPanHorizontal =
+                          appState.freePaperMovement || scaledW > vpSize.width;
 
-                      final bool lockHorizontal =
-                          _panAxisLock == _ScrollAxisLock.vertical ||
-                              (_panAxisLock == _ScrollAxisLock.none &&
-                                  effectiveDelta.dy.abs() >=
-                                      effectiveDelta.dx.abs() * 1.2);
-                      final double rawDx = lockHorizontal
-                          ? 0.0
-                          : ((appState.freePaperMovement ||
-                                  scaledW > vpSize.width)
-                              ? effectiveDelta.dx
-                              : 0.0);
-
-                      final int nowUs = e.timeStamp.inMicroseconds;
-                      if (_lastPanEventUs > 0 && nowUs > _lastPanEventUs) {
-                        final double dt =
-                            ((nowUs - _lastPanEventUs) / 1e6).clamp(0.002, 0.08);
-                        _panVelocityY = _panVelocityY * 0.62 +
-                            (effectiveDelta.dy / dt) * 0.38;
-                        _panVelocityX =
-                            _panVelocityX * 0.62 + (rawDx / dt) * 0.38;
+                      final step = _smartScrollTracker.addMove(
+                        delta: e.delta,
+                        timeUs: e.timeStamp.inMicroseconds,
+                        scrollMult: scrollMult,
+                        canPanHorizontal: canPanHorizontal,
+                        requireActivationThreshold:
+                            isTouchPan && !_stylusPanMode,
+                      );
+                      if (!step.active) {
+                        return;
                       }
-                      if (nowUs > 0) {
-                        _lastPanEventUs = nowUs;
-                      }
-
-                      final double speedY = _panVelocityY.abs();
-                      final double t =
-                          ((speedY - 450.0) / 2750.0).clamp(0.0, 1.0);
-                      final double accelBoost = 1.0 + (t * t) * 2.4;
-                      final double dy =
-                          effectiveDelta.dy * scrollMult * accelBoost;
 
                       _applySmartScrollDelta(
                         notebook,
                         appState,
                         vpSize,
-                        rawDx,
-                        dy,
+                        step.dx,
+                        step.dy,
                         isFling: false,
                       );
                     }
@@ -6402,29 +6668,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       if (_stylusPanMode && useSmartVerticalPan) {
                         if (!_isOverlayDragging &&
                             _overlayTouchPointers.isEmpty &&
-                            _pullAddProgressNotifier.value < 0.1 &&
-                            _panAccumDelta.distance >= 10.0) {
-                          final int nowUs = e.timeStamp.inMicroseconds;
-                          final bool stale = _lastPanEventUs == 0 ||
-                              (nowUs > 0 && (nowUs - _lastPanEventUs) > 90000);
-                          if (!stale) {
-                            final double speedY = _panVelocityY.abs();
-                            final double t =
-                                ((speedY - 450.0) / 2750.0).clamp(0.0, 1.0);
-                            final double accelBoost = 1.0 + (t * t) * 2.4;
-                            final double launchVy = (_panVelocityY *
-                                    scrollMult *
-                                    (0.95 + accelBoost * 0.55))
-                                .clamp(-28000.0, 28000.0);
-                            final double launchVx =
-                                _panAxisLock == _ScrollAxisLock.vertical
-                                    ? 0.0
-                                    : (_panVelocityX * 0.85)
-                                        .clamp(-6000.0, 6000.0);
-                            if (launchVy.abs() > 140.0 ||
-                                launchVx.abs() > 140.0) {
-                              _startScrollFling(launchVx, launchVy);
-                            }
+                            _pullAddProgressNotifier.value < 0.1) {
+                          final fling = _smartScrollTracker.computeFlingLaunch(
+                            upTimeUs: e.timeStamp.inMicroseconds,
+                            scrollMult: scrollMult,
+                          );
+                          if (fling.shouldFling) {
+                            _startScrollFling(fling.vx, fling.vy);
                           }
                         }
                         _finishPullToAddIfReady(notebook);
@@ -6444,22 +6694,38 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       _pointerDownPositions.remove(e.pointer);
                       _activeTouchPointers.remove(e.pointer);
                       _activeTouchPositions.remove(e.pointer);
+                      _touchPointerLastSeenMs.remove(e.pointer);
                       _tapTouchStarts.remove(e.pointer);
+                      if (_activeTouchPointers.isEmpty) {
+                        _gestureUsedMultiTouch = false;
+                      }
                       return;
                     }
                     final bool wasRejectedPalm =
                         _palmRejectedPointers.remove(e.pointer);
-                    final bool wasSingleTouchPan =
+                    final bool wasMultiTouch = _activeTouchPointers.length >= 2;
+                    final bool wasSingleTouchPan = !_gestureUsedMultiTouch &&
                         _activeTouchPointers.length == 1 &&
-                            _activeTouchPointers.contains(e.pointer);
+                        _activeTouchPointers.contains(e.pointer);
                     _activeTouchPointers.remove(e.pointer);
                     _activeTouchPositions.remove(e.pointer);
+                    _touchPointerLastSeenMs.remove(e.pointer);
                     _pointerDownPositions.remove(e.pointer);
                     if (_activeTouchPointers.length < 2) {
                       _twoFingerInitialSpan = null;
                     }
                     if (_activeTouchPointers.isEmpty) {
                       _touchGestureEndedAt = DateTime.now();
+                    }
+                    if (wasMultiTouch && _activeTouchPointers.length < 2) {
+                      if (_activeTouchPointers.isEmpty) {
+                        _gestureUsedMultiTouch = false;
+                      }
+                      _bumpViewportGate();
+                    } else if (_activeTouchPointers.isEmpty &&
+                        _gestureUsedMultiTouch) {
+                      _gestureUsedMultiTouch = false;
+                      _bumpViewportGate();
                     }
                     if (wasRejectedPalm) {
                       if (_activeTouchPointers.isEmpty &&
@@ -6478,28 +6744,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                           !_stylusBlocksViewport &&
                           !_isDrawingPointerDown &&
                           _croppingImageId == null &&
-                          _pullAddProgressNotifier.value < 0.1 &&
-                          _panAccumDelta.distance >= 10.0) {
-                        final int nowUs = e.timeStamp.inMicroseconds;
-                        final bool stale = _lastPanEventUs == 0 ||
-                            (nowUs > 0 && (nowUs - _lastPanEventUs) > 90000);
-                        if (!stale) {
-                          final double speedY = _panVelocityY.abs();
-                          final double t =
-                              ((speedY - 450.0) / 2750.0).clamp(0.0, 1.0);
-                          final double accelBoost = 1.0 + (t * t) * 2.4;
-                          final double launchVy = (_panVelocityY *
-                                  scrollMult *
-                                  (0.95 + accelBoost * 0.55))
-                              .clamp(-28000.0, 28000.0);
-                          final double launchVx =
-                              _panAxisLock == _ScrollAxisLock.vertical
-                                  ? 0.0
-                                  : (_panVelocityX * 0.85)
-                                      .clamp(-6000.0, 6000.0);
-                          if (launchVy.abs() > 140.0 || launchVx.abs() > 140.0) {
-                            _startScrollFling(launchVx, launchVy);
-                          }
+                          _pullAddProgressNotifier.value < 0.1) {
+                        final fling = _smartScrollTracker.computeFlingLaunch(
+                          upTimeUs: e.timeStamp.inMicroseconds,
+                          scrollMult: scrollMult,
+                        );
+                        if (fling.shouldFling) {
+                          _startScrollFling(fling.vx, fling.vy);
                         }
                       }
                       _finishPullToAddIfReady(notebook);
@@ -6524,14 +6775,38 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       _tapMovedTooFar = false;
                       if (appState.quickGesturesEnabled &&
                           !moved &&
-                          elapsed < 350 &&
+                          elapsed < 440 &&
                           maxFingers >= 2) {
+                        // Roll back tiny accidental wobble introduced while 2/3 fingers touched down
+                        final Matrix4? pre = _matrixBeforeTouchGesture;
+                        if (pre != null) {
+                          final Matrix4 cur = _transformController.value;
+                          final double dx = (cur.getTranslation().x -
+                                  pre.getTranslation().x)
+                              .abs();
+                          final double dy = (cur.getTranslation().y -
+                                  pre.getTranslation().y)
+                              .abs();
+                          final double ds = (cur.getMaxScaleOnAxis() -
+                                  pre.getMaxScaleOnAxis())
+                              .abs();
+                          if (dx < 18.0 && dy < 18.0 && ds < 0.04) {
+                            _transformController.value = pre.clone();
+                          }
+                        }
+                        HapticFeedback.selectionClick();
                         if (maxFingers == 2) {
                           _undo(notebook);
                         } else {
                           _redo(notebook);
                         }
                       }
+                    }
+                    if (_activeTouchPointers.isEmpty) {
+                      _tapTouchStarts.clear();
+                      _tapTouchStartTime = null;
+                      _tapMaxTouchCount = 0;
+                      _tapMovedTooFar = false;
                     }
                   },
                   onPointerCancel: (e) {
@@ -6567,12 +6842,18 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       _pointerDownPositions.remove(e.pointer);
                       _activeTouchPointers.remove(e.pointer);
                       _activeTouchPositions.remove(e.pointer);
+                      _touchPointerLastSeenMs.remove(e.pointer);
                       _tapTouchStarts.remove(e.pointer);
+                      if (_activeTouchPointers.isEmpty) {
+                        _gestureUsedMultiTouch = false;
+                      }
                       return;
                     }
+                    final bool wasMultiTouch = _activeTouchPointers.length >= 2;
                     _palmRejectedPointers.remove(e.pointer);
                     _activeTouchPointers.remove(e.pointer);
                     _activeTouchPositions.remove(e.pointer);
+                    _touchPointerLastSeenMs.remove(e.pointer);
                     _pointerDownPositions.remove(e.pointer);
                     if (_activeTouchPointers.length < 2) {
                       _twoFingerInitialSpan = null;
@@ -6580,6 +6861,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     _rollbackRecentPalmShiftIfNeeded(forceFromCancel: true);
                     if (_activeTouchPointers.isEmpty) {
                       _touchGestureEndedAt = DateTime.now();
+                      _gestureUsedMultiTouch = false;
+                    }
+                    if (wasMultiTouch && _activeTouchPointers.length < 2) {
+                      _bumpViewportGate();
                     }
                     if (useSmartVerticalPan && _activeTouchPointers.isEmpty) {
                       _pullAddProgressNotifier.value = 0.0;
@@ -6592,7 +6877,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       _bumpViewportGate();
                     }
                     _tapTouchStarts.remove(e.pointer);
-                    if (_tapTouchStarts.isEmpty) {
+                    if (_tapTouchStarts.isEmpty || _activeTouchPointers.isEmpty) {
+                      _tapTouchStarts.clear();
                       _tapTouchStartTime = null;
                       _tapMaxTouchCount = 0;
                       _tapMovedTooFar = false;
@@ -6632,7 +6918,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                   ),
                             panEnabled: allowPan &&
                                 (!useSmartVerticalPan ||
-                                    _activeTouchPointers.length >= 2),
+                                    _activeTouchPointers.length >= 2 ||
+                                    _gestureUsedMultiTouch),
                             scaleEnabled: !_isZoomLocked &&
                                 !_isOverlayDragging &&
                                 _overlayTouchPointers.isEmpty &&
@@ -6792,12 +7079,11 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                 child: Center(
                                   child: Listener(
                                     onPointerDown: (e) =>
-                                        _overlayTouchPointers.add(e.pointer),
-                                    onPointerUp: (e) => _overlayTouchPointers
-                                        .remove(e.pointer),
+                                        _acquireOverlayPointer(e.pointer),
+                                    onPointerUp: (e) =>
+                                        _releaseOverlayPointer(e.pointer),
                                     onPointerCancel: (e) =>
-                                        _overlayTouchPointers
-                                            .remove(e.pointer),
+                                        _releaseOverlayPointer(e.pointer),
                                     child: Material(
                                       elevation: 6,
                                       borderRadius: BorderRadius.circular(24),
@@ -6876,11 +7162,12 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       InteractiveRulerOverlay(
                         ruler: _rulerState,
                         onChanged: () => setState(() {}),
-                        onClose: () => setState(() => _rulerVisible = false),
-                        onDragStart: () =>
-                            setState(() => _isOverlayDragging = true),
-                        onDragEnd: () =>
-                            setState(() => _isOverlayDragging = false),
+                        onClose: () {
+                          _clearOverlayPointerLocks();
+                          setState(() => _rulerVisible = false);
+                        },
+                        onDragStart: () => _setOverlayDragging(true),
+                        onDragEnd: () => _setOverlayDragging(false),
                       ),
 
                     // Floating Text Box active pill (since Text Box toggle was moved to 3-dot settings)
@@ -7185,7 +7472,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                               activeWidth: _effectiveWidth,
                               onVerticalDragStart: () {
                                 _stopScrollFling();
-                                setState(() => _isOverlayDragging = true);
+                                _setOverlayDragging(true);
                               },
                               onVerticalDragDelta: (dy) {
                                 final double cur =
@@ -7195,9 +7482,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                     (cur + dy).clamp(12.0, maxTop).toDouble();
                               },
                               onVerticalDragEnd: () {
-                                if (mounted) {
-                                  setState(() => _isOverlayDragging = false);
-                                }
+                                _setOverlayDragging(false);
                               },
                               onSelectPreset: (preset) {
                                 setState(() {
@@ -7294,8 +7579,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                             onVerticalDragStart: (_) {
                               _stopScrollFling();
                               _scrubPrefetchTimer?.cancel();
+                              _setOverlayDragging(true);
                               setState(() {
-                                _isOverlayDragging = true;
                                 _isScrubbingPages = true;
                               });
                             },
@@ -7310,8 +7595,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                             },
                             onVerticalDragEnd: (_) {
                               _scrubPrefetchTimer?.cancel();
+                              _setOverlayDragging(false);
                               setState(() {
-                                _isOverlayDragging = false;
                                 _isScrubbingPages = false;
                                 _renderedWindowCenter = _currentPageIndex;
                               });
@@ -7323,8 +7608,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                             },
                             onVerticalDragCancel: () {
                               _scrubPrefetchTimer?.cancel();
+                              _setOverlayDragging(false);
                               setState(() {
-                                _isOverlayDragging = false;
                                 _isScrubbingPages = false;
                                 _renderedWindowCenter = _currentPageIndex;
                               });
@@ -7406,12 +7691,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                 : null) ??
                             currentPage;
                     final Widget menuWidget = Listener(
-                      onPointerDown: (e) =>
-                          _overlayTouchPointers.add(e.pointer),
-                      onPointerUp: (e) =>
-                          _overlayTouchPointers.remove(e.pointer),
-                      onPointerCancel: (e) =>
-                          _overlayTouchPointers.remove(e.pointer),
+                      onPointerDown: (e) => _acquireOverlayPointer(e.pointer),
+                      onPointerUp: (e) => _releaseOverlayPointer(e.pointer),
+                      onPointerCancel: (e) => _releaseOverlayPointer(e.pointer),
                       child: LassoFloatingMenu(
                         selectedCount: _lassoController.selection.totalCount,
                         hasClipboard: _lassoController.hasClipboard,
@@ -7793,8 +8075,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                       // Floating Casio fx-880BTG Calculator (1/6 - 1/4 screen landscape, pointer-owned)
                       if (_calculatorVisible)
                         Casio880Overlay(
-                          onClose: () =>
-                              setState(() => _calculatorVisible = false),
+                          onClose: () {
+                            _clearOverlayPointerLocks();
+                            setState(() => _calculatorVisible = false);
+                          },
                           onPointerAcquired: _acquireOverlayPointer,
                           onPointerReleased: _releaseOverlayPointer,
                           onDragStart: () => _setOverlayDragging(true),
@@ -7829,7 +8113,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                   _zoomFocusRect.height,
                 );
               }),
-              onClose: () => setState(() => _zoomWindowEnabled = false),
+              onClose: () {
+                _clearOverlayPointerLocks();
+                setState(() => _zoomWindowEnabled = false);
+              },
             ),
         ],
       ),
@@ -8088,6 +8375,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
           _syncCurrentPageIndex(i);
           _renderedWindowCenter = i;
         });
+        _prewarmActiveDrawingPage(notebook, i);
         _prefetchNearbyPdfPages(notebook);
       },
       itemBuilder: (ctx, i) {
@@ -8203,7 +8491,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                               : null,
                           lassoDragOffset:
                               isLassoOwner ? _lassoDragOffsetNotifier : null,
-                          erasingStrokesNotifier: _erasingStrokesNotifier,
+                          erasingStrokesNotifier:
+                              _erasingNotifierForPage(page.id),
                           hiddenImageId: _selectedImageId,
                           playingAudioId: _playingAudioId,
                           playingAudioTimeMsNotifier: (_playingAudioId != null &&
@@ -8228,24 +8517,30 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     onPointerDown: (e) => _handlePointerDown(e, page, pageIndex),
                     onPointerMove: (e) => _handlePointerMove(e, page),
                     onPointerUp: (e) => _handlePointerUp(e, page),
-                    onPointerCancel: (e) => _handlePointerUp(e, page),
-                    child: (_activeDrawingPageId == page.id ||
-                            (_activeDrawingPageId == null && isActivePage))
-                        ? RepaintBoundary(
-                            child: CustomPaint(
-                              size: pageSize,
-                              painter: ActiveStrokePainter(
-                                activeStroke: _activeStrokeNotifier,
-                                eraserCursor: _eraserCursorNotifier,
-                                lassoPath: _lassoPathNotifier,
-                                tapeDraftRect: _tapeDraftNotifier,
-                                isDarkPaper:
-                                    page.paperColor == PaperColorType.dark,
-                                eraserRadius: _eraserRadius,
-                              ),
+                    onPointerCancel: (e) => _handlePointerCancel(e, page),
+                    child: ValueListenableBuilder<String?>(
+                      valueListenable: _activeDrawingPageIdNotifier,
+                      builder: (_, activeDrawingId, __) {
+                        final bool showLiveLayer =
+                            activeDrawingId == page.id ||
+                                (activeDrawingId == null && isActivePage);
+                        if (!showLiveLayer) return const SizedBox.expand();
+                        return RepaintBoundary(
+                          child: CustomPaint(
+                            size: pageSize,
+                            painter: ActiveStrokePainter(
+                              activeStroke: _activeStrokeNotifier,
+                              eraserCursor: _eraserCursorNotifier,
+                              lassoPath: _lassoPathNotifier,
+                              tapeDraftRect: _tapeDraftNotifier,
+                              isDarkPaper:
+                                  page.paperColor == PaperColorType.dark,
+                              eraserRadius: _eraserRadius,
                             ),
-                          )
-                        : const SizedBox.expand(),
+                          ),
+                        );
+                      },
+                    ),
                   ),
                 ),
 
@@ -8294,7 +8589,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                               lassoDragOffset: isLassoOwner
                                   ? _lassoDragOffsetNotifier
                                   : null,
-                              erasingStrokesNotifier: _erasingStrokesNotifier,
+                              erasingStrokesNotifier:
+                              _erasingNotifierForPage(page.id),
                               hiddenImageId: _selectedImageId,
                               playingAudioId: _playingAudioId,
                               playingAudioTimeMsNotifier: (_playingAudioId != null &&
@@ -8559,14 +8855,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                 left: _zoomFocusRect.left,
                 top: _zoomFocusRect.top,
                 child: GestureDetector(
-                  onPanStart: (_) => setState(() => _isOverlayDragging = true),
+                  onPanStart: (_) => _setOverlayDragging(true),
                   onPanUpdate: (d) {
                     setState(() {
                       _zoomFocusRect = _zoomFocusRect.shift(d.delta);
                     });
                   },
-                  onPanEnd: (_) => setState(() => _isOverlayDragging = false),
-                  onPanCancel: () => setState(() => _isOverlayDragging = false),
+                  onPanEnd: (_) => _setOverlayDragging(false),
+                  onPanCancel: () => _setOverlayDragging(false),
                   child: Container(
                     width: _zoomFocusRect.width,
                     height: _zoomFocusRect.height,
@@ -8642,7 +8938,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                           _handlePointerDown(e, page, pageIndex),
                       onPointerMove: (e) => _handlePointerMove(e, page),
                       onPointerUp: (e) => _handlePointerUp(e, page),
-                      onPointerCancel: (e) => _handlePointerUp(e, page),
+                      onPointerCancel: (e) => _handlePointerCancel(e, page),
                       child: RepaintBoundary(
                         child: CustomPaint(
                           size: pageSize,
@@ -8791,8 +9087,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
           });
         }
       },
-      onDragStart: () => setState(() => _isOverlayDragging = true),
-      onDragEnd: () => setState(() => _isOverlayDragging = false),
+      onDragStart: () => _setOverlayDragging(true),
+      onDragEnd: () => _setOverlayDragging(false),
       onCommit: (updatedEl) {
         final updated = page.textElements
             .map((t) => t.id == element.id ? updatedEl : t)
@@ -10085,7 +10381,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
             _selectedTextId = null;
             _selectedImageId = null;
           }),
-          onPanStart: (_) => setState(() => _isOverlayDragging = true),
+          onPanStart: (_) => _setOverlayDragging(true),
           onPanUpdate: (d) {
             final updated = page.stencilElements
                 .map((s) => s.id == stencil.id
@@ -10097,8 +10393,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                   page.copyWith(stencilElements: updated),
                 );
           },
-          onPanEnd: (_) => setState(() => _isOverlayDragging = false),
-          onPanCancel: () => setState(() => _isOverlayDragging = false),
+          onPanEnd: (_) => _setOverlayDragging(false),
+          onPanCancel: () => _setOverlayDragging(false),
           child: Stack(
             clipBehavior: Clip.none,
             children: [
@@ -10253,7 +10549,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         h: note.height,
       );
       if (!_isOverlayDragging) {
-        setState(() => _isOverlayDragging = true);
+        _setOverlayDragging(true);
       }
     }
 
@@ -10283,7 +10579,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         );
       }
       if (_isOverlayDragging) {
-        setState(() => _isOverlayDragging = false);
+        _setOverlayDragging(false);
       }
     }
 
@@ -10554,7 +10850,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                 return;
                               }
                               if (!_isOverlayDragging) {
-                                setState(() => _isOverlayDragging = true);
+                                _setOverlayDragging(true);
                               }
                               if (_activeTool == EditorTool.eraser) {
                                 eraseStickyAt(e.localPosition);
@@ -10650,7 +10946,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                 );
                               }
                               if (_isOverlayDragging) {
-                                setState(() => _isOverlayDragging = false);
+                                _setOverlayDragging(false);
                               }
                             },
                             onPointerCancel: (_) {
@@ -10659,7 +10955,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                                 _activeStickyStrokeNoteId = null;
                               }
                               if (_isOverlayDragging) {
-                                setState(() => _isOverlayDragging = false);
+                                _setOverlayDragging(false);
                               }
                             },
                             child: Stack(

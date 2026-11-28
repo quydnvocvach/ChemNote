@@ -704,7 +704,11 @@ class StrokeEngine {
   // AUTO SHAPE RECOGNITION (Line, Circle/Ellipse, Triangle, Rectangle, Hexagon)
   // ===========================================================================
 
-  static ShapeRecognitionResult recognizeShape(List<StrokePoint> rawPoints) {
+  static ShapeRecognitionResult recognizeShape(
+    List<StrokePoint> rawPoints, {
+    double minDiag = 18.0,
+    double minLineLength = 24.0,
+  }) {
     if (rawPoints.length < 4) {
       return ShapeRecognitionResult(
         shapeType: ShapeType.none,
@@ -713,7 +717,7 @@ class StrokeEngine {
     }
 
     final double totalLength = _polylineLength(rawPoints);
-    if (totalLength < 24.0) {
+    if (totalLength < minLineLength) {
       return ShapeRecognitionResult(
         shapeType: ShapeType.none,
         snappedPoints: rawPoints,
@@ -724,7 +728,7 @@ class StrokeEngine {
     final diag = math.sqrt(
       bounds.width * bounds.width + bounds.height * bounds.height,
     );
-    if (diag < 18.0) {
+    if (diag < minDiag) {
       return ShapeRecognitionResult(
         shapeType: ShapeType.none,
         snappedPoints: rawPoints,
@@ -736,7 +740,7 @@ class StrokeEngine {
     final startEndDist = _dist(start, end);
 
     // 1. Straight Line FIRST (strict open-line check)
-    if (startEndDist >= totalLength * 0.86) {
+    if (startEndDist >= minLineLength && startEndDist >= totalLength * 0.86) {
       double maxDev = 0.0;
       for (final p in rawPoints) {
         final d = _pointToLineDistance(p, start, end);
@@ -1254,13 +1258,103 @@ class StrokeEngine {
   }
 
   static double _pointToSegmentDistance(Offset p, Offset a, Offset b) {
-    final ab = b - a;
-    final lenSq = ab.dx * ab.dx + ab.dy * ab.dy;
-    if (lenSq < 0.0001) return (p - a).distance;
-    final t = (((p.dx - a.dx) * ab.dx + (p.dy - a.dy) * ab.dy) / lenSq)
-        .clamp(0.0, 1.0);
-    final proj = Offset(a.dx + t * ab.dx, a.dy + t * ab.dy);
-    return (p - proj).distance;
+    return math.sqrt(
+      _pointToSegmentDistSq(p.dx, p.dy, a.dx, a.dy, b.dx, b.dy),
+    );
+  }
+
+  static double _pointToSegmentDistSq(
+    double px,
+    double py,
+    double ax,
+    double ay,
+    double bx,
+    double by,
+  ) {
+    final double abx = bx - ax;
+    final double aby = by - ay;
+    final double lenSq = abx * abx + aby * aby;
+    if (lenSq < 0.0001) {
+      final double dx = px - ax;
+      final double dy = py - ay;
+      return dx * dx + dy * dy;
+    }
+    final double t =
+        (((px - ax) * abx + (py - ay) * aby) / lenSq).clamp(0.0, 1.0);
+    final double cx = ax + t * abx;
+    final double cy = ay + t * aby;
+    final double dx = px - cx;
+    final double dy = py - cy;
+    return dx * dx + dy * dy;
+  }
+
+  static double _segmentOrientation(
+    double ax,
+    double ay,
+    double bx,
+    double by,
+    double cx,
+    double cy,
+  ) {
+    return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  }
+
+  static bool _onSegmentBox(
+    double ax,
+    double ay,
+    double bx,
+    double by,
+    double px,
+    double py,
+  ) {
+    return px >= math.min(ax, bx) - 1e-6 &&
+        px <= math.max(ax, bx) + 1e-6 &&
+        py >= math.min(ay, by) - 1e-6 &&
+        py <= math.max(ay, by) + 1e-6;
+  }
+
+  static bool _segmentsIntersect(
+    double ax,
+    double ay,
+    double bx,
+    double by,
+    double cx,
+    double cy,
+    double dx,
+    double dy,
+  ) {
+    final double o1 = _segmentOrientation(ax, ay, bx, by, cx, cy);
+    final double o2 = _segmentOrientation(ax, ay, bx, by, dx, dy);
+    final double o3 = _segmentOrientation(cx, cy, dx, dy, ax, ay);
+    final double o4 = _segmentOrientation(cx, cy, dx, dy, bx, by);
+
+    if (((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0)) &&
+        ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0))) {
+      return true;
+    }
+    if (o1.abs() < 1e-6 && _onSegmentBox(ax, ay, bx, by, cx, cy)) return true;
+    if (o2.abs() < 1e-6 && _onSegmentBox(ax, ay, bx, by, dx, dy)) return true;
+    if (o3.abs() < 1e-6 && _onSegmentBox(cx, cy, dx, dy, ax, ay)) return true;
+    if (o4.abs() < 1e-6 && _onSegmentBox(cx, cy, dx, dy, bx, by)) return true;
+    return false;
+  }
+
+  static double _segmentToSegmentDistSq(
+    double ax,
+    double ay,
+    double bx,
+    double by,
+    double cx,
+    double cy,
+    double dx,
+    double dy,
+  ) {
+    if (_segmentsIntersect(ax, ay, bx, by, cx, cy, dx, dy)) return 0.0;
+    final double d1 = _pointToSegmentDistSq(ax, ay, cx, cy, dx, dy);
+    final double d2 = _pointToSegmentDistSq(bx, by, cx, cy, dx, dy);
+    final double d3 = _pointToSegmentDistSq(cx, cy, ax, ay, bx, by);
+    final double d4 = _pointToSegmentDistSq(dx, dy, ax, ay, bx, by);
+    return math.min(math.min(d1, d2), math.min(d3, d4));
   }
 
   static List<StrokePoint> _douglasPeucker(
@@ -1299,18 +1393,159 @@ class StrokeEngine {
   }) {
     final pts = stroke.points;
     if (pts.isEmpty) return false;
-    final effectiveTol = tolerance + stroke.width * 0.5;
+    final double effectiveTol = tolerance + stroke.width * 0.5;
+    final double tolSq = effectiveTol * effectiveTol;
+    final double px = point.dx;
+    final double py = point.dy;
     if (pts.length == 1) {
-      return (Offset(pts.first.x, pts.first.y) - point).distance <= effectiveTol;
+      final double dx = pts.first.x - px;
+      final double dy = pts.first.y - py;
+      return (dx * dx + dy * dy) <= tolSq;
     }
     for (int i = 0; i < pts.length - 1; i++) {
-      final a = Offset(pts[i].x, pts[i].y);
-      final b = Offset(pts[i + 1].x, pts[i + 1].y);
-      if (_pointToSegmentDistance(point, a, b) <= effectiveTol) {
+      final a = pts[i];
+      final b = pts[i + 1];
+      if (_pointToSegmentDistSq(px, py, a.x, a.y, b.x, b.y) <= tolSq) {
         return true;
       }
     }
     return false;
+  }
+
+  /// Zero-allocation swept-segment hit-test between [from -> to] and [stroke].
+  static bool hitTestStrokeSegment(
+    Stroke stroke,
+    Offset from,
+    Offset to, {
+    double tolerance = 12.0,
+  }) {
+    final pts = stroke.points;
+    if (pts.isEmpty) return false;
+    final double effectiveTol = tolerance + stroke.width * 0.5;
+    final double tolSq = effectiveTol * effectiveTol;
+    if (pts.length == 1) {
+      return _pointToSegmentDistSq(
+            pts.first.x,
+            pts.first.y,
+            from.dx,
+            from.dy,
+            to.dx,
+            to.dy,
+          ) <=
+          tolSq;
+    }
+    for (int i = 0; i < pts.length - 1; i++) {
+      final a = pts[i];
+      final b = pts[i + 1];
+      if (_segmentToSegmentDistSq(
+            a.x,
+            a.y,
+            b.x,
+            b.y,
+            from.dx,
+            from.dy,
+            to.dx,
+            to.dy,
+          ) <=
+          tolSq) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Precision eraser along a swept segment [from -> to]: subdivides sparse
+  /// segments (2-point lines, recognized shapes, fast strokes) so strokes
+  /// slice cleanly right where the eraser passes.
+  static List<Stroke> precisionEraseStrokeAlongSegment(
+    Stroke stroke,
+    Offset from,
+    Offset to,
+    double eraserRadius, {
+    required String Function() idGenerator,
+  }) {
+    final pts = stroke.points;
+    if (pts.isEmpty) return const [];
+    if (!hitTestStrokeSegment(stroke, from, to, tolerance: eraserRadius)) {
+      return [stroke];
+    }
+    if (pts.length == 1) {
+      return const [];
+    }
+
+    final double maxStep = math.max(2.5, eraserRadius * 0.45);
+    final List<StrokePoint> working = <StrokePoint>[pts.first];
+    for (int i = 0; i < pts.length - 1; i++) {
+      final a = pts[i];
+      final b = pts[i + 1];
+      final double dx = b.x - a.x;
+      final double dy = b.y - a.y;
+      final double segLen = math.sqrt(dx * dx + dy * dy);
+      if (segLen > maxStep) {
+        final int subdiv = (segLen / maxStep).ceil();
+        for (int s = 1; s < subdiv; s++) {
+          final double t = s / subdiv;
+          working.add(
+            StrokePoint(
+              x: a.x + dx * t,
+              y: a.y + dy * t,
+              pressure: a.pressure + (b.pressure - a.pressure) * t,
+              tilt: a.tilt + (b.tilt - a.tilt) * t,
+              timestamp: (a.timestamp + (b.timestamp - a.timestamp) * t).round(),
+            ),
+          );
+        }
+      }
+      working.add(b);
+    }
+
+    List<List<StrokePoint>> sliceAtRadius(double radius) {
+      final double rSq = radius * radius;
+      final segments = <List<StrokePoint>>[];
+      var current = <StrokePoint>[];
+      for (final p in working) {
+        final double dSq = _pointToSegmentDistSq(
+          p.x,
+          p.y,
+          from.dx,
+          from.dy,
+          to.dx,
+          to.dy,
+        );
+        if (dSq > rSq) {
+          current.add(p);
+        } else {
+          if (current.length >= 2) {
+            segments.add(current);
+          }
+          current = <StrokePoint>[];
+        }
+      }
+      if (current.length >= 2) {
+        segments.add(current);
+      }
+      return segments;
+    }
+
+    var segments = sliceAtRadius(eraserRadius);
+    if (segments.length == 1 && segments.first.length == working.length) {
+      // Thick strokes/highlighters where the eraser brushed the stroke thickness
+      // margin without hitting centerline within eraserRadius.
+      segments = sliceAtRadius(eraserRadius + stroke.width * 0.35);
+      if (segments.length == 1 && segments.first.length == working.length) {
+        return [stroke];
+      }
+    }
+
+    return segments
+        .map(
+          (seg) => stroke.copyWith(
+            id: idGenerator(),
+            points: seg,
+            shapeType: ShapeType.none,
+          ),
+        )
+        .toList();
   }
 
   /// Precision eraser: splits a stroke by removing points within [eraserRadius]
@@ -1321,39 +1556,12 @@ class StrokeEngine {
     double eraserRadius, {
     required String Function() idGenerator,
   }) {
-    final pts = stroke.points;
-    if (pts.isEmpty) return const [];
-
-    final segments = <List<StrokePoint>>[];
-    var current = <StrokePoint>[];
-    final rSq = eraserRadius * eraserRadius;
-
-    for (final p in pts) {
-      final dx = p.x - eraserCenter.dx;
-      final dy = p.y - eraserCenter.dy;
-      if (dx * dx + dy * dy > rSq) {
-        current.add(p);
-      } else {
-        if (current.length >= 2) {
-          segments.add(current);
-        }
-        current = <StrokePoint>[];
-      }
-    }
-    if (current.length >= 2) {
-      segments.add(current);
-    }
-
-    if (segments.length == 1 && segments.first.length == pts.length) {
-      return [stroke];
-    }
-
-    return segments
-        .map((seg) => stroke.copyWith(
-              id: idGenerator(),
-              points: seg,
-              shapeType: ShapeType.none,
-            ))
-        .toList();
+    return precisionEraseStrokeAlongSegment(
+      stroke,
+      eraserCenter,
+      eraserCenter,
+      eraserRadius,
+      idGenerator: idGenerator,
+    );
   }
 }

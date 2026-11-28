@@ -42,8 +42,9 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val HARDWARE_CHANNEL = "com.chemnote.app/hardware"
         private const val STYLUS_BUTTON_DEBOUNCE_MS = 450L
-        private const val STYLUS_PALM_COOLDOWN_MS = 250L
-        private const val STYLUS_HOVER_TIMEOUT_MS = 300L
+        private const val STYLUS_PALM_COOLDOWN_MS = 110L
+        private const val STYLUS_HOVER_TIMEOUT_MS = 180L
+        private const val STYLUS_DOWN_STALE_MS = 4000L
         private const val TOOL_TYPE_PALM_VALUE = 5
         private const val REQ_RECORD_AUDIO = 4012
         private const val REQ_READ_IMAGES = 4013
@@ -83,7 +84,10 @@ class MainActivity : FlutterActivity() {
         enableHighestRefreshRate()
         enableUnbufferedStylusInput()
         hideSystemStatusBar()
-        window.decorView.post { hideSystemStatusBar() }
+        window.decorView.post {
+            hideSystemStatusBar()
+            enableUnbufferedStylusInput()
+        }
     }
 
     override fun onResume() {
@@ -103,6 +107,7 @@ class MainActivity : FlutterActivity() {
             resetNativePalmShieldTransientState()
         } else {
             hideSystemStatusBar()
+            enableUnbufferedStylusInput()
         }
         super.onWindowFocusChanged(hasFocus)
     }
@@ -888,14 +893,16 @@ class MainActivity : FlutterActivity() {
             when (action) {
                 MotionEvent.ACTION_HOVER_ENTER,
                 MotionEvent.ACTION_HOVER_MOVE -> {
+                    // Hovering stylus physically cannot be resting on screen; heal any missed ACTION_UP.
+                    isNativeStylusDown = false
                     isNativeStylusHovering = true
                     lastNativeStylusHoverMs = now
                     lastNativeStylusActiveMs = now
                 }
                 MotionEvent.ACTION_HOVER_EXIT -> {
+                    // Exiting hover must not arm a fresh touch blackout cooldown.
                     isNativeStylusHovering = false
                     lastNativeStylusHoverMs = 0L
-                    lastNativeStylusActiveMs = now
                 }
             }
         }
@@ -911,12 +918,13 @@ class MainActivity : FlutterActivity() {
             isNativeStylusDown = when (action) {
                 MotionEvent.ACTION_DOWN,
                 MotionEvent.ACTION_POINTER_DOWN,
-                MotionEvent.ACTION_MOVE -> true
+                MotionEvent.ACTION_MOVE -> hasActiveStylusPointer(ev)
+                MotionEvent.ACTION_POINTER_UP -> hasActiveStylusPointer(ev, excludeIndex = ev.actionIndex)
                 MotionEvent.ACTION_UP,
                 MotionEvent.ACTION_CANCEL -> false
                 else -> isNativeStylusDown
             }
-            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            if (!isNativeStylusDown) {
                 isNativeStylusHovering = false
                 lastNativeStylusHoverMs = 0L
             }
@@ -933,6 +941,12 @@ class MainActivity : FlutterActivity() {
 
         if (action == MotionEvent.ACTION_DOWN) {
             suppressCurrentTouchStream = false
+            if (isNativeStylusDown &&
+                lastNativeStylusActiveMs > 0L &&
+                (now - lastNativeStylusActiveMs) > STYLUS_DOWN_STALE_MS
+            ) {
+                isNativeStylusDown = false
+            }
             val hoverFresh = isNativeStylusHovering &&
                 lastNativeStylusHoverMs > 0L &&
                 (now - lastNativeStylusHoverMs) < STYLUS_HOVER_TIMEOUT_MS
@@ -943,6 +957,9 @@ class MainActivity : FlutterActivity() {
                 (now - lastNativeStylusActiveMs) < STYLUS_PALM_COOLDOWN_MS
             val stylusEngaged = isNativeStylusDown || hoverFresh || inCooldown
             val hasPalm = hasNativePalmPointer(ev)
+            if (ev.pointerCount >= 2 && !isNativeStylusDown && !hasPalm) {
+                return super.dispatchTouchEvent(ev)
+            }
             if (isInsideCanvasShieldRect(ev.x, ev.y) && (stylusEngaged || hasPalm)) {
                 suppressCurrentTouchStream = true
                 return true
@@ -961,7 +978,12 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun isStylusMotionEvent(ev: MotionEvent): Boolean {
+        return hasActiveStylusPointer(ev)
+    }
+
+    private fun hasActiveStylusPointer(ev: MotionEvent, excludeIndex: Int = -1): Boolean {
         for (i in 0 until ev.pointerCount) {
+            if (i == excludeIndex) continue
             val toolType = ev.getToolType(i)
             if (toolType == MotionEvent.TOOL_TYPE_STYLUS ||
                 toolType == MotionEvent.TOOL_TYPE_ERASER
