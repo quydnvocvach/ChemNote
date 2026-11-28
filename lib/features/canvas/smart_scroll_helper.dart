@@ -14,7 +14,7 @@ class SmartScrollTracker {
   static const double axisLockDistancePx = 5.0;
   static const int velocityWindowUs = 110000;
   static const int flingStaleThresholdUs = 150000;
-  static const double flingLaunchMinSpeed = 110.0;
+  static const double flingLaunchMinSpeed = 130.0;
   static const int _maxSamples = 12;
 
   SmartScrollAxis _axisLock = SmartScrollAxis.none;
@@ -167,6 +167,8 @@ class SmartScrollTracker {
       }
     }
 
+    final bool droppedTailJitter = endIndex < _samples.length;
+
     final int newestUs = _samples[endIndex - 1].timeUs;
     final int cutoffUs = newestUs - velocityWindowUs;
     int startIndex = 0;
@@ -191,10 +193,10 @@ class SmartScrollTracker {
 
     final double windowVx = sumDx / windowDt;
     final double windowVy = sumDy / windowDt;
-    final double estVx = _lastVx == 0.0
+    final double estVx = (droppedTailJitter || _lastVx == 0.0)
         ? windowVx
         : (windowVx * 0.72 + _lastVx * 0.28);
-    final double estVy = _lastVy == 0.0
+    final double estVy = (droppedTailJitter || _lastVy == 0.0)
         ? windowVy
         : (windowVy * 0.72 + _lastVy * 0.28);
 
@@ -202,9 +204,10 @@ class SmartScrollTracker {
     final double t = ((speedY - 360.0) / 2400.0).clamp(0.0, 1.0).toDouble();
     final double accelBoost = 1.0 + (t * t) * 2.6;
 
-    final double launchVy = (estVy * scrollMult * (0.98 + accelBoost * 0.58))
-        .clamp(-28000.0, 28000.0)
-        .toDouble();
+    final double launchVy =
+        (estVy * scrollMult * (0.95 + (accelBoost - 1.0) * 0.85))
+            .clamp(-28000.0, 28000.0)
+            .toDouble();
     final double launchVx = _axisLock == SmartScrollAxis.vertical
         ? 0.0
         : (estVx * 0.85).clamp(-6000.0, 6000.0).toDouble();
@@ -244,7 +247,7 @@ class SmartScrollTracker {
     final double windowVy = sumDy / windowDt;
 
     final double instDt = prevTimeUs > 0 && newestTimeUs > prevTimeUs
-        ? ((newestTimeUs - prevTimeUs) / 1e6).clamp(0.003, 0.08).toDouble()
+        ? ((newestTimeUs - prevTimeUs) / 1e6).clamp(0.003, 0.14).toDouble()
         : windowDt;
     final double instVx = instDx / instDt;
     final double instVy = instDy / instDt;
