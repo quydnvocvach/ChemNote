@@ -1222,7 +1222,7 @@ void main() {
         '/tmp/cover_b.png',
         '/tmp/cover_c.png',
       ]);
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await appState.flushPendingSaves();
 
       final reloaded = AppState(storage: storage);
       addTearDown(reloaded.dispose);
@@ -1642,8 +1642,8 @@ void main() {
       appState.setQuickGesturesEnabled(false);
       appState.setMPencilDoubleTapEraser(false);
 
-      // Give unawaited _persistPrefsMap microtask/IO a moment to flush to disk.
-      await Future<void>.delayed(const Duration(milliseconds: 80));
+      // Flush serialized sidecar writes deterministically before reload.
+      await appState.flushPendingSaves();
 
       final reloaded = AppState(storage: LocalStorageService(baseDirectory: tempDir));
       addTearDown(reloaded.dispose);

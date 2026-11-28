@@ -1619,6 +1619,7 @@ class AppState extends ChangeNotifier {
       _pendingSaveTimers.clear();
       if (_pendingSaveNotebooks.isEmpty) {
         _pendingSaveTriggerSync.clear();
+        await _storage.flushSidecarWrites();
         return;
       }
       final batch = List<Notebook>.from(_pendingSaveNotebooks.values);
@@ -1631,10 +1632,12 @@ class AppState extends ChangeNotifier {
           onNotebookChangedForSync?.call(nb);
         }
       }
+      await _storage.flushSidecarWrites();
       return;
     }
 
     if (_pendingSaveTriggerSync.isEmpty || _pendingSaveNotebooks.isEmpty) {
+      await _storage.flushSidecarWrites();
       return;
     }
     final editedIds = Set<String>.from(_pendingSaveTriggerSync);
@@ -1651,6 +1654,7 @@ class AppState extends ChangeNotifier {
       await _storage.saveNotebook(nb);
       onNotebookChangedForSync?.call(nb);
     }
+    await _storage.flushSidecarWrites();
   }
 
   @override

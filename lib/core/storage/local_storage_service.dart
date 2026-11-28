@@ -30,12 +30,38 @@ class LocalStorageService {
   final Uuid _uuid;
   final Map<String, Future<void>> _notebookWriteChains = {};
   final Map<String, Notebook> _latestPendingNotebookWrites = {};
+  final Map<String, Future<void>> _sidecarWriteChains = {};
+  int _tmpWriteSeq = 0;
 
   LocalStorageService({
     Directory? baseDirectory,
     Uuid? uuid,
   })  : _overrideBaseDir = baseDirectory,
         _uuid = uuid ?? const Uuid();
+
+  Future<void> _enqueueSidecarWrite(
+    String key,
+    Future<void> Function() action,
+  ) {
+    final prev = _sidecarWriteChains[key] ?? Future<void>.value();
+    late final Future<void> next;
+    next = prev.catchError((_) {}).then((_) => action()).whenComplete(() {
+      if (identical(_sidecarWriteChains[key], next)) {
+        _sidecarWriteChains.remove(key);
+      }
+    });
+    _sidecarWriteChains[key] = next;
+    return next;
+  }
+
+  Future<void> flushSidecarWrites() async {
+    while (_sidecarWriteChains.isNotEmpty) {
+      await Future.wait(
+        _sidecarWriteChains.values.toList(),
+        eagerError: false,
+      );
+    }
+  }
 
   Future<void> _atomicWriteString(
     File target,
@@ -47,7 +73,7 @@ class LocalStorageService {
       await parent.create(recursive: true);
     }
     final tmp = File(
-      '${target.path}.tmp.${DateTime.now().microsecondsSinceEpoch}',
+      '${target.path}.tmp.${DateTime.now().microsecondsSinceEpoch}.${++_tmpWriteSeq}',
     );
     try {
       await tmp.writeAsString(content, flush: flush);
@@ -143,10 +169,12 @@ class LocalStorageService {
     }
   }
 
-  Future<void> saveFolders(List<Folder> folders) async {
-    final file = await _getFoldersFile();
-    final encoded = jsonEncode(folders.map((f) => f.toJson()).toList());
-    await _atomicWriteString(file, encoded, flush: true);
+  Future<void> saveFolders(List<Folder> folders) {
+    return _enqueueSidecarWrite('folders', () async {
+      final file = await _getFoldersFile();
+      final encoded = jsonEncode(folders.map((f) => f.toJson()).toList());
+      await _atomicWriteString(file, encoded, flush: true);
+    });
   }
 
   Future<List<PenPreset>> loadFavoritePens() async {
@@ -164,14 +192,16 @@ class LocalStorageService {
     }
   }
 
-  Future<void> saveFavoritePens(List<PenPreset> pens) async {
-    try {
-      final file = await _getFavoritePensFile();
-      final encoded = jsonEncode(pens.map((p) => p.toJson()).toList());
-      await _atomicWriteString(file, encoded, flush: true);
-    } catch (_) {
-      // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
-    }
+  Future<void> saveFavoritePens(List<PenPreset> pens) {
+    return _enqueueSidecarWrite('favorite_pens', () async {
+      try {
+        final file = await _getFavoritePensFile();
+        final encoded = jsonEncode(pens.map((p) => p.toJson()).toList());
+        await _atomicWriteString(file, encoded, flush: true);
+      } catch (_) {
+        // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
+      }
+    });
   }
 
   Future<List<String>> loadCustomStickers() async {
@@ -187,13 +217,15 @@ class LocalStorageService {
     }
   }
 
-  Future<void> saveCustomStickers(List<String> stickerPaths) async {
-    try {
-      final file = await _getCustomStickersFile();
-      await _atomicWriteString(file, jsonEncode(stickerPaths), flush: true);
-    } catch (_) {
-      // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
-    }
+  Future<void> saveCustomStickers(List<String> stickerPaths) {
+    return _enqueueSidecarWrite('custom_stickers', () async {
+      try {
+        final file = await _getCustomStickersFile();
+        await _atomicWriteString(file, jsonEncode(stickerPaths), flush: true);
+      } catch (_) {
+        // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
+      }
+    });
   }
 
   Future<List<String>> loadCustomCovers() async {
@@ -209,13 +241,15 @@ class LocalStorageService {
     }
   }
 
-  Future<void> saveCustomCovers(List<String> coverPaths) async {
-    try {
-      final file = await _getCustomCoversFile();
-      await _atomicWriteString(file, jsonEncode(coverPaths), flush: true);
-    } catch (_) {
-      // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
-    }
+  Future<void> saveCustomCovers(List<String> coverPaths) {
+    return _enqueueSidecarWrite('custom_covers', () async {
+      try {
+        final file = await _getCustomCoversFile();
+        await _atomicWriteString(file, jsonEncode(coverPaths), flush: true);
+      } catch (_) {
+        // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
+      }
+    });
   }
 
   Future<List<String>> loadRandomCovers() async {
@@ -231,13 +265,15 @@ class LocalStorageService {
     }
   }
 
-  Future<void> saveRandomCovers(List<String> coverPaths) async {
-    try {
-      final file = await _getRandomCoversFile();
-      await _atomicWriteString(file, jsonEncode(coverPaths), flush: true);
-    } catch (_) {
-      // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
-    }
+  Future<void> saveRandomCovers(List<String> coverPaths) {
+    return _enqueueSidecarWrite('random_covers', () async {
+      try {
+        final file = await _getRandomCoversFile();
+        await _atomicWriteString(file, jsonEncode(coverPaths), flush: true);
+      } catch (_) {
+        // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
+      }
+    });
   }
 
   Future<String?> loadPdfExportDirectory() async {
@@ -302,13 +338,15 @@ class LocalStorageService {
     }
   }
 
-  Future<void> savePenPrefs(Map<String, dynamic> prefs) async {
-    try {
-      final file = await _getPenPrefsFile();
-      await _atomicWriteString(file, jsonEncode(prefs), flush: true);
-    } catch (_) {
-      // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
-    }
+  Future<void> savePenPrefs(Map<String, dynamic> prefs) {
+    return _enqueueSidecarWrite('pen_prefs', () async {
+      try {
+        final file = await _getPenPrefsFile();
+        await _atomicWriteString(file, jsonEncode(prefs), flush: true);
+      } catch (_) {
+        // Bỏ qua an toàn nếu chạy trên môi trường không có quyền ghi tệp.
+      }
+    });
   }
 
   Future<List<Notebook>> loadNotebooks() async {
